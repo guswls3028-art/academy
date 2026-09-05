@@ -5,6 +5,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Count, Q, Exists, OuterRef, Prefetch
 from django.http import Http404
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 from drf_spectacular.utils import OpenApiParameter, OpenApiTypes, extend_schema
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -337,11 +338,21 @@ class SessionViewSet(viewsets.ModelViewSet):
     # ------------------------------------------------------------
     # 운영 페이지 좌측 트리 전용 API
     # ------------------------------------------------------------
+    @extend_schema(
+        parameters=[
+            OpenApiParameter("year", OpenApiTypes.INT, required=False),
+            OpenApiParameter("month", OpenApiTypes.INT, required=False),
+            OpenApiParameter("date_from", OpenApiTypes.DATE, required=False),
+            OpenApiParameter("date_to", OpenApiTypes.DATE, required=False),
+        ]
+    )
     @action(detail=False, methods=["get"])
     def tree(self, request):
         """
         GET /clinic/sessions/tree/?year=YYYY&month=MM
+        GET /clinic/sessions/tree/?date_from=YYYY-MM-DD&date_to=YYYY-MM-DD
         - 운영 페이지 좌측 트리 전용
+        - 날짜 범위 모드는 이전 주 복사처럼 월 경계를 건너는 최대 31일 조회용
         - serializer 우회 (UI 최적화 목적)
         """
         tenant = getattr(request, "tenant", None)
@@ -350,12 +361,50 @@ class SessionViewSet(viewsets.ModelViewSet):
                 {"tenant": "테넌트 컨텍스트가 필요합니다. (호스트 또는 X-Tenant-Code 확인)"}
             )
 
-        year = parse_query_int(
-            request.query_params, "year", min_value=1900, max_value=9999
-        )
-        month = parse_query_int(
-            request.query_params, "month", min_value=1, max_value=12
-        )
+        raw_year = request.query_params.get("year")
+        raw_month = request.query_params.get("month")
+        raw_date_from = request.query_params.get("date_from")
+        raw_date_to = request.query_params.get("date_to")
+        uses_month = raw_year is not None or raw_month is not None
+        uses_range = raw_date_from is not None or raw_date_to is not None
+
+        if uses_range:
+            try:
+                date_from = parse_date(raw_date_from or "")
+                date_to = parse_date(raw_date_to or "")
+            except ValueError:
+                date_from = date_to = None
+            if (
+                uses_month
+                or date_from is None
+                or date_to is None
+                or date_from > date_to
+                or (date_to - date_from).days > 30
+            ):
+                return Response(
+                    {
+                        "detail": (
+                            "date_from and date_to must be a valid inclusive range "
+                            "of at most 31 days and cannot be combined with year/month"
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            date_filter = {"date__range": (date_from, date_to)}
+        else:
+            year = parse_query_int(
+                request.query_params, "year", min_value=1900, max_value=9999
+            )
+            month = parse_query_int(
+                request.query_params, "month", min_value=1, max_value=12
+            )
+            if not year or not month:
+                return Response(
+                    {"detail": "year and month are required"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            date_filter = {"date__year": year, "date__month": month}
+
         raw_section = request.query_params.get("section")
         section_id = (
             None
@@ -363,21 +412,14 @@ class SessionViewSet(viewsets.ModelViewSet):
             else parse_query_int(request.query_params, "section", min_value=1)
         )
 
-        if not year or not month:
-            return Response(
-                {"detail": "year and month are required"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
         qs = (
             Session.objects
             .filter(
                 tenant=tenant,
-                date__year=year,
-                date__month=month,
+                **date_filter,
             )
             .select_related("section")
-            .prefetch_related(self._booking_capacity_prefetch(tenant))
+            .prefetch_related("target_lectures", self._booking_capacity_prefetch(tenant))
             .annotate(
                 participant_count=Count("participants"),
                 booked_count=Count(
@@ -423,6 +465,7 @@ class SessionViewSet(viewsets.ModelViewSet):
                 "location": s.location,
                 "target_grade": s.target_grade,
                 "target_school_type": s.target_school_type,
+                "target_lecture_ids": sorted(lecture.id for lecture in s.target_lectures.all()),
                 "has_target_lectures": s._has_target_lectures,
                 "duration_minutes": s.duration_minutes,
                 "participant_count": s.participant_count,
@@ -434,6 +477,7 @@ class SessionViewSet(viewsets.ModelViewSet):
                 "section": s.section_id,
                 "section_label": s.section.label if s.section_id else None,
                 "section_type": s.section.section_type if s.section_id else None,
+                "allow_time_preference": s.allow_time_preference,
                 "allow_multi_slot_booking": s.allow_multi_slot_booking,
                 "booking_mode": s.booking_mode,
                 "booking_interval_minutes": s.booking_interval_minutes,
