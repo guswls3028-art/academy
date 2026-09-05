@@ -32,6 +32,25 @@ implemented behavior into the current-state owner.
 
 ## Backend boundaries
 
+### Public feature availability
+
+- Every non-Beta feature exposed to an authorized production user must retain a
+  working positive path. A fail-closed response, validation guard, explanatory
+  error, support handoff, or disabled action does not complete a repair when the
+  underlying user journey is generally available.
+- Only a feature visibly labeled `Beta` before entry may intentionally be
+  incomplete or unavailable. The UI must state its limitation and safe recovery;
+  do not add a Beta label after a regression to avoid restoring the contract.
+- If the positive path cannot be kept safe, remove the public entry point from
+  that release instead of exposing an unusable feature.
+- Backend completion must prove the authorized success transition and its
+  persisted/downstream projections after reload or replay, alongside tenant,
+  permission, denial, repeat, and idempotency checks. A denial-only test suite is
+  insufficient.
+- Treat any previously valid teacher, assistant, student, or guardian workflow
+  made unavailable by a new policy, default, state guard, or recipient rule as a
+  product regression even when the guard itself behaves as implemented.
+
 - Resolve tenant at the request/job boundary and scope every business query.
   Missing or ambiguous tenant context hard-fails; no default tenant, hostname
   override, or cross-tenant fallback.
