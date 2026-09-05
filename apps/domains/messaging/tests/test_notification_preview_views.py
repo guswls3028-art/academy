@@ -137,19 +137,23 @@ class NotificationPreviewViewValidationTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.data["detail"], "send_to는 'parent' 또는 'student'만 가능합니다.")
 
-    def test_manual_score_preview_rejects_student_recipient(self):
-        response = self._post(
-            ManualNotificationPreviewView,
-            "/api/v1/messaging/manual-notification/preview/",
-            {
-                "trigger": "exam_score_published",
-                "student_ids": [1],
-                "send_to": "student",
-            },
-        )
+    def test_manual_score_preview_allows_student_recipient(self):
+        with patch(
+            "apps.domains.messaging.views_notification.build_student_list_preview",
+            return_value={"recipients": [], "total_count": 0, "excluded_count": 0},
+        ) as build_preview:
+            response = self._post(
+                ManualNotificationPreviewView,
+                "/api/v1/messaging/manual-notification/preview/",
+                {
+                    "trigger": "exam_score_published",
+                    "student_ids": [1],
+                    "send_to": "student",
+                },
+            )
 
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.data["code"], "grade_recipient_policy")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(build_preview.call_args.kwargs["send_to"], "student")
 
     def test_manual_preview_rejects_invalid_student_ids(self):
         response = self._post(

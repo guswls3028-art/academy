@@ -359,11 +359,6 @@ class ManualNotificationPreviewView(APIView):
         # 매치업 보고서 (score 템플릿) — 강사→학원 owner/admin 수동 발송 가능
         "matchup_report_submitted",
     }
-    PARENT_ONLY_TRIGGERS = {
-        "exam_score_published",
-        "monthly_report_generated",
-    }
-
     def post(self, request):
         tenant = getattr(request, "tenant", None)
         if not tenant:
@@ -402,14 +397,6 @@ class ManualNotificationPreviewView(APIView):
         if send_to not in ("parent", "student"):
             return Response(
                 {"detail": "send_to는 'parent' 또는 'student'만 가능합니다."},
-                status=http_status.HTTP_400_BAD_REQUEST,
-            )
-        if trigger in self.PARENT_ONLY_TRIGGERS and send_to != "parent":
-            return Response(
-                {
-                    "detail": "성적 알림은 보호자에게만 발송할 수 있습니다.",
-                    "code": "grade_recipient_policy",
-                },
                 status=http_status.HTTP_400_BAD_REQUEST,
             )
         if context_source is not None:
