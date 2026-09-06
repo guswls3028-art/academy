@@ -693,7 +693,13 @@ fingerprint가 동일하며, 새 통합 선택 job만 원본 유형·ID·수강 
 이미 재채점되었거나 문항·해설이 바뀌었으면 job을 만들지 않고 `409`로 최신
 조회부터 다시 하도록 안내한다. queue payload도 같은 fingerprint를 담고 worker는
 렌더 직전에 다시 계산해 불일치하면 파일을 만들지 않는다. 배포 전 생성된 빈
-fingerprint job은 기존 동작으로 처리한다. 두 형식 모두
+fingerprint job은 기존 동작으로 처리한다. 5분 이상 갱신되지 않은 `PENDING` 또는
+`RUNNING` job은 새 요청 transaction에서 `FAILED`로 닫은 뒤 새 generation을 만든다.
+callback은 tenant와 job ID를 다시 검증하고 `PENDING|RUNNING`에서만
+`DONE|FAILED`로 compare-and-set한다. 따라서 이미 `FAILED`로 닫힌 이전 generation의
+늦거나 중복된 성공·실패 callback은 상태, 오류, 파일 경로를 되살리거나 덮어쓰지
+않으며 다운로드에는 새 generation이 확정한 파일만 노출된다. 이 규칙은 기존
+운영 row를 일괄 수정하지 않고 이후 callback 전이에만 적용한다. 두 형식 모두
 앞쪽은 답이 없는 문제와 풀이 공간, 뒤쪽은 분리 표지 뒤의 정답 및 선생님 원본
 해설이다. 문제 구간은 Ymath 학생 배포 양식을 기준으로 세로 A4의 좌우 2단을
 동일 폭으로 쓰고, 바깥 여백 16mm와 단 사이 8mm를 둔다. 원본 문항 하나를

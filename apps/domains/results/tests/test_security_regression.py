@@ -427,6 +427,184 @@ class TestC4WrongNotePkCollisionGuard(_Mixin, TestCase):
         self.assertEqual(pdf_job.file_path, expected_key)
 
     @patch(
+        "apps.domains.results.views.wrong_note_pdf_status_view.generate_presigned_get_url_storage",
+        return_value="https://storage.test/current-wrong-note.pdf",
+    )
+    @patch(
+        "apps.domains.results.services.wrong_note_pdf_worker.generate_and_store_wrong_note_pdf"
+    )
+    @patch(
+        "apps.domains.results.views.wrong_note_pdf_view.publish_wrong_note_pdf_ai_job",
+        return_value=True,
+    )
+    def test_stale_retry_rejects_old_terminal_callbacks_and_exposes_only_new_file(
+        self,
+        _publish,
+        generate,
+        presign,
+    ):
+        old_job = WrongNotePDF.objects.create(
+            enrollment=self.enroll_a,
+            lecture=self.lecture,
+            status=WrongNotePDF.Status.RUNNING,
+        )
+        old_contract = self._wrong_note_ai_contract(old_job)
+        WrongNotePDF.objects.filter(id=old_job.id).update(
+            updated_at=timezone.now() - timedelta(minutes=6),
+        )
+
+        request = self.factory.post(
+            "/api/v1/results/wrong-notes/pdf/",
+            data={"enrollment_id": self.enroll_a.id},
+            format="json",
+        )
+        force_authenticate(request, user=self.staff_user)
+        request.tenant = self.tenant
+
+        created = WrongNotePDFCreateView.as_view()(request)
+
+        self.assertEqual(created.status_code, 202, created.data)
+        new_job = WrongNotePDF.objects.get(id=created.data["job_id"])
+        old_job.refresh_from_db()
+        self.assertEqual(old_job.status, WrongNotePDF.Status.FAILED)
+        self.assertEqual(new_job.status, WrongNotePDF.Status.PENDING)
+        stale_state = (
+            old_job.status,
+            old_job.file_path,
+            old_job.error_message,
+            old_job.updated_at,
+        )
+
+        old_key = (
+            f"tenants/{self.tenant.id}/results/wrong-notes/{old_job.id}.pdf"
+        )
+        for callback_status, payload, callback_error in (
+            (
+                "DONE",
+                {
+                    "outcome": WrongNotePDF.Status.DONE,
+                    "wrong_note_pdf_job_id": old_job.id,
+                    "file_path": old_key,
+                },
+                None,
+            ),
+            (
+                "DONE",
+                {
+                    "outcome": WrongNotePDF.Status.FAILED,
+                    "wrong_note_pdf_job_id": old_job.id,
+                    "error_message": "late worker failure",
+                    "file_path": "",
+                },
+                None,
+            ),
+            ("FAILED", {}, "late transport failure"),
+        ):
+            handled = dispatch_ai_result_to_domain(
+                job_id=old_contract.id,
+                status=callback_status,
+                result_payload=payload,
+                error=callback_error,
+                source_domain=old_contract.source_domain,
+                source_id=old_contract.source_id,
+            )
+            self.assertTrue(handled)
+            old_job.refresh_from_db()
+            self.assertEqual(
+                (
+                    old_job.status,
+                    old_job.file_path,
+                    old_job.error_message,
+                    old_job.updated_at,
+                ),
+                stale_state,
+            )
+
+        new_ai_job = AIJobModel.objects.get(
+            source_domain="results_wrong_note_pdf",
+            source_id=str(new_job.id),
+        )
+        new_contract = AIJob(
+            id=new_ai_job.job_id,
+            type=new_ai_job.job_type,
+            tenant_id=new_ai_job.tenant_id,
+            source_domain=new_ai_job.source_domain,
+            source_id=new_ai_job.source_id,
+            payload=new_ai_job.payload,
+        )
+        new_key = (
+            f"tenants/{self.tenant.id}/results/wrong-notes/{new_job.id}.pdf"
+        )
+        generate.return_value = new_key
+
+        result = handle_wrong_note_pdf_generation_job(new_contract)
+        handled = dispatch_ai_result_to_domain(
+            job_id=new_contract.id,
+            status=result.status,
+            result_payload=result.result,
+            error=result.error,
+            source_domain=new_contract.source_domain,
+            source_id=new_contract.source_id,
+        )
+
+        self.assertTrue(handled)
+        new_job.refresh_from_db()
+        self.assertEqual(new_job.status, WrongNotePDF.Status.DONE)
+        self.assertEqual(new_job.file_path, new_key)
+        self.assertEqual(
+            WrongNotePDF.objects.filter(
+                enrollment__tenant=self.tenant,
+                status__in=[
+                    WrongNotePDF.Status.PENDING,
+                    WrongNotePDF.Status.RUNNING,
+                ],
+            ).count(),
+            0,
+        )
+        self.assertEqual(
+            WrongNotePDF.objects.filter(
+                enrollment__tenant=self.tenant,
+                status=WrongNotePDF.Status.DONE,
+            ).values_list("id", flat=True).get(),
+            new_job.id,
+        )
+
+        old_status_request = self.factory.get(
+            f"/api/v1/results/wrong-notes/pdf/{old_job.id}/"
+        )
+        force_authenticate(old_status_request, user=self.staff_user)
+        old_status_request.tenant = self.tenant
+        old_status = WrongNotePDFStatusView.as_view()(
+            old_status_request,
+            job_id=old_job.id,
+        )
+        new_status_request = self.factory.get(
+            f"/api/v1/results/wrong-notes/pdf/{new_job.id}/"
+        )
+        force_authenticate(new_status_request, user=self.staff_user)
+        new_status_request.tenant = self.tenant
+        new_status = WrongNotePDFStatusView.as_view()(
+            new_status_request,
+            job_id=new_job.id,
+        )
+
+        self.assertEqual(old_status.status_code, 200)
+        self.assertEqual(old_status.data["status"], WrongNotePDF.Status.FAILED)
+        self.assertEqual(old_status.data["file_url"], "")
+        self.assertEqual(new_status.status_code, 200)
+        self.assertEqual(new_status.data["status"], WrongNotePDF.Status.DONE)
+        self.assertEqual(
+            new_status.data["file_url"],
+            "https://storage.test/current-wrong-note.pdf",
+        )
+        presign.assert_called_once_with(
+            key=new_key,
+            expires_in=3600,
+            filename=f"wrong-note-{new_job.id}.pdf",
+            content_type="application/pdf",
+        )
+
+    @patch(
         "apps.domains.results.services.wrong_note_pdf_worker.generate_and_store_wrong_note_pdf"
     )
     def test_tools_worker_scopes_pdf_lookup_by_contract_tenant(self, generate):
