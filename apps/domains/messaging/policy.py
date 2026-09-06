@@ -148,9 +148,8 @@ IMPLEMENTED_AUTO_TRIGGERS: frozenset = frozenset([
     "password_find_otp",
     "password_reset_student",
     "password_reset_parent",
-    # 출결 (즉시 발화)
-    "check_in_complete",
-    "absent_occurred",
+    # 일반 출결 저장은 자동 발화하지 않는다. 선생님이 대상과 문구를 확인한
+    # 수동 미리보기/확정 경로에서만 check_in_complete/absent_occurred를 사용한다.
     # 클리닉/상담 (즉시 발화)
     "clinic_reservation_created",
     "clinic_reservation_changed",
