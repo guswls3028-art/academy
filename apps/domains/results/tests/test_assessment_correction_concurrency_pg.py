@@ -14,17 +14,11 @@ from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import close_old_connections, connection, transaction
 from django.test import TransactionTestCase
+from django.urls import resolve
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps.core.models import Tenant, TenantMembership
 from apps.domains.results.views.session_scores_view import SessionScoreCorrectionView
-from apps.domains.submissions.views.homework_submission_media_view import (
-    HomeworkSubmissionMediaCollectionView,
-    HomeworkSubmissionMediaDetailView,
-)
-from apps.domains.submissions.views.homework_submissions_list_view import (
-    HomeworkSubmissionsListView,
-)
 
 
 pytestmark = pytest.mark.django_db(transaction=True)
@@ -85,6 +79,11 @@ class AssessmentCorrectionConcurrencyPGTests(TransactionTestCase):
             username=f"correction-student-{suffix}",
             tenant=self.tenant,
         )
+        TenantMembership.ensure_active(
+            tenant=self.tenant,
+            user=self.student_user,
+            role="student",
+        )
         student = Student.objects.create(
             tenant=self.tenant,
             user=self.student_user,
@@ -138,10 +137,10 @@ class AssessmentCorrectionConcurrencyPGTests(TransactionTestCase):
         )
         request.tenant = self.tenant
         force_authenticate(request, user=self.student_user)
-        return HomeworkSubmissionMediaCollectionView.as_view()(
-            request,
-            homework_id=self.homework.id,
+        match = resolve(
+            f"/api/v1/submissions/submissions/homework/{self.homework.id}/media/"
         )
+        return match.func(request, **match.kwargs)
 
     def _student_delete(self, *, media_id: int):
         request = APIRequestFactory().delete(
@@ -151,11 +150,10 @@ class AssessmentCorrectionConcurrencyPGTests(TransactionTestCase):
         )
         request.tenant = self.tenant
         force_authenticate(request, user=self.student_user)
-        return HomeworkSubmissionMediaDetailView.as_view()(
-            request,
-            homework_id=self.homework.id,
-            media_id=str(media_id),
+        match = resolve(
+            f"/api/v1/submissions/submissions/homework/{self.homework.id}/media/{media_id}/"
         )
+        return match.func(request, **match.kwargs)
 
     def _teacher_complete(self):
         request = APIRequestFactory().patch(
@@ -183,10 +181,10 @@ class AssessmentCorrectionConcurrencyPGTests(TransactionTestCase):
         )
         request.tenant = self.tenant
         force_authenticate(request, user=self.admin)
-        return HomeworkSubmissionsListView.as_view()(
-            request,
-            homework_id=self.homework.id,
+        match = resolve(
+            f"/api/v1/submissions/submissions/homework/{self.homework.id}/"
         )
+        return match.func(request, **match.kwargs)
 
     def test_first_unscored_homework_decision_honors_expected_updated_at(self):
         correction_created = threading.Event()
