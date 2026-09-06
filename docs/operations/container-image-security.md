@@ -300,26 +300,28 @@ development 진입 전 ECR High 게이트에서 신규 공개된 native-library 
 `1.3.dfsg+really1.3.1-1`)은 여섯 repository 모두에 있었고,
 `CVE-2026-86140` (`libxml2`
 `2.12.7+dfsg+really2.9.14-2.1+deb13u3`)은 API·Video·AI·Tools 네
-repository에만 있었다. exact High 수는 Base 5, API 19, Video 6,
-Messaging 5, AI 19, Tools 19였다. Debian tracker에서 pcre2 trixie는
-`no-dsa`/minor이며 10.48만 unstable에 있고, zlib은 unstable까지 미수정,
-libxml2는 sid 2.15.4에만 수정본이 있어 trixie와 다른 suite를 혼합하지 않는다.
+repository에만 있었다. 실패한 run은 development/preprod/production을 모두
+건너뛰고 shared lock을 반환했다.
 
-pcre2 finding은 공격자 지정 recursive DFA 정규식과 native
-`pcre2_dfa_match` workspace가 모두 필요하지만 Academy entrypoint는 PCRE2를
-호출하지 않고 제품 정규식은 Python `re`가 소유한다. zlib finding은 non-blocking
-native `gzwrite`가 정지한 뒤 `gzprintf`/`gzvprintf`를 호출해야 하며, 저장소의
-zlib 사용은 Python의 bounded decompression이고 해당 native formatted-write
-API가 없다. libxml2 finding은 DTD content model을 `xmlSnprintfElements`로
-표현하는 검증 경로에 있다. 업로드 XML은 Python `ElementTree`로 읽고 HWPX 경로는
-application-owned tree 생성만 하며 DTD validation을 하지 않는다. Video의 고정
-FFmpeg는 external-library autodetection을 끄고 libx264만 명시해 libxml2 호출
-경로를 포함하지 않는다. 따라서 완료 scan이 증명한 exact
-repository/CVE/package/version만 기존과 같은 2026-09-19 만료로 한시 수용한다.
-실패한 run은 development/preprod/production을 모두 건너뛰고 shared lock을
-반환했다. 다음 후보는 여섯 새 digest의 exact scan 일치부터 persistent
-development, isolated preprod, production 검증까지 전체 게이트를 다시 통과해야
-하며 Debian trixie 수정본이 나오면 해당 acceptance와 상한을 즉시 낮춘다.
+이 세 finding은 High 상한이나 acceptance를 늘리지 않고
+`docker/native-security/build-fixed-libs.sh`가 공통 base build에서 수정한다.
+모든 원본과 patch는 HTTPS URL과 SHA-256으로 고정한다. zlib은 공개된
+`e3dc0a85...` 수정 커밋을 기존 `zlib1g` ABI로 패키징하고, pcre2는 수정 릴리스
+10.48의 8-bit shared library만 기존 `libpcre2-8-0` ABI로 패키징한다. libxml2는
+새 SONAME으로 직접 교체하지 않는다. trixie `deb13u3` 전체 patch series를 먼저
+적용한 2.9.14 source에 공식 `d1686f91...` bounds-check patch만 backport하여
+`libxml2.so.2`를 유지한다. 세 package는 base runtime의 같은 Debian package
+이름을 원자적으로 upgrade하므로 이후 service `apt` layer가 취약 버전으로
+downgrade하지 않는다.
+
+Base build는 세 upstream test suite, exact package 최소 버전, Python zlib
+round-trip, libxml2 dynamic load, PCRE2 match를 모두 확인한다. base/security 파일이
+바뀐 PR은 `Native security arm64 image contract`가 production과 같은 arm64 이미지를
+실제로 build하고 같은 ABI 확인을 컨테이너 안에서 반복한다. 어떤 source hash,
+patch, build, ABI load 또는 version check가 달라도 이미지 생성 자체가 실패한다.
+다음 후보는 기존 상한 Base 3, API 16, Video 3, Messaging 3, AI 16, Tools 16을
+그대로 만족하면서 세 CVE가 여섯 완료 scan에 없음을 입증해야만 persistent
+development, isolated preprod, production 순서로 진행한다.
 
 집중 검증:
 

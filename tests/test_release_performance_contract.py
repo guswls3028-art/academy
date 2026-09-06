@@ -5,6 +5,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).parents[1]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "v1-build-and-push-latest.yml"
+QUALITY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "quality-gate.yml"
 
 PRODUCTION_DOCKERFILES = {
     "api": REPO_ROOT / "docker" / "api" / "Dockerfile",
@@ -39,6 +40,20 @@ def test_selected_base_build_refreshes_apt_packages() -> None:
         "build-args: APT_REFRESH_TOKEN="
         "${{ github.run_id }}-${{ github.run_attempt }}"
     ) in workflow
+    assert 'changed_matches "^docker/native-security/" && BASE=true' in workflow
+
+
+def test_native_security_changes_build_and_run_the_arm64_base_in_pr() -> None:
+    workflow = _read(QUALITY_WORKFLOW)
+
+    assert 'docker/Dockerfile.base docker/native-security/' in workflow
+    assert "name: Native security arm64 image contract" in workflow
+    assert "platforms: linux/arm64" in workflow
+    assert "load: true" in workflow
+    assert "academy-base:native-security-check sh -ec" in workflow
+    assert "docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8" in workflow
+    assert "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c" in workflow
+    assert "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a" in workflow
 
 
 def test_runtime_dependencies_precede_frequently_changed_source() -> None:
@@ -124,12 +139,12 @@ def test_reviewed_runtime_images_own_exact_high_budgets() -> None:
 
     assert document["schemaVersion"] == 3
     assert baseline == {
-        "academy-base": 5,
-        "academy-api": 19,
-        "academy-video-worker": 6,
-        "academy-messaging-worker": 5,
-        "academy-ai-worker-cpu": 19,
-        "academy-tools-worker": 19,
+        "academy-base": 3,
+        "academy-api": 16,
+        "academy-video-worker": 3,
+        "academy-messaging-worker": 3,
+        "academy-ai-worker-cpu": 16,
+        "academy-tools-worker": 16,
     }
     exact_counts = {repository: 0 for repository in baseline}
     assert "knownHighFindings" not in document
