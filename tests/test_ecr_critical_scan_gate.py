@@ -360,6 +360,7 @@ def test_base_image_backports_new_native_library_fixes_without_acceptance() -> N
         assert f'ge "{minimum}"' in dockerfile
     for cve in ("CVE-2026-85091", "CVE-2026-86140", "CVE-2026-86145"):
         assert cve in build_script
+    assert "autoreconf --force --install" in build_script
     assert build_script.count("sha256sum --check") == 1
     assert build_script.count("download \\") == 5
 

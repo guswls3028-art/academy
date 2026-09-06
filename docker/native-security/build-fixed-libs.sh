@@ -149,6 +149,7 @@ tar -xJf "${libxml2_debian}" -C "${libxml2_source}"
     QUILT_PATCHES=debian/patches quilt push -a
     patch --batch --forward -p1 <"${libxml2_fix}"
     grep -Fq 'if (size - len < 50)' valid.c
+    autoreconf --force --install
     CFLAGS='-O2 -fstack-protector-strong -fPIC' \
         LDFLAGS='-Wl,-z,relro -Wl,-z,now' \
         ./configure \
