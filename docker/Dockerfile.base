@@ -36,7 +36,7 @@ RUN test -n "${APT_REFRESH_TOKEN}" \
 WORKDIR /build
 
 COPY docker/native-security/build-fixed-libs.sh /usr/local/bin/build-fixed-libs.sh
-RUN build-fixed-libs.sh /build/native-security/out
+RUN sh /usr/local/bin/build-fixed-libs.sh /build/native-security/out
 
 # 의존성 파일 복사 및 설치 (pip 업그레이드와 단일 RUN으로 레이어 최소화)
 COPY requirements/constraints.txt ./requirements/constraints.txt
