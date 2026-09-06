@@ -59,7 +59,7 @@
 2. **SYSTEM_AUTO 외에는 사용자가 투명하게 보고 테넌트별로 통제 가능.** 한 학원의 선택을 다른 학원이나 공통 기본값에 복사하지 않는다.
 3. **일반 강의와 클리닉 정책 절대 분리.**
 4. **숨겨진 자동 발송 금지.** 모든 발송 경로가 설정 콘솔에 노출.
-5. **공용 알림톡 only.** 제품·고객·운영 경로 모두 SMS/LMS를 실발송하지 않는다. tenant별 PFID/provider도 사용하지 않으며, 운영 오류 알림은 Slack webhook만 사용한다.
+5. **검증 채널 알림톡 only.** 제품·고객·운영 경로 모두 SMS/LMS를 실발송하지 않는다. 공급자와 인증 키는 공용 Solapi만 사용한다. 기본은 공용 owner 채널이며, 운영자가 공급자 실조회로 새 `AlimtalkChannelBinding`을 만든 tenant만 본문 지문이 같은 승인 템플릿 매핑을 통해 자기 카카오 채널을 사용한다. 과거 `Tenant.kakao_pfid`, tenant provider, 자체 API 키는 읽지 않는다. 운영 오류 알림은 Slack webhook만 사용한다.
 6. **fallback 금지.** exact trigger의 공용 승인 템플릿 또는 명시 unified category 템플릿이 없으면 발송하지 않는다.
 7. **비알림톡 입력 실패 폐쇄.** SMS/LMS와 알 수 없는 `message_mode`를 알림톡으로 보정하지 않는다. 신규 코드에는 SMS 발송·enqueue 호환 callable이나 `sms_allowed` capability를 만들지 않는다.
 8. **클리닉 하원과 학습 완료 분리.** `clinic_check_out`은 `checked_out_at`과 `checkout_mode`, `clinic_self_study_completed`는 `completed_at`을 소유한다. `arrival_not_recorded`는 등원 상태/시각을 만들지 않는다. 하원은 승인된 공용 `clinic_info` 봉투에 하원 전용 본문·실제 시각을 담고, 다른 trigger나 SMS/LMS로 대체하지 않는다.
@@ -88,11 +88,13 @@ ON 한다.
 않으며, 일반 강의 입실·결석 안내는 메시징 도메인의 출결 알림
 preview→confirm 경로에서 선생이 명시적으로 확인한 경우에만 생성한다.
 
-## 공용 알림톡 정책
+## 검증 채널 라우팅 정책
 
-- 모든 알림톡 큐 payload는 `OWNER_TENANT_ID` 공용 채널로 정규화한다.
-- 원 업무 테넌트는 `source_tenant_id` 등 로그 메타데이터로만 남긴다.
-- tenant별 AutoSendConfig는 enabled/delay/본문 메모 등 업무 설정으로만 사용하고, Solapi 검수 템플릿/PFID/provider의 출처가 될 수 없다.
+- 모든 알림톡 큐 payload는 계속 `OWNER_TENANT_ID`와 공용 template ID로 정규화하며, 원 업무 테넌트는 서명된 `source_tenant_id`로 보존한다.
+- worker는 공용 template 허용 검증을 먼저 끝낸 뒤 provider 호출 직전에만 `AlimtalkChannelBinding`을 조회한다. binding이 `active`이고 같은 공용 template ID의 `AlimtalkTemplateBinding`이 `APPROVED`이며 source/channel 본문 지문이 같을 때만 tenant PFID/template ID로 치환한다.
+- 검수 중(`pending_templates`)에는 공용 owner 채널을 계속 사용한다. 활성 binding의 템플릿 매핑이 없거나 지문이 달라졌으면 API/UI에 `suspended`로 투영하고 공용으로 조용히 되돌리지 않고 fail-closed한다.
+- tenant별 AutoSendConfig는 enabled/delay/본문 메모 등 업무 설정으로만 사용한다. 과거 `Tenant.kakao_pfid`, `messaging_provider`, 자체 Solapi/Ppurio 키와 MessageTemplate 승인 흔적은 새 binding의 출처가 될 수 없다.
+- 공급자·API 키·발신번호는 공용 Solapi 설정만 사용하며 tenant별 credential/provider 분기는 복구하지 않는다.
 - `send_alimtalk_via_owner()`는 `OWNER_TENANT_ID`의 exact trigger AutoSendConfig에 연결된 APPROVED 템플릿만 사용한다.
 - `password_reset_*` 또는 `password_find_otp`가 `registration_approved_*` 템플릿으로 대체되는 fallback은 금지한다.
 - 2026-07-08 Solapi 실등록 감사 기준 `notice_payment` SID는 provider에 없으므로 결제 트리거는 논리 매핑을 유지하되 fail-closed다.
@@ -122,6 +124,7 @@ preview→confirm 경로에서 선생이 명시적으로 확인한 경우에만 
 18. **공용 owner와 고객 설정 분리** — 공용 owner tenant는 승인 채널 인프라의 소유자일 뿐 고객별 전체 사용 설정의 전역 기준이 아니다. owner 학원이 자기 알림톡을 꺼도 다른 업무 tenant의 발송·계정 복구는 계속되며, owner 경계에서 전역으로 공유되는 차단은 테스트 tenant와 긴급 운영 hold뿐이다.
 19. **공급자 계정 일일 브레이크** — 시간당 tenant 한도와 별개로 모든 업무 tenant가 공유하는 공급자 계정에 KST 날짜 기준 `MESSAGING_PROVIDER_DAILY_DISPATCH_LIMIT`(기본 900) 한도를 적용한다. `ScheduledNotification.last_attempt_at` 예약과 outbox가 없는 legacy `NotificationLog`를 중복 없이 합산하며, 한도에 도달한 신규 outbox는 실패/폐기하지 않고 다음 날 00:05 KST로 이월한다. PostgreSQL transaction advisory lock이 tenant 간 동시 claim을 직렬화하며 owner tenant 행의 존재 여부에는 의존하지 않는다. 공급자가 `QuotaExceeded` 또는 `NotEnoughBalance`로 접수 전 거절하면 provider ID·차감이 없는 확정 실패로 닫고 `ambiguous`로 남기지 않는다. 자동 재발송은 하지 않는다.
 20. **개인정보 없는 incident trace** — outbox와 worker log는 원문 번호 대신 `MESSAGING_TENANT_BINDING_KEY` HMAC `recipient_fingerprint`를 저장하고, `origin_type`/`origin_id`로 Excel job·수동 batch·domain object를 연결한다. terminal payload에는 이 비식별 메타데이터와 기존 dispatch/business key만 남긴다. 키 순환 중 조회는 fallback key 지문도 함께 계산한다.
+20-A. **tenant 채널 등록·검수·테스트** — `configure_tenant_alimtalk_channel`은 dry-run 기본이며 tenant code를 정확히 1건으로 확정하고 공용 Solapi 계정에서 새 channel ID가 실제 조회될 때만 새 binding을 기록한다. 현재 공용 승인 템플릿을 provider 구조 그대로 복제하고 별도 검수를 요청하며, 모두 `APPROVED`이고 본문 지문이 같을 때만 `--activate-if-ready`로 활성화한다. `send_tenant_alimtalk_channel_test`는 binding에 기록된 승인 `인증번호` 템플릿을 live로 다시 조회하고 denylist/whitelist와 idempotency key를 확인한 뒤 정확히 1건만 보낸다. 테스트도 `disable_sms=True`, PII-free recipient fingerprint, `NotificationLog.status`와 provider ID를 남기며 raw 번호·본문·provider ID를 출력하지 않는다.
 21. **Excel 계정 안내 provenance** — Excel로 신규 학생을 만든 job ID는 암호화 pending 계정 안내와 함께 저장한다. 첫 ACTIVE 수강에서 `origin_type=excel_import`, `origin_id=<AIJob job_id>`를 학생/학부모 outbox로 전달하고, 모든 유효 outbox 확보 뒤 비밀번호 암호문과 provenance를 함께 제거한다.
 22. **canonical payload 무결성** — 신규 SQS payload는 `occurrence_key`를 명시하고 worker가 수신자·event·target·template을 다시 조합한 business key와 producer key가 같은지 확인한다. signed key를 복사한 뒤 수신자 등을 바꾼 payload는 `invalid_business_idempotency_key`로 공급자 호출 전에 폐기한다.
 23. **공급자 잔액/재시도 감시** — 5분 주기 `check_dev_alerts`는 사용자 오류와 함께 최근 30분 `NotEnoughBalance` 확정 거절·미확정 건 및 Solapi 공용 잔액을 검사한다. 잔액이 `MESSAGING_PROVIDER_LOW_BALANCE_ALERT_THRESHOLD`(기본 10,000원) 미만이거나 잔액 조회가 실패하면 개인정보 없이 Slack으로 경고한다. 이 운영 경고도 SMS/LMS를 사용하지 않는다.

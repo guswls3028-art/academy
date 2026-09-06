@@ -21,7 +21,7 @@
 ## 2. 현재 핵심 정책
 
 - 신규 카카오 알림톡 템플릿 검수/등록을 기본 제안하지 않는다. 기존 4종 ITEM_LIST 봉투 + `#{선생님메모}` 자유 본문 정책을 우선 적용한다.
-- 모든 실발송은 공용 오너 알림톡만 사용한다. SMS/LMS, tenant별 PFID, tenant별 알림톡 provider는 신규 발송 경로에서 사용하지 않는다.
+- 모든 실발송은 공용 Solapi 계정의 알림톡만 사용한다. 기본은 공용 owner 채널이고, 운영자가 새 `AlimtalkChannelBinding`으로 검증한 tenant는 승인·본문지문 일치 템플릿만 자기 채널로 치환한다. SMS/LMS, 과거 tenant PFID/provider/자체 키는 사용하지 않는다.
 - SMS/LMS 예외는 없다. `check_dev_alerts`는 운영 룰을 평가해 설정된 Slack webhook으로만 알리며, SMS 설정·테스트·외부 신호 발송 옵션은 존재하지 않는다. 운영 절차는 `docs/operations/runbooks/incidents.md`가 정본이다.
 - 신규 발송 경계는 `enqueue_alimtalk()` 하나다. 명시된 비알림톡 `message_mode`는 알림톡으로 보정하지 않고 차단하며, 기존 로그와 테넌트별 공급자/발신번호/키 값은 삭제하지 않고 이력 데이터로 보존한다.
 - 계정 관련 시스템 알림(가입 승인, 아이디 찾기, 비밀번호 찾기)은 `send_alimtalk_via_owner()`를 통해 오너 테넌트 exact trigger 승인 템플릿으로 발송한다.

@@ -1,8 +1,8 @@
 # SSOT 문서: backend/docs/domain/messaging.md, backend/docs/domain/messaging-alimtalk.md
 """
-Messaging Worker - SQS 기반 공용 알림톡 발송
+Messaging Worker - SQS 기반 검증 채널 알림톡 발송
 
-SQS academy-messaging-jobs 에서 수신 → Solapi 공용 알림톡 발송.
+SQS academy-messaging-jobs 에서 수신 → Solapi 공용 또는 검증 tenant 채널 발송.
 SMS/LMS payload는 legacy 호환용 실패 로그만 남기고 실발송하지 않는다.
 SQS Long Polling + SIGTERM/SIGINT graceful shutdown 패턴.
 """
@@ -279,10 +279,12 @@ def _should_defer_disabled_tenant_message(event_type: str) -> bool:
 def _resolve_tenant_delivery_context(
     tenant_id: int,
     source_tenant_id: int | None = None,
+    common_template_id: str = "",
 ) -> dict:
-    """Separate the common delivery tenant from the business billing tenant."""
+    """Separate billing ownership and resolve the verified delivery channel."""
     from apps.domains.messaging.credit_services import get_tenant_messaging_info
     from apps.domains.messaging.policy import get_owner_tenant_id, resolve_kakao_channel
+    from apps.domains.messaging.tenant_channels import resolve_alimtalk_delivery_route
 
     delivery_tenant_id = int(tenant_id)
     if delivery_tenant_id != int(get_owner_tenant_id()):
@@ -299,20 +301,22 @@ def _resolve_tenant_delivery_context(
     if not billing_info or not billing_info.get("tenant_is_active"):
         raise RuntimeError("business_tenant_missing_or_inactive")
 
-    channel = resolve_kakao_channel(delivery_tenant_id)
-    if not isinstance(channel, dict):
+    common_channel = resolve_kakao_channel(delivery_tenant_id)
+    if not isinstance(common_channel, dict):
         raise RuntimeError("messaging_channel_resolution_failed")
-    use_default = bool(channel.get("use_default", True))
-    if not use_default:
-        raise RuntimeError("non_common_messaging_channel_blocked")
+    route = resolve_alimtalk_delivery_route(
+        source_tenant_id=billing_tenant_id,
+        common_channel_id=str(common_channel.get("pf_id") or ""),
+        common_template_id=common_template_id,
+    )
     return {
-        "delivery_info": delivery_info,
         "billing_info": billing_info,
         "billing_tenant_id": billing_tenant_id,
-        "channel": channel,
-        "provider": "solapi",
-        "own_credentials": {},
-        "use_default_channel": use_default,
+        "channel": {
+            "pf_id": route.channel_id,
+        },
+        "template_id": route.template_id,
+        "channel_source": route.source,
     }
 
 
@@ -1097,10 +1101,12 @@ def main() -> int:
                     billing_tenant_id = None
                     base_price = "0"
                     pf_id_tenant = ""
-                    tenant_provider = "solapi"  # 기본 공급자
-                    own_creds = {}  # 테넌트 자체 연동 키
-                    use_default_channel = True  # 시스템 기본 알림톡 채널 사용 여부
+                    channel_source = "common_owner"
                     if tenant_id is not None and os.environ.get("DJANGO_SETTINGS_MODULE"):
+                        from apps.domains.messaging.tenant_channels import (
+                            TenantAlimtalkRouteError,
+                        )
+
                         try:
                             from apps.domains.messaging.credit_services import (
                                 deduct_credits,
@@ -1109,14 +1115,63 @@ def main() -> int:
                             context = _resolve_tenant_delivery_context(
                                 int(tenant_id),
                                 source_tenant_id_msg,
+                                template_id_normalized,
                             )
-                            delivery_info = context["delivery_info"]
                             info = context["billing_info"]
                             billing_tenant_id = context["billing_tenant_id"]
                             base_price = info["base_price"]
                             channel = context["channel"]
                             pf_id_tenant = (channel.get("pf_id") or "").strip()
-                            use_default_channel = context["use_default_channel"]
+                            channel_source = context["channel_source"]
+                            template_id_normalized = context["template_id"]
+                        except TenantAlimtalkRouteError as exc:
+                            from decimal import Decimal
+
+                            logger.error(
+                                "Tenant Alimtalk route blocked before provider call: "
+                                "tenant=%s source_tenant=%s reason=%s",
+                                tenant_id,
+                                source_tenant_id_msg,
+                                exc,
+                            )
+                            try:
+                                create_notification_log(
+                                    tenant_id=int(tenant_id),
+                                    success=False,
+                                    amount_deducted=Decimal("0"),
+                                    recipient_summary=(
+                                        f"{target_name} " if target_name else ""
+                                    )
+                                    + (to[:4] + "****" if to else ""),
+                                    template_summary=event_type_msg,
+                                    failure_reason=str(exc),
+                                    message_body="",
+                                    message_mode="alimtalk",
+                                    sqs_message_id=message_id,
+                                    notification_type=event_type_msg,
+                                    source_tenant_id=source_tenant_id_msg,
+                                    target_type=target_type_msg,
+                                    target_id=target_id_msg,
+                                    target_name=target_name,
+                                    business_idempotency_key=str(
+                                        data.get("business_idempotency_key") or ""
+                                    ),
+                                    recipient_fingerprint=recipient_fingerprint_msg,
+                                    origin_type=origin_type_msg,
+                                    origin_id=origin_id_msg,
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "Failed to record blocked tenant channel route"
+                                )
+                                continue
+                            queue_client.delete_message(
+                                queue_name=cfg.MESSAGING_SQS_QUEUE_NAME,
+                                receipt_handle=receipt_handle,
+                            )
+                            _msg_deleted = True
+                            _current_receipt_handle = None
+                            continue
                         except Exception:
                             logger.exception(
                                 "Messaging tenant/provider resolution failed before claim; "
@@ -1132,10 +1187,10 @@ def main() -> int:
                         )
                         continue
 
-                    # 공용 발신번호 하나만 사용한다.
+                    # 공유 Solapi 계정의 검증된 발신번호 하나만 사용한다.
                     sender = (cfg.SOLAPI_SENDER or "").strip()
 
-                    # 알림톡 사용 시: resolver 결과 또는 워커 기본 PFID
+                    # 알림톡 사용 시: 검증된 tenant route 또는 공용 owner route
                     pf_id = pf_id_tenant or cfg.SOLAPI_KAKAO_PF_ID
                     template_id = template_id_normalized
 
@@ -1354,13 +1409,11 @@ def main() -> int:
                         text_="",
                         before_provider_call=None,
                     ):
-                        if not use_default_channel:
-                            return {
-                                "status": "error",
-                                "reason": "non_common_messaging_channel_blocked",
-                                "provider_called": False,
-                            }
-                        logger.info("alimtalk via common solapi channel: tenant=%s", tenant_id)
+                        logger.info(
+                            "alimtalk via verified route: tenant=%s channel_source=%s",
+                            tenant_id,
+                            channel_source,
+                        )
                         return send_one_alimtalk(
                             cfg, to=to_, sender=sender_, pf_id=pf_id_,
                             template_id=template_id_, replacements=replacements_, text=text_,

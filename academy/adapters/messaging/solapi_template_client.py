@@ -24,6 +24,28 @@ SOLAPI_BASE = "https://api.solapi.com"
 TEMPLATE_CREATE_PATH = "/kakao/v2/templates"
 TEMPLATE_LIST_PATH = "/kakao/v2/templates"
 
+_CLONE_OPTIONAL_FIELDS = (
+    "buttons",
+    "quickReplies",
+    "header",
+    "highlight",
+    "item",
+    "extra",
+    "ad",
+    "emphasizeTitle",
+    "emphasizeSubtitle",
+    "securityFlag",
+    "imageId",
+)
+
+
+def _has_meaningful_value(value) -> bool:
+    if isinstance(value, dict):
+        return any(_has_meaningful_value(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_has_meaningful_value(item) for item in value)
+    return value not in (None, "", False)
+
 # #{변수명} 형식 검증 시 참고 (필요 시 확장)
 VARIABLE_PATTERN = re.compile(r"#\{[^}]+\}")
 
@@ -144,6 +166,81 @@ def create_kakao_template(
     if not template_id:
         raise ValueError("솔라피 응답에 templateId가 없습니다.")
     return {"templateId": template_id, "raw": data}
+
+
+def clone_kakao_template(
+    *,
+    api_key: str,
+    api_secret: str,
+    channel_id: str,
+    source_template: dict,
+    name: str,
+) -> dict:
+    """Create an exact behavior-preserving copy on another channel."""
+
+    body = {
+        "channelId": (channel_id or "").strip(),
+        "name": (name or "").strip(),
+        "content": str(source_template.get("content") or "").strip(),
+        "categoryCode": str(source_template.get("categoryCode") or "").strip(),
+        "messageType": str(source_template.get("messageType") or "BA").strip(),
+        "emphasizeType": str(source_template.get("emphasizeType") or "NONE").strip(),
+    }
+    if not all(body.values()):
+        raise ValueError("채널 복제에 필요한 템플릿 필드가 없습니다.")
+    for field in _CLONE_OPTIONAL_FIELDS:
+        value = source_template.get(field)
+        if _has_meaningful_value(value):
+            body[field] = value
+
+    response = requests.post(
+        SOLAPI_BASE + TEMPLATE_CREATE_PATH,
+        json=body,
+        headers={
+            "Authorization": _create_auth_header(api_key, api_secret),
+            "Content-Type": "application/json",
+        },
+        timeout=30,
+    )
+    if response.status_code != 200:
+        try:
+            error = response.json()
+            message = error.get("errorMessage") or error.get("message") or response.text
+        except Exception:
+            message = response.text
+        raise ValueError(f"솔라피 템플릿 복제 실패: {message}")
+    return response.json()
+
+
+def request_kakao_template_inspection(
+    *,
+    api_key: str,
+    api_secret: str,
+    template_id: str,
+    comment: str = "",
+) -> dict:
+    """Submit a newly created template for Kakao inspection."""
+
+    template_id = (template_id or "").strip()
+    if not template_id:
+        raise ValueError("templateId가 필요합니다.")
+    response = requests.put(
+        f"{SOLAPI_BASE}{TEMPLATE_CREATE_PATH}/{template_id}/inspection",
+        json={"comment": comment} if comment else {},
+        headers={
+            "Authorization": _create_auth_header(api_key, api_secret),
+            "Content-Type": "application/json",
+        },
+        timeout=30,
+    )
+    if response.status_code != 200:
+        try:
+            error = response.json()
+            message = error.get("errorMessage") or error.get("message") or response.text
+        except Exception:
+            message = response.text
+        raise ValueError(f"솔라피 템플릿 검수 요청 실패: {message}")
+    return response.json()
 
 
 @circuit_breaker(

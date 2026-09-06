@@ -1,6 +1,6 @@
 # Messaging Worker (SQS + Solapi)
 
-SQS `academy-messaging-jobs` 수신 → 공용 알림톡만 발송. 예약 취소 시 발송 직전 Double Check로 스킵.
+SQS `academy-messaging-jobs` 수신 → 검증된 Solapi 알림톡만 발송. 예약 취소 시 발송 직전 Double Check로 스킵.
 
 ---
 
@@ -37,11 +37,11 @@ SQS `academy-messaging-jobs` 수신 → 공용 알림톡만 발송. 예약 취�
 
 ---
 
-## 4. message_mode: 공용 알림톡
+## 4. message_mode: 검증 채널 알림톡
 
 | message_mode | 동작 |
 |--------------|------|
-| `alimtalk` | 공용 owner 채널로 알림톡 발송. pf_id·template_id 필수. |
+| `alimtalk` | 공용 owner 채널 또는 활성 tenant binding으로 알림톡 발송. pf_id·template_id 필수. |
 | 그 외 명시 값 | `sms_disabled` 또는 `unsupported_message_mode`로 실패 폐쇄. |
 
 - **템플릿 관리**: 카카오 검수 끝난 **템플릿 ID**를 ENV(`SOLAPI_KAKAO_TEMPLATE_ID`) 또는 payload `template_id`로 전달.
@@ -91,13 +91,13 @@ API 키/시크릿은 **환경변수**로만 설정하고 코드에 노출하지 
 
 ---
 
-## 8. 발신번호 우선순위
+## 8. 발신번호와 채널
 
-Worker는 다음 순서로 발신번호를 사용합니다:
-1. **Owner Tenant.messaging_sender** (get_tenant_messaging_info에서 조회)
-2. **SOLAPI_SENDER** (환경변수)
-
-tenant별 발신번호/PFID/provider는 실발송에 사용하지 않습니다.
+Worker 발신번호는 **SOLAPI_SENDER** 환경변수만 사용합니다. provider/API 키도 공용
+Solapi 설정으로 고정합니다. 기본 PFID는 공용 owner 채널이며, 새
+`AlimtalkChannelBinding`이 active이고 공용 template ID와 매핑된 tenant template이
+APPROVED·동일 본문 지문일 때만 해당 tenant PFID/template ID로 치환합니다. 과거
+tenant 발신번호/PFID/provider/자체 키는 실발송에 사용하지 않습니다.
 
 ---
 

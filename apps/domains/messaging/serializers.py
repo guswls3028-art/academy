@@ -17,11 +17,11 @@ from apps.domains.messaging.models import (
 class MessagingInfoSerializer(serializers.ModelSerializer):
     """GET/PATCH 응답: 테넌트 메시징 정보"""
 
-    # 자체 연동 키 — GET 시 마스킹 처리
+    # 레거시 호환 필드. 응답 조립 단계에서 빈 값으로 고정한다.
     own_solapi_api_key = serializers.SerializerMethodField()
     own_solapi_api_secret = serializers.SerializerMethodField()
     own_ppurio_api_key = serializers.SerializerMethodField()
-    own_ppurio_account = serializers.CharField(read_only=True)
+    own_ppurio_account = serializers.SerializerMethodField()
     has_own_credentials = serializers.SerializerMethodField()
     channel_source = serializers.CharField(read_only=True)
     resolved_pf_id = serializers.CharField(read_only=True)
@@ -35,6 +35,17 @@ class MessagingInfoSerializer(serializers.ModelSerializer):
     can_manage_messaging = serializers.BooleanField(read_only=True)
     messaging_disabled = serializers.BooleanField(read_only=True)
     messaging_disabled_reason = serializers.CharField(read_only=True)
+    custom_channel_status = serializers.CharField(read_only=True)
+    custom_channel_registered = serializers.BooleanField(read_only=True)
+    custom_channel_reference = serializers.CharField(read_only=True)
+    custom_channel_approved_templates = serializers.IntegerField(read_only=True)
+    custom_channel_required_templates = serializers.IntegerField(read_only=True)
+    custom_channel_test_available = serializers.BooleanField(read_only=True)
+    custom_channel_last_test_status = serializers.CharField(read_only=True)
+    custom_channel_last_tested_at = serializers.DateTimeField(
+        read_only=True,
+        allow_null=True,
+    )
 
     class Meta:
         model = Tenant
@@ -47,30 +58,26 @@ class MessagingInfoSerializer(serializers.ModelSerializer):
             "alimtalk_available", "tenant_messaging_enabled",
             "messaging_ops_hold", "can_manage_messaging",
             "messaging_disabled", "messaging_disabled_reason",
+            "custom_channel_status", "custom_channel_registered",
+            "custom_channel_reference", "custom_channel_approved_templates",
+            "custom_channel_required_templates", "custom_channel_test_available",
+            "custom_channel_last_test_status", "custom_channel_last_tested_at",
         ]
 
-    @staticmethod
-    def _mask(value: str) -> str:
-        if not value:
-            return ""
-        if len(value) <= 4:
-            return "****"
-        return "****" + value[-4:]
+    def get_own_solapi_api_key(self, _obj) -> str:
+        return ""
 
-    def get_own_solapi_api_key(self, obj) -> str:
-        return self._mask(obj.own_solapi_api_key)
+    def get_own_solapi_api_secret(self, _obj) -> str:
+        return ""
 
-    def get_own_solapi_api_secret(self, obj) -> str:
-        return self._mask(obj.own_solapi_api_secret)
+    def get_own_ppurio_api_key(self, _obj) -> str:
+        return ""
 
-    def get_own_ppurio_api_key(self, obj) -> str:
-        return self._mask(obj.own_ppurio_api_key)
+    def get_own_ppurio_account(self, _obj) -> str:
+        return ""
 
-    def get_has_own_credentials(self, obj) -> bool:
-        provider = (obj.messaging_provider or "solapi").strip().lower()
-        if provider == "ppurio":
-            return bool(obj.own_ppurio_api_key and obj.own_ppurio_account)
-        return bool(obj.own_solapi_api_key and obj.own_solapi_api_secret)
+    def get_has_own_credentials(self, _obj) -> bool:
+        return False
 
 
 class MessagingActivationSerializer(serializers.Serializer):

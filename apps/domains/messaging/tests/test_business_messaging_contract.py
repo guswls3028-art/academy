@@ -60,12 +60,16 @@ class BusinessMessagingContractTests(TestCase):
         response = MessagingInfoView.as_view()(self._request("get", "/api/v1/messaging/info/"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["delivery_policy"], "common_alimtalk_only")
+        self.assertEqual(
+            response.data["delivery_policy"],
+            "verified_tenant_or_common_alimtalk",
+        )
         self.assertNotIn("sms_allowed", response.data)
         self.assertEqual(response.data["messaging_provider"], "solapi")
         self.assertEqual(response.data["kakao_pfid"], "")
         self.assertEqual(response.data["own_solapi_api_key"], "")
         self.assertFalse(response.data["has_own_credentials"])
+        self.assertFalse(response.data["custom_channel_registered"])
         self.assertTrue(response.data["tenant_messaging_enabled"])
         self.assertTrue(response.data["can_manage_messaging"])
 
