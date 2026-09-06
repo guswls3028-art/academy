@@ -44,12 +44,13 @@ EOF
 }
 
 # CVE-2026-85091: the upstream post-1.3.2 commit fixes gz_vacate bounds
-# handling. The source declares 1.3.2.1-motley. Debian's +really convention
-# keeps that actual snapshot visible while sorting this fixed package after the
-# scanner's 1.3.3 boundary. Keep the zlib source and zlib1g binary identities
-# scanner-visible, and retain the libz ABI for Python and Debian consumers.
+# handling. The source declares 1.3.2.1-motley. Preserve Debian's existing
+# 1.3.dfsg+really version shape so the scanner applies Debian source-package
+# ranges instead of treating the custom package as upstream MiniZip. Keep the
+# zlib source and zlib1g binary identities scanner-visible, and retain the libz
+# ABI for Python and Debian consumers.
 # contrib/MiniZip, the component affected by CVE-2023-45853, is not packaged.
-zlib_version='1:1.3.3+really1.3.2.1+academy.git20260904.e3dc0a8-1'
+zlib_version='1:1.3.dfsg+really1.3.2.1+academy.git20260904.e3dc0a8-1'
 zlib_archive="${work_root}/zlib.tar.gz"
 download \
     'https://github.com/madler/zlib/archive/e3dc0a85b7032e98380dec011bc8f2c2ee0d8fca.tar.gz' \
