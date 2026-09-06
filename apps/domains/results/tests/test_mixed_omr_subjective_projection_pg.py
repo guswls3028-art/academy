@@ -267,6 +267,28 @@ class MixedOmrSubjectiveProjectionPostgresTests(TestCase):
         self.assertNotIn(self.enrollment.id, rankings)
         self.assertEqual(float(canonical.objective_score), 80.0)
 
+    def test_historical_final_partial_omr_is_still_hidden(self):
+        legacy, _canonical = self._grade_objective_only()
+        legacy.status = ExamResult.Status.FINAL
+        legacy.save(update_fields=["status", "updated_at"])
+        request = SimpleNamespace(tenant=self.tenant, user=self.student.user)
+
+        with patch(
+            "apps.domains.results.services.student_result_service.get_request_student",
+            return_value=self.student,
+        ):
+            payload = get_my_exam_result_data(request, self.exam.id, tenant=self.tenant)
+        rankings = compute_exam_rankings(
+            exam_id=self.exam.id,
+            tenant=self.tenant,
+            lecture_ids={self.lecture.id},
+        )
+
+        self.assertFalse(payload["student_results_published"])
+        self.assertEqual(payload["grading_status"], "subjective_pending")
+        self.assertNotIn("total_score", payload)
+        self.assertNotIn(self.enrollment.id, rankings)
+
     def test_objective_only_mixed_omr_does_not_create_clinic_projection(self):
         self._grade_objective_only()
 
