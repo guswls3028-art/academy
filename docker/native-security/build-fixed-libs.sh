@@ -130,9 +130,9 @@ libxml2_orig="${work_root}/libxml2.orig.tar.xz"
 libxml2_debian="${work_root}/libxml2.debian.tar.xz"
 libxml2_fix="${work_root}/CVE-2026-86140.patch"
 download \
-    'https://deb.debian.org/debian/pool/main/libx/libxml2/libxml2_2.12.7+dfsg+really2.9.14.orig.tar.xz' \
+    'https://download.gnome.org/sources/libxml2/2.9/libxml2-2.9.14.tar.xz' \
     "${libxml2_orig}" \
-    '4fe913dec8b1ab89d13b489b419a8203176ea39e931eaa0d25b17eafb9c279e9'
+    '60d74a257d1ccec0475e749cba2f21559e48139efba6ff28224357c7c798dfee'
 download \
     'https://deb.debian.org/debian/pool/main/libx/libxml2/libxml2_2.12.7+dfsg+really2.9.14-2.1+deb13u3.debian.tar.xz' \
     "${libxml2_debian}" \

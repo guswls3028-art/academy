@@ -314,7 +314,10 @@ repository에만 있었다. 실패한 run은 development/preprod/production을 �
 이름을 원자적으로 upgrade하므로 이후 service `apt` layer가 취약 버전으로
 downgrade하지 않는다.
 
-Base build는 세 upstream test suite, exact package 최소 버전, Python zlib
+libxml2 원본은 checksum-pinned GNOME 2.9.14 전체 tarball을 사용하고, Debian이
+`+dfsg` repack에서 제외한 upstream test fixture까지 builder 안에서만 실행한다.
+runtime 패키지에는 test fixture나 build tool을 포함하지 않는다. Base build는 세
+upstream test suite, exact package 최소 버전, Python zlib
 round-trip, libxml2 dynamic load, PCRE2 match를 모두 확인한다. base/security 파일이
 바뀐 PR은 `Native security arm64 image contract`가 production과 같은 arm64 이미지를
 실제로 build하고 같은 ABI 확인을 컨테이너 안에서 반복한다. 어떤 source hash,

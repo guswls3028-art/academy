@@ -360,6 +360,11 @@ def test_base_image_backports_new_native_library_fixes_without_acceptance() -> N
         assert f'ge "{minimum}"' in dockerfile
     for cve in ("CVE-2026-85091", "CVE-2026-86140", "CVE-2026-86145"):
         assert cve in build_script
+    assert (
+        "https://download.gnome.org/sources/libxml2/2.9/libxml2-2.9.14.tar.xz"
+        in build_script
+    )
+    assert "60d74a257d1ccec0475e749cba2f21559e48139efba6ff28224357c7c798dfee" in build_script
     assert "autoreconf --force --install" in build_script
     assert build_script.count("sha256sum --check") == 1
     assert build_script.count("download \\") == 5
