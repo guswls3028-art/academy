@@ -932,7 +932,7 @@ true`가 필요하며 수강등록 비활성화, 자동 수납 비활성화, 시
 **검증:** `apps/domains/attendance/tests/test_bulk_present_undo.py`는 직전 상태
 정확 복원, 일부 행 재수정 시 전체 거부, 테넌트 경계, 토큰 변조 거부,
 변경 없음 응답을 증명한다.
-`apps/domains/attendance/tests/test_learning_todo_eligibility_pg.py`는 상태별 대상,
+`tests/test_attendance_learning_todo_eligibility_pg.py`는 상태별 대상,
 이력 보존, 복구 멱등성, 클리닉 투영과 PostgreSQL 동시 전환을 증명한다.
 
 ---

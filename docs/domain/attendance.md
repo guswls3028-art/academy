@@ -81,7 +81,7 @@ Safari에서도 XML 응답 화면으로 이동하지 않고 파일 다운로드�
 ```powershell
 python -m pytest apps/domains/attendance/tests/test_attendance_list_ordering.py
 python -m pytest apps/domains/attendance/tests/test_attendance_excel_export.py
-python -m pytest apps/domains/attendance/tests/test_learning_todo_eligibility_pg.py
+python -m pytest tests/test_attendance_learning_todo_eligibility_pg.py
 python -m ruff check apps/domains/attendance/views.py `
   apps/domains/attendance/tests/test_attendance_list_ordering.py `
   apps/domains/attendance/tests/test_attendance_excel_export.py `
