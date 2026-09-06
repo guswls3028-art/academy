@@ -1,15 +1,18 @@
 from datetime import timedelta
+import uuid
 from unittest.mock import patch
 
 from django.apps import apps
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps.core.models import Tenant, TenantMembership
 from apps.core.models.user import user_internal_username
 from apps.domains.messaging.models import MessageTemplate, NotificationLog, ScheduledNotification
+from apps.domains.messaging.serializers import SendMessageRequestSerializer
+from apps.domains.messaging.services.preflight import build_send_preflight
 from apps.domains.messaging.views.send_views import SendMessageView
 from apps.domains.messaging.views.template_views import MessageTemplateListCreateView
 
@@ -108,6 +111,7 @@ class SendMessageViewTests(TestCase):
                 "student_ids": [self.student.id],
                 "raw_body": "직접 작성한 안내입니다.",
                 "block_category": "attendance",
+                "manual_event": "attendance_notice",
             },
             format="json",
         )
@@ -142,6 +146,87 @@ class SendMessageViewTests(TestCase):
         self.assertNotIn("내용", replacements)
         self.assertNotIn("선생님메모1", replacements)
 
+    def test_direct_send_preserves_exact_request_batch_and_origin_identity(self):
+        client_request_id = uuid.uuid4()
+        request = self.factory.post(
+            "/api/v1/messaging/send/",
+            data={
+                "client_request_id": str(client_request_id),
+                "send_to": "student",
+                "student_ids": [self.student.id],
+                "raw_body": "요청 식별자 확인 안내입니다.",
+                "block_category": "attendance",
+                "manual_event": "attendance_notice",
+            },
+            format="json",
+        )
+        force_authenticate(request, user=self.admin)
+        request.user = self.admin
+        request.tenant = self.tenant
+
+        with (
+            patch(
+                "apps.domains.messaging.services.get_tenant_site_url",
+                return_value="https://example.test",
+            ),
+            patch(
+                "apps.domains.messaging.services.enqueue_alimtalk",
+                return_value=True,
+            ) as enqueue_alimtalk,
+        ):
+            response = self._send(request)
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["request_id"], str(client_request_id))
+        self.assertEqual(response.data["origin_type"], "manual_send")
+        self.assertEqual(response.data["origin_id"], str(client_request_id))
+        self.assertEqual(uuid.UUID(response.data["batch_id"]).version, 4)
+        kwargs = enqueue_alimtalk.call_args.kwargs
+        self.assertEqual(kwargs["request_id"], str(client_request_id))
+        self.assertEqual(kwargs["batch_id"], response.data["batch_id"])
+        self.assertEqual(kwargs["origin_type"], "manual_send")
+        self.assertEqual(kwargs["origin_id"], str(client_request_id))
+        self.assertEqual(kwargs["sender_staff_id"], self.admin.id)
+        self.assertEqual(
+            kwargs["occurrence_key"],
+            f"request:{client_request_id}:batch:{response.data['batch_id']}",
+        )
+
+    def test_all_resolved_recipients_with_invalid_phone_returns_non_success_identity(self):
+        self.student.phone = ""
+        self.student.save(update_fields=["phone"])
+        client_request_id = uuid.uuid4()
+        request = self.factory.post(
+            "/api/v1/messaging/send/",
+            data={
+                "client_request_id": str(client_request_id),
+                "send_to": "student",
+                "student_ids": [self.student.id],
+                "raw_body": "전화번호 확인 안내입니다.",
+                "block_category": "attendance",
+                "manual_event": "attendance_notice",
+            },
+            format="json",
+        )
+        force_authenticate(request, user=self.admin)
+        request.user = self.admin
+        request.tenant = self.tenant
+
+        with patch(
+            "apps.domains.messaging.services.enqueue_alimtalk",
+        ) as enqueue_alimtalk:
+            response = self._send(request)
+
+        self.assertEqual(response.status_code, 422, response.data)
+        self.assertEqual(response.data["code"], "no_valid_phone")
+        self.assertEqual(response.data["accepted_count"], 0)
+        self.assertEqual(response.data["request_id"], str(client_request_id))
+        self.assertEqual(response.data["origin_type"], "manual_send")
+        self.assertEqual(response.data["origin_id"], str(client_request_id))
+        self.assertEqual(uuid.UUID(response.data["batch_id"]).version, 4)
+        enqueue_alimtalk.assert_not_called()
+        self.assertFalse(ScheduledNotification.objects.exists())
+
     def test_manual_send_blocks_when_source_business_tenant_quota_is_full(self):
         provider_owner = Tenant.objects.create(code="msg-send-provider", name="Provider", is_active=True)
         NotificationLog.objects.create(
@@ -158,6 +243,7 @@ class SendMessageViewTests(TestCase):
                 "student_ids": [self.student.id],
                 "raw_body": "한도 확인 안내입니다.",
                 "block_category": "attendance",
+                "manual_event": "attendance_notice",
             },
             format="json",
         )
@@ -192,7 +278,8 @@ class SendMessageViewTests(TestCase):
         with patch("apps.domains.messaging.services.enqueue_alimtalk", return_value=True) as enqueue_alimtalk:
             response = self._send(request)
 
-        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "manual_event_contract_missing")
         self.assertIn("카카오 승인 봉투", response.data["detail"])
         enqueue_alimtalk.assert_not_called()
 
@@ -214,6 +301,7 @@ class SendMessageViewTests(TestCase):
                 "template_id": template.id,
                 "raw_body": "시험 안내입니다. #{강의명} #{차시명} #{시험명}",
                 "block_category": "exam",
+                "manual_event": "attendance_notice",
                 "alimtalk_extra_vars": {
                     "강의명": "수학A반",
                     "차시명": "3회차",
@@ -248,6 +336,7 @@ class SendMessageViewTests(TestCase):
                 "student_ids": [self.student.id],
                 "raw_body": "학부모 안내입니다.",
                 "block_category": "attendance",
+                "manual_event": "attendance_notice",
             },
             format="json",
         )
@@ -268,7 +357,77 @@ class SendMessageViewTests(TestCase):
         self.assertEqual(kwargs["target_type"], "parent")
         self.assertEqual(kwargs["target_id"], self.student.id)
 
-    def test_grade_message_to_student_is_rejected_before_dispatch(self):
+    @override_settings(MESSAGING_MANUAL_PREFLIGHT_IDENTITY_ENFORCED=True)
+    def test_signed_preflight_is_exact_and_one_time(self):
+        payload = {
+            "send_to": "student",
+            "student_ids": [self.student.id],
+            "raw_body": "사전 확인과 같은 안내입니다.",
+            "block_category": "attendance",
+            "manual_event": "attendance_notice",
+        }
+        serializer = SendMessageRequestSerializer(data=payload)
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        checked = build_send_preflight(
+            self.tenant,
+            serializer.validated_data,
+            actor_id=self.admin.pk,
+        )
+        self.assertTrue(checked["can_send"], checked)
+        self.assertTrue(checked["preflight_identity"])
+
+        def post(data):
+            request = self.factory.post(
+                "/api/v1/messaging/send/",
+                data=data,
+                format="json",
+            )
+            force_authenticate(request, user=self.admin)
+            request.user = self.admin
+            request.tenant = self.tenant
+            return self._send(request)
+
+        authorized = {**payload, "preflight_identity": checked["preflight_identity"]}
+        with (
+            patch(
+                "apps.domains.messaging.services.get_tenant_site_url",
+                return_value="https://example.test",
+            ),
+            patch(
+                "apps.domains.messaging.services.enqueue_alimtalk",
+                return_value=True,
+            ) as enqueue_alimtalk,
+        ):
+            first = post(authorized)
+            replay = post(authorized)
+
+        self.assertEqual(first.status_code, 200, first.data)
+        self.assertEqual(replay.status_code, 409, replay.data)
+        self.assertEqual(replay.data["code"], "preflight_identity_used")
+        enqueue_alimtalk.assert_called_once()
+
+        changed_serializer = SendMessageRequestSerializer(data=payload)
+        self.assertTrue(changed_serializer.is_valid(), changed_serializer.errors)
+        checked_again = build_send_preflight(
+            self.tenant,
+            changed_serializer.validated_data,
+            actor_id=self.admin.pk,
+        )
+        changed = {
+            **payload,
+            "raw_body": "사전 확인 뒤 바뀐 안내입니다.",
+            "preflight_identity": checked_again["preflight_identity"],
+        }
+        with patch(
+            "apps.domains.messaging.services.enqueue_alimtalk",
+            return_value=True,
+        ) as changed_enqueue:
+            drift = post(changed)
+        self.assertEqual(drift.status_code, 409, drift.data)
+        self.assertEqual(drift.data["code"], "preflight_identity_mismatch")
+        changed_enqueue.assert_not_called()
+
+    def test_grade_message_to_student_dispatches_to_student_phone(self):
         request = self.factory.post(
             "/api/v1/messaging/send/",
             data={
@@ -276,6 +435,16 @@ class SendMessageViewTests(TestCase):
                 "student_ids": [self.student.id],
                 "raw_body": "성적표 안내입니다.",
                 "block_category": "grades",
+                "manual_event": "lesson_result",
+                "alimtalk_extra_vars": {
+                    "강의명": "중2 수학",
+                    "차시명": "1차시",
+                },
+                "alimtalk_extra_vars_per_student": {
+                    str(self.student.id): {
+                        "_body_subst": "단원평가 85/100",
+                    },
+                },
             },
             format="json",
         )
@@ -283,15 +452,23 @@ class SendMessageViewTests(TestCase):
         request.user = self.admin
         request.tenant = self.tenant
 
-        with patch(
-            "apps.domains.messaging.services.enqueue_alimtalk",
-            return_value=True,
-        ) as enqueue_alimtalk:
+        with (
+            patch(
+                "apps.domains.messaging.services.get_tenant_site_url",
+                return_value="https://example.test",
+            ),
+            patch(
+                "apps.domains.messaging.services.enqueue_alimtalk",
+                return_value=True,
+            ) as enqueue_alimtalk,
+        ):
             response = self._send(request)
 
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.data["code"], "grade_recipient_policy")
-        enqueue_alimtalk.assert_not_called()
+        self.assertEqual(response.status_code, 200, response.data)
+        enqueue_alimtalk.assert_called_once()
+        self.assertEqual(enqueue_alimtalk.call_args.kwargs["to"], "01011112222")
+        self.assertEqual(enqueue_alimtalk.call_args.kwargs["target_type"], "student")
+        self.assertEqual(enqueue_alimtalk.call_args.kwargs["target_id"], self.student.id)
 
     def test_grade_message_rejects_incomplete_per_student_bodies(self):
         second_student = self._create_student(
@@ -307,6 +484,7 @@ class SendMessageViewTests(TestCase):
                 "student_ids": [self.student.id, second_student.id],
                 "raw_body": first_body,
                 "block_category": "grades",
+                "manual_event": "lesson_result",
                 "alimtalk_extra_vars": {
                     "강의명": "중2 과학",
                     "차시명": "2차시",
@@ -348,6 +526,7 @@ class SendMessageViewTests(TestCase):
                 "student_ids": [self.student.id, second_student.id],
                 "raw_body": "전역 첫 학생 본문은 사용하면 안 됩니다.",
                 "block_category": "grades",
+                "manual_event": "lesson_result",
                 "alimtalk_extra_vars": {
                     "강의명": "중2 과학",
                     "차시명": "2차시",
@@ -388,7 +567,7 @@ class SendMessageViewTests(TestCase):
         self.assertCountEqual(sent_memos, [first_body, second_body])
         self.assertNotIn("전역 첫 학생 본문", "\n".join(sent_memos))
 
-    def test_score_entry_category_overrides_reused_clinic_copy_envelope(self):
+    def test_score_entry_rejects_reused_clinic_saved_letter(self):
         clinic_copy = MessageTemplate.objects.create(
             tenant=self.tenant,
             category="clinic",
@@ -404,6 +583,7 @@ class SendMessageViewTests(TestCase):
                 "template_id": clinic_copy.id,
                 "raw_body": "이번 수업 결과를 안내드립니다.",
                 "block_category": "grades",
+                "manual_event": "lesson_result",
                 "alimtalk_extra_vars": {
                     "강의명": "중2 수학",
                     "차시명": "1차시",
@@ -426,15 +606,51 @@ class SendMessageViewTests(TestCase):
         ):
             response = self._send(request)
 
-        self.assertEqual(response.status_code, 200, response.data)
-        kwargs = enqueue_alimtalk.call_args.kwargs
-        self.assertEqual(kwargs["template_id"], "KA01TP260406105458211774JKJ3OU55")
-        replacements = {item["key"]: item["value"] for item in kwargs["alimtalk_replacements"]}
-        self.assertEqual(replacements["강의명"], "중2 수학")
-        self.assertEqual(replacements["차시명"], "1차시")
-        self.assertNotIn("클리닉장소", replacements)
-        self.assertNotIn("클리닉날짜", replacements)
-        self.assertNotIn("클리닉시간", replacements)
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertEqual(response.data["code"], "content_template_category_mismatch")
+        enqueue_alimtalk.assert_not_called()
+
+    def test_manual_score_rejects_builtin_system_memo_preset(self):
+        system_preset = MessageTemplate.objects.create(
+            tenant=self.tenant,
+            category=MessageTemplate.Category.GRADES,
+            name="시스템 성적 기본 문구",
+            subject="",
+            body="자동 적용되면 안 되는 기본 문구",
+            is_system=True,
+        )
+        request = self.factory.post(
+            "/api/v1/messaging/send/",
+            data={
+                "send_to": "student",
+                "student_ids": [self.student.id],
+                "template_id": system_preset.id,
+                "template_version": system_preset.updated_at.isoformat(),
+                "raw_body": system_preset.body,
+                "block_category": "grades",
+                "manual_event": "lesson_result",
+                "alimtalk_extra_vars_per_student": {
+                    str(self.student.id): {"_body_subst": system_preset.body},
+                },
+            },
+            format="json",
+        )
+        force_authenticate(request, user=self.admin)
+        request.user = self.admin
+        request.tenant = self.tenant
+
+        with patch(
+            "apps.domains.messaging.services.enqueue_alimtalk",
+            return_value=True,
+        ) as enqueue_alimtalk:
+            response = self._send(request)
+
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertEqual(
+            response.data["code"],
+            "content_template_system_preset_disabled",
+        )
+        enqueue_alimtalk.assert_not_called()
 
     def test_manual_send_can_be_scheduled_without_immediate_enqueue(self):
         send_at = timezone.now() + timedelta(hours=1)
@@ -445,6 +661,7 @@ class SendMessageViewTests(TestCase):
                 "student_ids": [self.student.id],
                 "raw_body": "예약 안내입니다.",
                 "block_category": "attendance",
+                "manual_event": "attendance_notice",
                 "scheduled_send_at": send_at.isoformat(),
             },
             format="json",
@@ -489,6 +706,7 @@ class SendMessageViewTests(TestCase):
                 "student_ids": [self.student.id],
                 "raw_body": "한도 이후 예약 안내입니다.",
                 "block_category": "attendance",
+                "manual_event": "attendance_notice",
                 "scheduled_send_at": (timezone.now() + timedelta(hours=2)).isoformat(),
             },
             format="json",
@@ -517,6 +735,7 @@ class SendMessageViewTests(TestCase):
                 "student_ids": [self.student.id],
                 "raw_body": "즉시 발송 재시도 안내입니다.",
                 "block_category": "attendance",
+                "manual_event": "attendance_notice",
             },
             format="json",
         )
@@ -545,7 +764,12 @@ class SendMessageViewTests(TestCase):
         self.assertEqual(dispatch.status, ScheduledNotification.Status.PENDING)
         self.assertEqual(dispatch.attempt_count, 1)
         self.assertIsNotNone(dispatch.next_attempt_at)
-        self.assertTrue(dispatch.payload["occurrence_key"].startswith("dispatch:"))
+        self.assertEqual(dispatch.payload["request_id"], response.data["request_id"])
+        self.assertEqual(dispatch.payload["batch_id"], response.data["batch_id"])
+        self.assertEqual(
+            dispatch.payload["occurrence_key"],
+            f"request:{response.data['request_id']}:batch:{response.data['batch_id']}",
+        )
 
     def test_manual_send_rejects_past_scheduled_time(self):
         request = self.factory.post(
@@ -571,7 +795,7 @@ class SendMessageViewTests(TestCase):
         enqueue_alimtalk.assert_not_called()
         self.assertFalse(ScheduledNotification.objects.exists())
 
-    def test_payment_send_fail_closes_when_provider_sid_is_missing(self):
+    def test_payment_send_fail_closes_without_an_approved_manual_event(self):
         template = MessageTemplate.objects.create(
             tenant=self.tenant,
             category=MessageTemplate.Category.PAYMENT,
@@ -600,8 +824,8 @@ class SendMessageViewTests(TestCase):
             response = self._send(request)
 
         self.assertEqual(response.status_code, 409)
-        self.assertEqual(response.data["code"], "unified_template_unavailable")
-        self.assertEqual(response.data["template_type"], "notice_payment")
+        self.assertEqual(response.data["code"], "manual_event_contract_missing")
+        self.assertIn("카카오 승인 봉투", response.data["detail"])
         enqueue_alimtalk.assert_not_called()
 
     def test_student_direct_alimtalk_omits_deleted_and_cross_tenant_students(self):
@@ -646,6 +870,7 @@ class SendMessageViewTests(TestCase):
                 "student_ids": [self.student.id, deleted_student.id, other_student.id, self.student.id],
                 "raw_body": "선택 학생 안내입니다.",
                 "block_category": "attendance",
+                "manual_event": "attendance_notice",
             },
             format="json",
         )
@@ -710,7 +935,7 @@ class SendMessageViewTests(TestCase):
         self.assertIn("send_to", response.data)
         enqueue_alimtalk.assert_not_called()
 
-    def test_staff_membership_cannot_send_manual_messages(self):
+    def test_staff_membership_can_send_manual_alimtalk(self):
         staff_user = User.objects.create_user(
             username="msg-send-staff",
             password="test1234",
@@ -723,8 +948,9 @@ class SendMessageViewTests(TestCase):
             data={
                 "send_to": "student",
                 "student_ids": [self.student.id],
-                "raw_body": "직원이 직접 발송하는 안내입니다.",
-                "block_category": "default",
+                "raw_body": "조교가 직접 발송하는 안내입니다.",
+                "block_category": "attendance",
+                "manual_event": "attendance_notice",
             },
             format="json",
         )
@@ -735,8 +961,46 @@ class SendMessageViewTests(TestCase):
         with patch("apps.domains.messaging.services.enqueue_alimtalk", return_value=True) as enqueue_alimtalk:
             response = self._send(request)
 
-        self.assertEqual(response.status_code, 403)
-        enqueue_alimtalk.assert_not_called()
+        self.assertEqual(response.status_code, 200, response.data)
+        enqueue_alimtalk.assert_called_once()
+        self.assertEqual(enqueue_alimtalk.call_args.kwargs["target_id"], self.student.id)
+
+    def test_teacher_membership_can_send_manual_alimtalk(self):
+        teacher_user = User.objects.create_user(
+            username="msg-send-teacher",
+            password="test1234",
+            tenant=self.tenant,
+            is_staff=True,
+        )
+        TenantMembership.ensure_active(
+            tenant=self.tenant,
+            user=teacher_user,
+            role="teacher",
+        )
+        request = self.factory.post(
+            "/api/v1/messaging/send/",
+            data={
+                "send_to": "parent",
+                "student_ids": [self.student.id],
+                "raw_body": "강사가 직접 발송하는 안내입니다.",
+                "block_category": "attendance",
+                "manual_event": "attendance_notice",
+            },
+            format="json",
+        )
+        force_authenticate(request, user=teacher_user)
+        request.user = teacher_user
+        request.tenant = self.tenant
+
+        with patch(
+            "apps.domains.messaging.services.enqueue_alimtalk",
+            return_value=True,
+        ) as enqueue_alimtalk:
+            response = self._send(request)
+
+        self.assertEqual(response.status_code, 200, response.data)
+        enqueue_alimtalk.assert_called_once()
+        self.assertEqual(enqueue_alimtalk.call_args.kwargs["target_id"], self.student.id)
 
     def test_student_template_category_is_saved_as_default(self):
         request = self.factory.post(

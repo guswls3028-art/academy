@@ -4,18 +4,30 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from django.test import override_settings
 
 from apps.domains.messaging.policy import MessagingPolicyError
-from apps.domains.messaging.sqs_queue import MessagingSQSQueue
+from apps.domains.messaging.sqs_queue import (
+    MessagingSQSQueue,
+    build_business_idempotency_key,
+)
+from apps.domains.messaging.services.manual_delivery_identity import (
+    build_content_snapshot_sha256,
+)
 from apps.domains.messaging.services import enqueue_alimtalk
 from apps.worker.messaging_worker.sqs_main import (
     _allowed_common_template_ids,
     _has_valid_worker_tenant_binding,
     _normalize_worker_tenants,
     _video_encoding_block_reason,
+    _worker_delivery_identity_error,
+    _worker_request_trace_error,
     _worker_tenant_binding_error,
 )
-from apps.domains.messaging.security import verify_tenant_binding_signature
+from apps.domains.messaging.security import (
+    verify_delivery_identity_signature,
+    verify_tenant_binding_signature,
+)
 from libs.queue.client import QueueUnavailableError, SQSQueueClient
 
 
@@ -116,6 +128,141 @@ def test_manual_enqueue_without_occurrence_key_gets_unique_business_key() -> Non
     assert keys[0] != keys[1]
 
 
+def test_business_key_v1_fixed_vector_is_unchanged_by_delivery_identity() -> None:
+    assert build_business_idempotency_key(
+        tenant_id=1,
+        source_tenant_id=2,
+        channel="alimtalk",
+        event_type="manual_lesson_result",
+        target_type="student",
+        target_id="9301",
+        recipient="01012345678",
+        occurrence_key="occ-1",
+        template_id="KA01TP260406105458211774JKJ3OU55",
+    ) == "662f0bd144af97f08680485be5f300a2b8bcdad1f2f920bed9f5410c0fd4e8b3"
+
+
+@override_settings(MESSAGING_DELIVERY_IDENTITY_V2_ENFORCED=False)
+def test_old_writer_payload_is_accepted_by_new_worker_during_reader_first_rollout() -> None:
+    assert _worker_delivery_identity_error(
+        {
+            "event_type": "manual_lesson_result",
+            "template_id": "KA01TP260406105458211774JKJ3OU55",
+        }
+    ) == ""
+
+
+@override_settings(MESSAGING_DELIVERY_IDENTITY_V2_ENFORCED=False)
+def test_new_writer_keeps_v1_business_key_and_adds_verified_v2_identity() -> None:
+    fake_client = _FakeQueueClient()
+    replacements = [
+        {"key": "학원이름", "value": "테스트학원"},
+        {"key": "학생이름", "value": "테스트학생"},
+        {"key": "강의명", "value": "수학"},
+        {"key": "차시명", "value": "1회차"},
+        {"key": "선생님메모", "value": "이번 결과"},
+        {"key": "사이트링크", "value": "https://example.test"},
+    ]
+    text = "이번 결과"
+    with patch("apps.domains.messaging.sqs_queue.get_queue_client", return_value=fake_client):
+        queue = MessagingSQSQueue(wake_messaging_workers=False)
+        assert queue.enqueue(
+            tenant_id=1,
+            source_tenant_id=2,
+            to="01012345678",
+            text=text,
+            message_mode="alimtalk",
+            template_id="KA01TP260406105458211774JKJ3OU55",
+            provider_template_type="score",
+            provider_template_version="Wy7Z91sBXK",
+            provider_template_structure_fingerprint="54f3fb7aca49daaf",
+            provider_template_content_fingerprint="a5605726f724dd9b",
+            provider_template_header_fingerprint="dbaf4d19b3af2b21",
+            content_template_id=12,
+            content_template_version="2026-09-06T00:00:00+00:00",
+            content_snapshot_sha256=build_content_snapshot_sha256(
+                text=text,
+                replacements=replacements,
+            ),
+            alimtalk_replacements=replacements,
+            event_type="manual_lesson_result",
+            target_type="student",
+            target_id=9301,
+            occurrence_key="occ-1",
+        )
+
+    message = fake_client.messages[0]
+    assert message["business_idempotency_key"] == (
+        "662f0bd144af97f08680485be5f300a2b8bcdad1f2f920bed9f5410c0fd4e8b3"
+    )
+    assert message["delivery_identity_version"] == "v2"
+    assert verify_delivery_identity_signature(
+        message,
+        signature=message["delivery_identity_signature"],
+    )
+    assert _worker_tenant_binding_error(message) == ""
+    assert _worker_delivery_identity_error(message) == ""
+
+    tampered = {**message, "provider_template_version": "changed"}
+    assert (
+        _worker_delivery_identity_error(tampered)
+        == "invalid_delivery_identity_signature"
+    )
+
+
+def test_signed_automatic_event_requires_exact_provider_variable_contract() -> None:
+    fake_client = _FakeQueueClient()
+    replacements = [
+        {"key": "학원이름", "value": "테스트학원"},
+        {"key": "학생이름", "value": "테스트학생"},
+        {"key": "강의명", "value": "수학"},
+        {"key": "차시명", "value": "1회차"},
+        {"key": "강의날짜", "value": "2026-09-06"},
+        {"key": "강의시간", "value": "18:00"},
+        {"key": "선생님메모", "value": "입실 안내"},
+        {"key": "사이트링크", "value": "https://example.test"},
+    ]
+    text = "입실 안내"
+    with patch("apps.domains.messaging.sqs_queue.get_queue_client", return_value=fake_client):
+        queue = MessagingSQSQueue(wake_messaging_workers=False)
+        assert queue.enqueue(
+            tenant_id=1,
+            source_tenant_id=2,
+            to="01012345678",
+            text=text,
+            message_mode="alimtalk",
+            template_id="KA01TP260406121126868FGddLmrDFUC",
+            provider_template_type="attendance",
+            provider_template_version="CXHFcwKdJU",
+            provider_template_structure_fingerprint="7f443b87eb8d8c95",
+            content_snapshot_sha256=build_content_snapshot_sha256(
+                text=text,
+                replacements=replacements,
+            ),
+            alimtalk_replacements=replacements,
+            event_type="check_in_complete",
+            target_type="student",
+            target_id=9301,
+            occurrence_key="check-in-1",
+        )
+
+    message = fake_client.messages[0]
+    assert _worker_delivery_identity_error(message) == ""
+    tampered_variables = {
+        **message,
+        "alimtalk_replacements": replacements[:-1],
+    }
+    from apps.domains.messaging.security import build_delivery_identity_signature
+
+    tampered_variables["delivery_identity_signature"] = build_delivery_identity_signature(
+        tampered_variables
+    )
+    assert (
+        _worker_delivery_identity_error(tampered_variables)
+        == "invalid_provider_template_variables"
+    )
+
+
 @pytest.mark.parametrize("message_mode", ["lms", "both", "email"])
 def test_queue_rejects_every_explicit_non_alimtalk_mode(message_mode: str) -> None:
     queue = MessagingSQSQueue()
@@ -193,6 +340,37 @@ def test_canonical_payload_binds_recipient_and_keeps_privacy_safe_trace() -> Non
     assert _worker_tenant_binding_error(tampered) == "invalid_business_idempotency_key"
 
 
+def test_manual_request_trace_is_exact_and_occurrence_key_authenticated() -> None:
+    fake_client = _FakeQueueClient()
+    request_id = "00000000-0000-4000-8000-000000000011"
+    batch_id = "00000000-0000-4000-8000-000000000012"
+    occurrence_key = f"request:{request_id}:batch:{batch_id}"
+    with patch("apps.domains.messaging.sqs_queue.get_queue_client", return_value=fake_client):
+        queue = MessagingSQSQueue(wake_messaging_workers=False)
+        assert queue.enqueue(
+            tenant_id=1,
+            to="01012345678",
+            text="trace",
+            message_mode="alimtalk",
+            event_type="manual_send",
+            target_type="student",
+            target_id=10,
+            request_id=request_id,
+            batch_id=batch_id,
+            sender_staff_id=7,
+            trace_identity_version="v1",
+            origin_type="manual_send",
+            origin_id=request_id,
+            occurrence_key=occurrence_key,
+        )
+
+    message = fake_client.messages[0]
+    assert _worker_request_trace_error(message) == ""
+    assert _worker_tenant_binding_error(message) == ""
+    tampered = {**message, "batch_id": "00000000-0000-4000-8000-000000000013"}
+    assert _worker_request_trace_error(tampered) == "invalid_request_occurrence_key"
+
+
 def test_worker_normalizes_raw_tenant_payload_to_common_owner() -> None:
     tenant_id, source_tenant_id = _normalize_worker_tenants(
         3,
@@ -236,6 +414,11 @@ def test_worker_manual_template_allowlist_contains_only_registered_unified_ids()
     allowed = _allowed_common_template_ids("manual_send")
     assert allowed
     assert "STALE-OR-HOSTILE-TEMPLATE" not in allowed
+
+
+def test_worker_unmapped_event_has_no_database_template_fallback() -> None:
+    assert _allowed_common_template_ids("qna_answered") == set()
+    assert _allowed_common_template_ids("video_encoding_complete") == set()
 
 
 def test_worker_requires_signed_binding_for_owner_and_legacy_payloads() -> None:

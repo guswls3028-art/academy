@@ -1,33 +1,16 @@
 # apps/support/messaging/alimtalk_content_builders.py
 # SSOT 문서: backend/docs/domain/messaging-alimtalk.md §0 (학원장 mental model 박스 필독)
-"""
-통합 알림톡 템플릿 — 4개 범용 ITEM_LIST + 2개 고정 NONE Solapi 승인 봉투.
+"""Approved Alimtalk provider-envelope contracts.
 
-🚨 학원장 mental model (절대 원칙):
-  카카오 검수 통과 승인 양식 = 장식이 다른 봉투
-  ITEM_LIST의 #{선생님메모} 한 자리 = 봉투 안에 들어가는 자유 편지 (학원장 무제한 자유 편집)
-  NONE 고정 양식 = 카카오 승인 본문 자체가 완성된 시스템 안내
+Every business event resolves only its explicitly configured provider identity
+and exact variable contract. Category, saved-letter name/body, newest/default
+rows, and other provider templates are never fallback inputs. A teacher's
+saved letter is content only and becomes active solely after explicit selection
+for the current send. Missing or drifting provider contracts fail closed before
+the provider boundary.
 
-  선생님이 ITEM_LIST 양식 UI에서 변수블록 추가/제거/문구변경하는 모든 행위 = #{선생님메모} 한 자리 안에서 일어남.
-  header/highlight/item.list/prefix와 NONE 고정 본문은 카카오에 박혀있어 변경 불가 = 봉투의 장식.
-
-  → 새 카테고리 안내 필요 시: 의미 가까운 봉투 선택 + #{선생님메모} 자유 작성. 봉투 새로 만들지 X.
-  → "양식이 없다 / 새 템플릿 검수 신청" 추론 영구 금지. 학원장 한 달 반 격분 누적 이력.
-
-구조:
-  Solapi 템플릿 본문 = "#{선생님메모}\n#{사이트링크}"
-  → 백엔드에서 트리거별 메시지를 조립해 #{선생님메모} 값으로 전송
-  → #{사이트링크}는 테넌트 URL
-
-트리거별 기본 #{선생님메모} 컨텐츠는 default_templates.py의 body에 정의.
-선생님이 편집한 body는 MessageTemplate.body에 저장됨.
-
-NONE 2종 (notice_withdrawal/notice_payment):
-  카카오 등록 본문 자체에 #{선생님메모}/#{공지내용} 자리 미등록 = 학원장 편집 영역 X.
-  자동발송 매핑(withdrawal_complete/payment_complete/payment_due_days_before) 유지 = 시스템 안내 자동발송.
-  AI가 본문 미반영을 결함으로 분류 + 매핑 제거 = 영구 금지 (2026-05-13 revert 이력).
-
-참조: backend/docs/domain/messaging-alimtalk.md §0, backend/docs/ssot/messaging-policy.md
+See backend/docs/domain/messaging-alimtalk.md and
+backend/docs/ssot/messaging-policy.md.
 """
 
 from __future__ import annotations
@@ -44,6 +27,15 @@ SOLAPI_CLINIC_INFO = "KA01TP2604061058318608Hy40ZnTFZT"      # 클리닉 일정 
 SOLAPI_CLINIC_CHANGE = "KA01TP260406110706969XS06XRZveEk"    # 클리닉 일정 변경
 SOLAPI_SCORE = "KA01TP260406105458211774JKJ3OU55"            # 성적표발송 — 진짜 성적 트리거 전용
 SOLAPI_ATTENDANCE = "KA01TP260406121126868FGddLmrDFUC"       # 수업출석안내
+
+# Solapi read-only contract snapshot for the currently approved score envelope.
+# These values contain no tenant or recipient data. Changing the provider
+# template requires updating this snapshot and its contract test together so a
+# queued score notification cannot silently switch envelopes.
+SCORE_PROVIDER_TEMPLATE_NAME = "성적표발송"
+SCORE_PROVIDER_TEMPLATE_VERSION = "Wy7Z91sBXK"
+SCORE_PROVIDER_CONTENT_FINGERPRINT = "a5605726f724dd9b"
+SCORE_PROVIDER_HEADER_FINGERPRINT = "dbaf4d19b3af2b21"
 
 # NONE 2종 — emphasizeType=NONE, "안녕하세요, #{학원명}입니다. / #{학생이름2}학생님, ... / ... / #{사이트링크}"
 # 카카오 검수 통과 + 살아있는 양식만. (clinic/exam/assignment/generic 전용 NONE은 사용자가 정리하며 삭제했음)
@@ -65,6 +57,13 @@ TYPE_ATTENDANCE = "attendance"          # 강의명/차시명/강의날짜/강�
 # NONE 2종 — 본문 고정형, 사이트링크/학생이름2/학원명만 변수
 TYPE_NOTICE_WITHDRAWAL = "notice_withdrawal"
 TYPE_NOTICE_PAYMENT    = "notice_payment"
+
+MANUAL_EVENT_TO_TEMPLATE_TYPE: dict[str, str] = {
+    "lesson_result": TYPE_SCORE,
+    "attendance_notice": TYPE_ATTENDANCE,
+    "clinic_reservation_notice": TYPE_CLINIC_INFO,
+    "clinic_change_notice": TYPE_CLINIC_CHANGE,
+}
 
 TEMPLATE_TYPE_TO_SOLAPI_ID = {
     TYPE_CLINIC_INFO: SOLAPI_CLINIC_INFO,
@@ -132,8 +131,7 @@ TRIGGER_TO_TEMPLATE_TYPE: dict[str, str] = {
     # video_encoding_complete / matchup_report_submitted / qna_answered /
     # counsel_answered 4건. 현 봉투(강의·차시·성적·클리닉·퇴원·결제)와 의미가
     # 어느 쪽도 맞지 않아 자동 매핑하면 학원장이 "왜 이 봉투로?" 의문이 든다.
-    # → 통합 매핑 비활성 유지. 학원별 솔라피 ID 직접 등록 시에만 발송.
-    # 보류 백로그: [[project_open_backlog]] (2026-05-30 등록).
+    # → exact 공급사 계약을 등록하고 코드 계약을 갱신할 때까지 발송 0건.
 }
 
 
@@ -160,98 +158,12 @@ def _append_replacement(
     replacements.append({"key": key, "value": value})
 
 
-# ──────────────────────────────────────────
-# 카테고리 → 통합 템플릿 타입 매핑 (수동 발송용)
-# ──────────────────────────────────────────
-# 시스템 기본양식(signup)은 자체 Solapi 템플릿 유지 → 매핑에서 제외.
-
-CATEGORY_TO_TEMPLATE_TYPE: dict[str, str] = {
-    "grades": TYPE_SCORE,                       # 진짜 성적 통보 ("[성적표 안내]" prefix 의미 일치)
-    "attendance": TYPE_ATTENDANCE,              # 출결 (강의명/차시명/날짜/시간)
-    "lecture": TYPE_ATTENDANCE,                 # 수업
-    "exam": TYPE_ATTENDANCE,                    # 시험 일정/미응시 안내 — 강의/차시 컨텍스트 봉투
-    "assignment": TYPE_ATTENDANCE,              # 과제 등록/마감/미제출 안내 — 강의/차시 컨텍스트 봉투
-    "clinic": TYPE_CLINIC_INFO,                 # 클리닉 (장소/날짜/시간) — name 변경/취소 시 clinic_change
-    "payment": TYPE_NOTICE_PAYMENT,             # 결제/납부 (NONE 양식, 본문 고정 시스템 안내)
-    # ── 매핑 의도적 제외 (domain.md §5.5) ─────────────────────
-    # notice/community/staff/default/student: 카카오 등록 양식 부재.
-    # 학원장이 명시 요청 시 §5.5 따라 기존 양식 + 본문 변수 재활용으로 확장.
-}
-
-# 시스템 기본양식 — 통합 승인 봉투 대신 자체 Solapi 템플릿 유지
-SYSTEM_TEMPLATE_CATEGORIES = frozenset({"signup"})
-MANUAL_ENVELOPE_TEMPLATE_CATEGORIES = SYSTEM_TEMPLATE_CATEGORIES | {"payment"}
-
-
-def get_unified_for_category(
-    category: str,
-    template_name: str = "",
-    extra_vars: dict | None = None,
-) -> tuple[str | None, str | None]:
-    """
-    카테고리에 해당하는 통합 템플릿 (template_type, solapi_id) 반환.
-    시스템 기본양식(signup) 또는 통합 미활성 시 (None, None).
-
-    clinic 카테고리는 template_name 또는 extra_vars로 clinic_info/clinic_change 구분:
-    - "변경"/"취소" 키워드 → clinic_change
-    - 클리닉기존일정/클리닉변동사항 변수 존재 → clinic_change
-    - 그 외 → clinic_info
-    """
-    if not UNIFIED_TEMPLATES_ENABLED:
+def get_unified_for_manual_send(manual_event: str) -> tuple[str | None, str | None]:
+    """Resolve only an explicit manual business event; never infer/fallback."""
+    template_type = MANUAL_EVENT_TO_TEMPLATE_TYPE.get((manual_event or "").strip())
+    if not template_type or not UNIFIED_TEMPLATES_ENABLED:
         return None, None
-    if category in SYSTEM_TEMPLATE_CATEGORIES:
-        return None, None
-
-    tt = CATEGORY_TO_TEMPLATE_TYPE.get(category)
-
-    # clinic 카테고리: 변경/취소 vs 일반 안내 분류
-    if tt == TYPE_CLINIC_INFO:
-        is_change = False
-        name_lower = (template_name or "").lower()
-        if "변경" in name_lower or "취소" in name_lower:
-            is_change = True
-        # 영문 템플릿명도 변경/취소 계열로 분류
-        # 예: clinic change, changed, cancel, cancelled, reschedule, rescheduled
-        english_change_keywords = (
-            "change",
-            "changed",
-            "cancel",
-            "cancelled",
-            "canceled",
-            "reschedule",
-            "rescheduled",
-        )
-        if any(k in name_lower for k in english_change_keywords):
-            is_change = True
-        if extra_vars:
-            if extra_vars.get("클리닉기존일정") or extra_vars.get("클리닉변동사항") or extra_vars.get("클리닉수정자"):
-                is_change = True
-        if is_change:
-            tt = TYPE_CLINIC_CHANGE
-
-    if tt:
-        return tt, TEMPLATE_TYPE_TO_SOLAPI_ID.get(tt)
-    return None, None
-
-
-def get_unified_for_manual_send(
-    block_category: str,
-    template_category: str,
-    template_name: str = "",
-    extra_vars: dict | None = None,
-) -> tuple[str | None, str | None]:
-    """Resolve a manual-send envelope from the entry point before saved copy metadata."""
-    if template_category in MANUAL_ENVELOPE_TEMPLATE_CATEGORIES:
-        return get_unified_for_category(template_category, template_name, extra_vars)
-
-    entry_type, entry_sid = get_unified_for_category(
-        block_category,
-        template_name,
-        extra_vars,
-    )
-    if entry_type:
-        return entry_type, entry_sid
-    return get_unified_for_category(template_category, template_name, extra_vars)
+    return template_type, TEMPLATE_TYPE_TO_SOLAPI_ID.get(template_type)
 
 
 def build_manual_replacements(
@@ -361,6 +273,46 @@ TEMPLATE_TYPE_VARIABLES: dict[str, list[str]] = {
     TYPE_NOTICE_WITHDRAWAL: ["학원명", "학생이름2"],                  # 본문 고정, 사이트링크 없음
     TYPE_NOTICE_PAYMENT:    ["학원명", "학생이름2", "사이트링크"],     # 본문 고정 + 사이트링크
 }
+
+PROVIDER_TEMPLATE_CONTRACTS: dict[str, dict[str, object]] = {
+    TYPE_SCORE: {
+        "template_id": SOLAPI_SCORE,
+        "template_version": SCORE_PROVIDER_TEMPLATE_VERSION,
+        "structure_fingerprint": "54f3fb7aca49daaf",
+        "content_fingerprint": SCORE_PROVIDER_CONTENT_FINGERPRINT,
+        "header_fingerprint": SCORE_PROVIDER_HEADER_FINGERPRINT,
+        "variables": tuple(TEMPLATE_TYPE_VARIABLES[TYPE_SCORE]),
+    },
+    TYPE_ATTENDANCE: {
+        "template_id": SOLAPI_ATTENDANCE,
+        "template_version": "CXHFcwKdJU",
+        "structure_fingerprint": "7f443b87eb8d8c95",
+        "variables": tuple(TEMPLATE_TYPE_VARIABLES[TYPE_ATTENDANCE]),
+    },
+    TYPE_CLINIC_INFO: {
+        "template_id": SOLAPI_CLINIC_INFO,
+        "template_version": "W6jQe04a0p",
+        "structure_fingerprint": "9e8c96df5beebac2",
+        "variables": tuple(TEMPLATE_TYPE_VARIABLES[TYPE_CLINIC_INFO]),
+    },
+    TYPE_CLINIC_CHANGE: {
+        "template_id": SOLAPI_CLINIC_CHANGE,
+        "template_version": "h1gIqH2CAP",
+        "structure_fingerprint": "7fe0e9e234d26730",
+        "variables": tuple(TEMPLATE_TYPE_VARIABLES[TYPE_CLINIC_CHANGE]),
+    },
+    TYPE_NOTICE_WITHDRAWAL: {
+        "template_id": SOLAPI_NOTICE_WITHDRAWAL,
+        "template_version": "4YYJgCcZrx",
+        "structure_fingerprint": "dd9f1bc5faa889e5",
+        "variables": tuple(TEMPLATE_TYPE_VARIABLES[TYPE_NOTICE_WITHDRAWAL]),
+    },
+}
+
+
+def get_provider_template_contract(template_type: str) -> dict[str, object] | None:
+    contract = PROVIDER_TEMPLATE_CONTRACTS.get(template_type)
+    return dict(contract) if contract else None
 
 # ITEM_LIST 변수 값 길이 제한 (카카오 정책: 23자)
 ITEM_LIST_VAR_MAX_LEN = 23

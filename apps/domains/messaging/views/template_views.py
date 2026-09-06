@@ -6,6 +6,7 @@ from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from django.utils import timezone
 
 from apps.core.permissions import TenantResolvedAndStaff
 from apps.domains.messaging.models import MessageTemplate
@@ -30,7 +31,10 @@ class MessageTemplateListCreateView(APIView):
     permission_classes = [IsAuthenticated, TenantResolvedAndStaff]
 
     def get(self, request):
-        queryset = MessageTemplate.objects.filter(tenant=request.tenant).order_by("-updated_at")
+        queryset = MessageTemplate.objects.filter(
+            tenant=request.tenant,
+            retired_at__isnull=True,
+        ).order_by("-updated_at")
         category = (request.query_params.get("category") or "").strip().lower()
         valid_categories = {choice.value for choice in MessageTemplate.Category}
         if category and category in valid_categories:
@@ -51,7 +55,11 @@ class MessageTemplateDetailView(APIView):
 
     @staticmethod
     def _get_template(request, pk):
-        return MessageTemplate.objects.filter(tenant=request.tenant, pk=pk).first()
+        return MessageTemplate.objects.filter(
+            tenant=request.tenant,
+            pk=pk,
+            retired_at__isnull=True,
+        ).first()
 
     def get(self, request, pk):
         template = self._get_template(request, pk)
@@ -100,7 +108,9 @@ class MessageTemplateDetailView(APIView):
                 {"detail": "시스템 기본 문구는 삭제할 수 없습니다."},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        template.delete()
+        template.is_user_default = False
+        template.retired_at = timezone.now()
+        template.save(update_fields=["is_user_default", "retired_at", "updated_at"])
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -110,7 +120,11 @@ class MessageTemplateSetDefaultView(APIView):
     permission_classes = [IsAuthenticated, TenantResolvedAndStaff]
 
     def post(self, request, pk):
-        template = MessageTemplate.objects.filter(tenant=request.tenant, pk=pk).first()
+        template = MessageTemplate.objects.filter(
+            tenant=request.tenant,
+            pk=pk,
+            retired_at__isnull=True,
+        ).first()
         if not template:
             return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
         MessageTemplate.objects.filter(
@@ -129,7 +143,11 @@ class MessageTemplateDuplicateView(APIView):
     permission_classes = [IsAuthenticated, TenantResolvedAndStaff]
 
     def post(self, request, pk):
-        source = MessageTemplate.objects.filter(tenant=request.tenant, pk=pk).first()
+        source = MessageTemplate.objects.filter(
+            tenant=request.tenant,
+            pk=pk,
+            retired_at__isnull=True,
+        ).first()
         if not source:
             return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
         name = (request.data.get("name") or "").strip() or build_duplicate_template_name(

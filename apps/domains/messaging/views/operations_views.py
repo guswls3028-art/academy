@@ -21,13 +21,19 @@ class SendMessagePreflightView(APIView):
         tenant = request.tenant
         if not can_send_messages(request, tenant):
             return Response(
-                {"detail": "알림톡 발송 권한이 없습니다. 관리자 또는 강사 권한이 필요합니다."},
+                {"detail": "알림톡 발송 권한이 없습니다. 관리자·강사·조교 권한이 필요합니다."},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
         serializer = SendMessageRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        return Response(build_send_preflight(tenant, serializer.validated_data))
+        return Response(
+            build_send_preflight(
+                tenant,
+                serializer.validated_data,
+                actor_id=request.user.pk,
+            )
+        )
 
 
 class MessagingOperationsStatusView(APIView):

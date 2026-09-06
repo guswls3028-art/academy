@@ -265,8 +265,8 @@ class BusinessMessagingContractTests(TestCase):
         )
 
         self.assertFalse(plan.ok)
-        self.assertEqual(plan.source, "unified_missing")
-        self.assertTrue(plan.uses_unified_template)
+        self.assertEqual(plan.source, "missing")
+        self.assertFalse(plan.uses_unified_template)
 
     def test_saved_phrase_readiness_describes_envelope_not_legacy_solapi_status(self):
         attendance = MessageTemplate.objects.create(
@@ -294,8 +294,8 @@ class BusinessMessagingContractTests(TestCase):
         payment_data = MessageTemplateSerializer(payment).data
         general_data = MessageTemplateSerializer(general).data
 
-        self.assertEqual(attendance_data["alimtalk_readiness"], "ready")
-        self.assertEqual(attendance_data["alimtalk_envelope_type"], "attendance")
-        self.assertEqual(payment_data["alimtalk_readiness"], "provider_template_missing")
-        self.assertEqual(payment_data["alimtalk_envelope_type"], "notice_payment")
+        self.assertEqual(attendance_data["alimtalk_readiness"], "envelope_selection_required")
+        self.assertEqual(attendance_data["alimtalk_envelope_type"], "")
+        self.assertEqual(payment_data["alimtalk_readiness"], "envelope_selection_required")
+        self.assertEqual(payment_data["alimtalk_envelope_type"], "")
         self.assertEqual(general_data["alimtalk_readiness"], "envelope_selection_required")

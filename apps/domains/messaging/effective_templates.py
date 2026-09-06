@@ -18,32 +18,8 @@ class EffectiveTemplateStatus:
 
 
 def prime_effective_owner_templates(configs) -> list:
-    """Batch-load owner exact-trigger templates to avoid one query per config."""
-    from apps.domains.messaging.models import AutoSendConfig
-    from apps.domains.messaging.policy import get_owner_tenant_id
-
-    config_list = list(configs)
-    owner_id = int(get_owner_tenant_id())
-    unresolved_triggers = {
-        config.trigger
-        for config in config_list
-        if not (get_solapi_template_id(config.trigger) or "").strip()
-        and int(getattr(config, "tenant_id", 0) or 0) != owner_id
-    }
-    owner_templates = {
-        owner_config.trigger: owner_config.template
-        for owner_config in AutoSendConfig.objects.select_related("template").filter(
-            tenant_id=owner_id,
-            trigger__in=unresolved_triggers,
-        )
-    }
-    for config in config_list:
-        if int(getattr(config, "tenant_id", 0) or 0) == owner_id:
-            template = getattr(config, "template", None)
-        else:
-            template = owner_templates.get(config.trigger)
-        config._effective_owner_exact_template = template
-    return config_list
+    """Materialize configs without resolving any provider-template fallback."""
+    return list(configs)
 
 
 def resolve_effective_template_status(config) -> EffectiveTemplateStatus:
@@ -54,6 +30,12 @@ def resolve_effective_template_status(config) -> EffectiveTemplateStatus:
             solapi_template_id="",
             solapi_status="",
             source="content_template_missing",
+        )
+    if getattr(content_template, "retired_at", None) is not None:
+        return EffectiveTemplateStatus(
+            solapi_template_id="",
+            solapi_status="",
+            source="content_template_retired",
         )
     if int(content_template.tenant_id) != int(config.tenant_id):
         return EffectiveTemplateStatus(
@@ -78,32 +60,10 @@ def resolve_effective_template_status(config) -> EffectiveTemplateStatus:
             template_type=unified_template_type,
         )
 
-    # 비통합 트리거도 테넌트가 연결한 provider template을 사용하지 않는다.
-    # 실행 경로(send_event_notification)와 동일하게 owner의 exact trigger만 본다.
-    from apps.domains.messaging.models import AutoSendConfig
-    from apps.domains.messaging.policy import get_owner_tenant_id
-
-    if hasattr(config, "_effective_owner_exact_template"):
-        template = config._effective_owner_exact_template
-    else:
-        owner_id = int(get_owner_tenant_id())
-        if int(getattr(config, "tenant_id", 0) or 0) == owner_id:
-            owner_config = config
-        else:
-            owner_config = (
-                AutoSendConfig.objects.select_related("template")
-                .filter(tenant_id=owner_id, trigger=config.trigger)
-                .first()
-            )
-        template = getattr(owner_config, "template", None)
-    if template and int(template.tenant_id) != int(get_owner_tenant_id()):
-        return EffectiveTemplateStatus(
-            solapi_template_id="",
-            solapi_status="",
-            source="owner_template_tenant_mismatch",
-        )
+    # 매핑되지 않은 이벤트는 DB 행, 이름, 최신/기본 행으로 승인 봉투를
+    # 대체하지 않는다. 공급사 계약을 등록할 때까지 발송 0건이다.
     return EffectiveTemplateStatus(
-        solapi_template_id=((getattr(template, "solapi_template_id", "") or "").strip()),
-        solapi_status=(getattr(template, "solapi_status", "") or ""),
-        source="owner_exact" if template else "missing",
+        solapi_template_id="",
+        solapi_status="",
+        source="provider_contract_missing",
     )

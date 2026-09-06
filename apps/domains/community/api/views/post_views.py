@@ -786,10 +786,9 @@ class PostViewSet(viewsets.ModelViewSet):
                 send_event_notification = None
 
             for send_to in send_targets:
-                sent = False
                 if send_event_notification is not None:
                     try:
-                        sent = send_event_notification(
+                        send_event_notification(
                             tenant=tenant, trigger=trigger,
                             student=post.created_by, send_to=send_to, context=ctx,
                         )
@@ -798,18 +797,6 @@ class PostViewSet(viewsets.ModelViewSet):
                             "community reply primary notification failed: post_id=%s trigger=%s send_to=%s err=%s",
                             post.id,
                             trigger,
-                            send_to,
-                            e,
-                        )
-                if post.post_type == "qna" and not sent:
-                    try:
-                        from apps.domains.community.services.qna_notifications import notify_qna_answered
-
-                        notify_qna_answered(post, reply, send_to=send_to, actor_user=request.user)
-                    except Exception as e:
-                        logger.warning(
-                            "community qna reply fallback notification failed: post_id=%s send_to=%s err=%s",
-                            post.id,
                             send_to,
                             e,
                         )

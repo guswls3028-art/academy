@@ -10,6 +10,7 @@ from django.utils import timezone
 from apps.core.models import WorkerHeartbeatModel
 from apps.domains.messaging.alimtalk_content_builders import (
     build_manual_replacements,
+    get_provider_template_contract,
     get_unified_for_manual_send,
     render_alimtalk_preview_text,
 )
@@ -32,6 +33,11 @@ from apps.domains.messaging.services.recipients import resolve_student_message_r
 from apps.domains.messaging.services.grade_personalization import (
     normalize_per_student_context,
     validate_grade_personalization,
+)
+from apps.domains.messaging.services.manual_delivery_identity import (
+    ManualDeliveryIdentityError,
+    issue_manual_send_preflight_identity,
+    resolve_content_template_snapshot,
 )
 
 
@@ -59,6 +65,13 @@ class TemplatePlan:
     detail: str = ""
     uses_unified_template: bool = False
     template_type: str = ""
+    error_code: str = ""
+    content_template_id: int | None = None
+    content_template_version: str = ""
+    provider_template_version: str = ""
+    provider_template_structure_fingerprint: str = ""
+    provider_template_content_fingerprint: str = ""
+    provider_template_header_fingerprint: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -70,6 +83,13 @@ class TemplatePlan:
             "detail": self.detail,
             "uses_unified_template": self.uses_unified_template,
             "template_type": self.template_type,
+            "error_code": self.error_code,
+            "content_template_id": self.content_template_id,
+            "content_template_version": self.content_template_version,
+            "provider_template_version": self.provider_template_version,
+            "provider_template_structure_fingerprint": self.provider_template_structure_fingerprint,
+            "provider_template_content_fingerprint": self.provider_template_content_fingerprint,
+            "provider_template_header_fingerprint": self.provider_template_header_fingerprint,
         }
 
 
@@ -78,30 +98,27 @@ def _resolve_template_for_manual_send(tenant, data: dict[str, Any]) -> TemplateP
     template_id = data.get("template_id")
     raw_body = (data.get("raw_body") or "").strip()
     raw_subject = (data.get("raw_subject") or "").strip()
-    block_category = (data.get("block_category") or "").strip()
-    extra_vars = data.get("alimtalk_extra_vars") or {}
+    manual_event = (data.get("manual_event") or "").strip()
 
     if message_mode != "alimtalk":
         return TemplatePlan(ok=False, source="unsupported", detail="현재 수동 발송은 알림톡만 지원합니다.")
 
-    template = None
-    if template_id:
-        template = MessageTemplate.objects.filter(tenant=tenant, pk=template_id).first()
-        if not template:
-            return TemplatePlan(ok=False, source="missing", detail="선택한 템플릿을 찾을 수 없습니다.")
+    try:
+        template = resolve_content_template_snapshot(tenant, data)
+    except ManualDeliveryIdentityError as exc:
+        return TemplatePlan(
+            ok=False,
+            source="content_snapshot",
+            detail=exc.detail,
+            error_code=exc.code,
+        )
 
     body_base = raw_body or ((template.body or "").strip() if template else "")
     if not body_base:
         return TemplatePlan(ok=False, source="empty_body", detail="발송할 본문이 비어 있습니다.")
 
-    category = (template.category if template else "") or ""
     template_name = (template.name if template else "") or ""
-    unified_type, unified_sid = get_unified_for_manual_send(
-        block_category,
-        category,
-        template_name,
-        extra_vars,
-    )
+    unified_type, unified_sid = get_unified_for_manual_send(manual_event)
     if unified_type and not unified_sid:
         return TemplatePlan(
             ok=False,
@@ -114,6 +131,7 @@ def _resolve_template_for_manual_send(tenant, data: dict[str, Any]) -> TemplateP
             uses_unified_template=True,
         )
     if unified_type and unified_sid:
+        contract = get_provider_template_contract(unified_type) or {}
         return TemplatePlan(
             ok=True,
             source="unified",
@@ -123,6 +141,18 @@ def _resolve_template_for_manual_send(tenant, data: dict[str, Any]) -> TemplateP
             detail="카카오 검수 완료된 시스템 봉투로 발송됩니다.",
             uses_unified_template=True,
             template_type=unified_type,
+            content_template_id=template.id if template else None,
+            content_template_version=template.updated_at.isoformat() if template else "",
+            provider_template_version=str(contract.get("template_version") or ""),
+            provider_template_structure_fingerprint=str(
+                contract.get("structure_fingerprint") or ""
+            ),
+            provider_template_content_fingerprint=str(
+                contract.get("content_fingerprint") or ""
+            ),
+            provider_template_header_fingerprint=str(
+                contract.get("header_fingerprint") or ""
+            ),
         )
 
     if raw_subject:
@@ -224,20 +254,16 @@ def _build_manual_preview_recipients(
     return preview_recipients
 
 
-def build_send_preflight(tenant, data: dict[str, Any]) -> dict[str, Any]:
+def build_send_preflight(
+    tenant,
+    data: dict[str, Any],
+    *,
+    actor_id: int | None = None,
+) -> dict[str, Any]:
     send_to = data.get("send_to") or "parent"
     scheduled_send_at = data.get("scheduled_send_at")
     blockers: list[PreflightIssue] = []
     warnings: list[PreflightIssue] = []
-
-    if (data.get("block_category") or "").strip() == "grades" and send_to != "parent":
-        blockers.append(
-            PreflightIssue(
-                "grade_recipient_policy",
-                "성적 알림 수신자 제한",
-                "성적 알림은 보호자에게만 발송할 수 있습니다.",
-            )
-        )
 
     if is_messaging_disabled(tenant.id):
         blockers.append(
@@ -317,7 +343,11 @@ def build_send_preflight(tenant, data: dict[str, Any]) -> dict[str, Any]:
 
     template_plan = _resolve_template_for_manual_send(tenant, data)
     if not template_plan.ok:
-        blockers.append(PreflightIssue("template_not_ready", "알림톡 봉투 확인 필요", template_plan.detail))
+        blockers.append(PreflightIssue(
+            template_plan.error_code or "template_not_ready",
+            "알림톡 봉투 확인 필요",
+            template_plan.detail,
+        ))
 
     recent_count = get_hourly_notification_usage(tenant)
     remaining_hourly = max(0, HOURLY_SEND_LIMIT - recent_count)
@@ -376,6 +406,16 @@ def build_send_preflight(tenant, data: dict[str, Any]) -> dict[str, Any]:
                 )
             )
 
+    preflight_identity = ""
+    if not blockers and template_plan.ok:
+        preflight_identity = issue_manual_send_preflight_identity(
+            tenant=tenant,
+            data=data,
+            recipients=recipients,
+            template_plan=template_plan,
+            actor_id=actor_id,
+        )
+
     return {
         "ok": not blockers,
         "can_send": not blockers,
@@ -392,6 +432,7 @@ def build_send_preflight(tenant, data: dict[str, Any]) -> dict[str, Any]:
             "limit": MAX_MANUAL_RECIPIENTS,
         },
         "template": template_plan.as_dict(),
+        "preflight_identity": preflight_identity,
         "preview_recipients": _build_manual_preview_recipients(
             tenant,
             data,

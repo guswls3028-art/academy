@@ -4,7 +4,6 @@
 """
 
 import logging
-import re
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +69,7 @@ def send_event_notification(
         get_solapi_template_id as get_unified_tid,
         get_template_type,
         build_unified_replacements,
+        get_provider_template_contract,
     )
     from .url_helpers import get_tenant_site_url
 
@@ -113,22 +113,14 @@ def send_event_notification(
             trigger,
         )
         return False
-
-    owner_id = get_owner_tenant_id()
-    owner_config = get_auto_send_config(owner_id, trigger)
-    owner_template = owner_config.template if owner_config else None
-    if owner_template and int(getattr(owner_template, "tenant_id", owner_id)) != int(owner_id):
+    if getattr(content_template, "retired_at", None) is not None:
         logger.error(
-            "send_event_notification blocked: trigger=%s owner template tenant mismatch",
+            "send_event_notification blocked: trigger=%s content template retired",
             trigger,
         )
         return False
-    owner_solapi_template_id = (owner_template.solapi_template_id or "").strip() if owner_template else ""
-    owner_solapi_approved = bool(
-        owner_template
-        and owner_solapi_template_id
-        and owner_template.solapi_status == "APPROVED"
-    )
+
+    owner_id = get_owner_tenant_id()
 
     effective_mode = (config.message_mode or "alimtalk").strip().lower()
     if effective_mode != "alimtalk":
@@ -142,18 +134,16 @@ def send_event_notification(
     # 트리거에 매핑된 통합 템플릿이 있으면 해당 ID 사용
     unified_type = get_template_type(trigger)
     unified_tid = get_unified_tid(trigger)
-    use_unified = bool(unified_tid)
-    if unified_type and not unified_tid:
+    provider_contract = get_provider_template_contract(unified_type or "") or {}
+    if (
+        not unified_type
+        or not unified_tid
+        or provider_contract.get("template_id") != unified_tid
+        or not provider_contract.get("template_version")
+        or not provider_contract.get("structure_fingerprint")
+    ):
         logger.error(
-            "send_event_notification BLOCKED: trigger=%s mapped_template=%s has no registered Solapi SID",
-            trigger,
-            unified_type,
-        )
-        return False
-
-    if not use_unified and not owner_solapi_approved:
-        logger.debug(
-            "send_event_notification skipped: trigger=%s no exact approved owner template",
+            "send_event_notification BLOCKED: trigger=%s has no exact provider contract",
             trigger,
         )
         return False
@@ -172,8 +162,6 @@ def send_event_notification(
         return False
 
     name = (getattr(student, "name", "") or "").strip()
-    name_2 = name[-2:] if len(name) >= 2 else name  # 성(첫 글자) 제외 = 이름만
-    name_3 = name  # 전체 이름 (하위 호환: 기존 #{학생이름3} 치환)
     academy_name = (getattr(tenant, "name", "") or "").strip()
     site_url = get_tenant_site_url(tenant) or ""
 
@@ -181,67 +169,20 @@ def send_event_notification(
     if context and context.get("_actual_time") and getattr(config, "show_actual_time", False):
         context["시간"] = context["_actual_time"]
 
-    # ── 통합 템플릿 모드: #{선생님메모} + 변수 replacements 빌드 ──
-    if use_unified:
-        # template.body = #{선생님메모}에 들어갈 안내 문구 (선생님 편집 가능)
-        content_body = (content_template.body or "").strip()
-
-        # Solapi replacements: 선생님메모 + 학원이름 + 학생이름 + 도메인 변수 + 사이트링크
-        replacements = build_unified_replacements(
-            trigger=trigger,
-            content_body=content_body,
-            context=context or {},
-            tenant_name=academy_name,
-            student_name=name,
-            site_url=site_url,
-        )
-
-        # Solapi 알림톡 본문 필드. 공급사 SMS fallback은 worker에서 비활성화한다.
-        _enqueue_text = next(
-            (r["value"] for r in replacements if r["key"] == "선생님메모"),
-            content_body,
-        )
-        _alimtalk_tid = unified_tid
-
-    else:
-        # ── 개별 승인 템플릿 모드: owner exact trigger 템플릿만 사용 ──
-        replacements = [
-            {"key": "학원명", "value": academy_name},
-            {"key": "학생이름", "value": name},
-            {"key": "학생이름2", "value": name_2},
-            {"key": "학생이름3", "value": name_3},
-            {"key": "사이트링크", "value": site_url},
-        ]
-        for k, v in (context or {}).items():
-            if k.startswith("_"):
-                continue
-            replacements.append({"key": k, "value": str(v)})
-
-        # 메시지 본문 (템플릿 치환)
-        text = (owner_template.body or "").strip()
-        all_vars = {
-            "학원명": academy_name, "학생이름": name, "학생이름2": name_2,
-            "학생이름3": name_3, "사이트링크": site_url,
-        }
-        all_vars.update({k: str(v) for k, v in (context or {}).items() if not k.startswith("_")})
-        for k, v in all_vars.items():
-            text = text.replace(f"#{{{k}}}", v)
-
-        _OPTIONAL_VARS = {"공지내용", "선생님메모", "내용"}
-        remaining = re.findall(r"#\{([^}]+)\}", text)
-        required_missing = [v for v in remaining if v not in _OPTIONAL_VARS]
-        if required_missing:
-            logger.error(
-                "send_event_notification BLOCKED: trigger=%s template=%s required_vars missing: %s",
-                trigger, owner_template.name, required_missing,
-            )
-            return False
-        for opt in _OPTIONAL_VARS:
-            text = text.replace(f"#{{{opt}}}", "")
-        text = re.sub(r"\n{3,}", "\n\n", text).strip()
-
-        _enqueue_text = text
-        _alimtalk_tid = owner_solapi_template_id
+    content_body = (content_template.body or "").strip()
+    replacements = build_unified_replacements(
+        trigger=trigger,
+        content_body=content_body,
+        context=context or {},
+        tenant_name=academy_name,
+        student_name=name,
+        site_url=site_url,
+    )
+    _enqueue_text = next(
+        (r["value"] for r in replacements if r["key"] == "선생님메모"),
+        content_body,
+    )
+    _alimtalk_tid = unified_tid
 
     sender = ""
 
@@ -286,6 +227,18 @@ def send_event_notification(
         "domain_object_id": domain_object_id,
         "actor_id": actor_id,
     }
+    from apps.domains.messaging.services.manual_delivery_identity import (
+        build_manual_delivery_identity,
+    )
+
+    payload.update(
+        build_manual_delivery_identity(
+            template_type=unified_type,
+            content_template=content_template,
+            text=_enqueue_text,
+            replacements=replacements,
+        )
+    )
 
     if send_at is not None:
         try:

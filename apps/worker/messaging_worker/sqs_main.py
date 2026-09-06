@@ -16,6 +16,7 @@ import os
 import signal
 import sys
 import time
+import uuid
 from typing import Callable, Optional
 
 from libs.queue import get_queue_client, QueueUnavailableError
@@ -199,6 +200,72 @@ def _worker_tenant_binding_error(data: dict) -> str:
     return ""
 
 
+def _worker_delivery_identity_error(data: dict) -> str:
+    """Read v1/v2 payloads during rollout and reject any supplied v2 drift."""
+
+    from django.conf import settings
+    from apps.domains.messaging.security import (
+        DELIVERY_IDENTITY_SIGNATURE_VERSION,
+        verify_delivery_identity_signature,
+    )
+
+    version = str(data.get("delivery_identity_version") or "").strip()
+    signature = str(data.get("delivery_identity_signature") or "").strip()
+    if version or signature:
+        if version != DELIVERY_IDENTITY_SIGNATURE_VERSION:
+            return "unsupported_delivery_identity_version"
+        if not signature:
+            return "missing_delivery_identity_signature"
+        if not verify_delivery_identity_signature(data, signature=signature):
+            return "invalid_delivery_identity_signature"
+
+        event_type = str(data.get("event_type") or "").strip()
+        from apps.domains.messaging.services.manual_delivery_identity import (
+            validate_delivery_identity,
+        )
+
+        return validate_delivery_identity(data, event_type=event_type)
+
+    if bool(
+        getattr(settings, "MESSAGING_DELIVERY_IDENTITY_V2_ENFORCED", False)
+    ):
+        return "missing_delivery_identity_v2"
+    return ""
+
+
+def _worker_request_trace_error(data: dict) -> str:
+    """Reject drift in a new manual request/batch/origin trace identity."""
+
+    version = str(data.get("trace_identity_version") or "").strip()
+    if not version:
+        return ""
+    if version != "v1":
+        return "unsupported_trace_identity_version"
+    try:
+        request_id = str(uuid.UUID(str(data.get("request_id") or "")))
+        batch_id = str(uuid.UUID(str(data.get("batch_id") or "")))
+    except (ValueError, TypeError, AttributeError):
+        return "invalid_request_batch_identity"
+    if str(data.get("origin_type") or "") != "manual_send":
+        return "invalid_request_origin_type"
+    if str(data.get("origin_id") or "") != request_id:
+        return "invalid_request_origin_id"
+    if str(data.get("occurrence_key") or "") != f"request:{request_id}:batch:{batch_id}":
+        return "invalid_request_occurrence_key"
+    return ""
+
+
+def _worker_observer_copy_block_reason(data: dict) -> str:
+    """Block a sensitive observer copy even when it arrives via SQS redelivery."""
+
+    from apps.domains.messaging.observers import observer_copy_block_reason
+
+    return observer_copy_block_reason(
+        trigger=str(data.get("event_type") or ""),
+        payload=data,
+    )
+
+
 def _is_non_retryable_send_failure(reason: str) -> bool:
     return any(item in (reason or "") for item in _NON_RETRYABLE_SEND_FAILURES)
 
@@ -338,24 +405,8 @@ def _allowed_common_template_ids(event_type: str) -> set[str]:
         template_id = (get_solapi_template_id(trigger) or "").strip()
         return {template_id} if template_id else set()
 
-    from apps.domains.messaging.models import AutoSendConfig
-    from apps.domains.messaging.policy import get_owner_tenant_id
-
-    owner_id = int(get_owner_tenant_id())
-    config = (
-        AutoSendConfig.objects.select_related("template")
-        .filter(tenant_id=owner_id, trigger=trigger)
-        .first()
-    )
-    template = config.template if config else None
-    if (
-        not template
-        or int(template.tenant_id) != owner_id
-        or template.solapi_status != "APPROVED"
-    ):
-        return set()
-    template_id = (template.solapi_template_id or "").strip()
-    return {template_id} if template_id else set()
+    # 매핑되지 않은 이벤트는 DB의 임의 승인 행로 대체하지 않는다.
+    return set()
 
 
 # 메시지 발송 구간별 진행률 (n/4): 업로드 마법사처럼 단계별 0~100% 제공
@@ -955,6 +1006,27 @@ def main() -> int:
                         or data.get("domain_object_id")
                         or ""
                     ).strip()[:128]
+                    raw_batch_id_msg = str(data.get("batch_id") or "").strip()
+                    try:
+                        batch_id_msg = (
+                            str(uuid.UUID(raw_batch_id_msg))
+                            if raw_batch_id_msg
+                            else None
+                        )
+                    except (ValueError, TypeError, AttributeError):
+                        batch_id_msg = None
+                    try:
+                        sender_staff_id_msg = (
+                            int(data["sender_staff_id"])
+                            if data.get("sender_staff_id") is not None
+                            else None
+                        )
+                    except (TypeError, ValueError):
+                        sender_staff_id_msg = None
+                    trace_log_kwargs = {
+                        "batch_id": batch_id_msg,
+                        "sender_staff_id": sender_staff_id_msg,
+                    }
 
                     if not check_recipient_allowed(to):
                         logger.warning(
@@ -993,6 +1065,7 @@ def main() -> int:
                                     recipient_fingerprint=recipient_fingerprint_msg,
                                     origin_type=origin_type_msg,
                                     origin_id=origin_id_msg,
+                                    **trace_log_kwargs,
                                 )
                             except Exception as exc:
                                 logger.warning(
@@ -1028,6 +1101,9 @@ def main() -> int:
                         allowed_template_ids = _allowed_common_template_ids(event_type_msg)
                         if template_id_normalized not in allowed_template_ids:
                             template_policy_block_reason = "common_template_not_allowed"
+                    delivery_identity_block_reason = _worker_delivery_identity_error(data)
+                    request_trace_block_reason = _worker_request_trace_error(data)
+                    observer_copy_block_reason = _worker_observer_copy_block_reason(data)
                     channel_policy_block_reason = ""
                     if message_mode != "alimtalk":
                         from apps.domains.messaging.policy import (
@@ -1040,6 +1116,9 @@ def main() -> int:
                         channel_policy_block_reason
                         or video_encoding_block_reason
                         or template_policy_block_reason
+                        or delivery_identity_block_reason
+                        or request_trace_block_reason
+                        or observer_copy_block_reason
                     )
                     if policy_block_reason:
                         logger.error(
@@ -1067,6 +1146,14 @@ def main() -> int:
                                     target_type=target_type_msg,
                                     target_id=target_id_msg,
                                     target_name=target_name,
+                                    business_idempotency_key=_resolve_worker_business_key(
+                                        data,
+                                        message_id,
+                                    ),
+                                    recipient_fingerprint=recipient_fingerprint_msg,
+                                    origin_type=origin_type_msg,
+                                    origin_id=origin_id_msg,
+                                    **trace_log_kwargs,
                                 )
                             except Exception as e:
                                 logger.warning("create_notification_log failed: %s", e)
@@ -1158,6 +1245,8 @@ def main() -> int:
                                 recipient_fingerprint=recipient_fingerprint_msg,
                                 origin_type=origin_type_msg,
                                 origin_id=origin_id_msg,
+                                batch_id=batch_id_msg,
+                                sender_staff_id=sender_staff_id_msg,
                             )
                             if not claimed:
                                 if claim_log_id is not None:
@@ -1243,6 +1332,11 @@ def main() -> int:
                                 target_type=target_type_msg,
                                 target_id=target_id_msg,
                                 target_name=target_name,
+                                business_idempotency_key=business_key,
+                                recipient_fingerprint=recipient_fingerprint_msg,
+                                origin_type=origin_type_msg,
+                                origin_id=origin_id_msg,
+                                **trace_log_kwargs,
                             )
                         queue_client.delete_message(
                             queue_name=cfg.MESSAGING_SQS_QUEUE_NAME,
@@ -1330,6 +1424,11 @@ def main() -> int:
                                 target_type=target_type_msg,
                                 target_id=target_id_msg,
                                 target_name=target_name,
+                                business_idempotency_key=business_key,
+                                recipient_fingerprint=recipient_fingerprint_msg,
+                                origin_type=origin_type_msg,
+                                origin_id=origin_id_msg,
+                                **trace_log_kwargs,
                             )
                         queue_client.delete_message(
                             queue_name=cfg.MESSAGING_SQS_QUEUE_NAME,
@@ -1476,6 +1575,11 @@ def main() -> int:
                                             target_type=target_type_msg,
                                             target_id=target_id_msg,
                                             target_name=target_name,
+                                            business_idempotency_key=business_key,
+                                            recipient_fingerprint=recipient_fingerprint_msg,
+                                            origin_type=origin_type_msg,
+                                            origin_id=origin_id_msg,
+                                            **trace_log_kwargs,
                                         )
                                 else:
                                     if deducted and failure_disposition != "ambiguous":
@@ -1530,6 +1634,11 @@ def main() -> int:
                                             target_type=target_type_msg,
                                             target_id=target_id_msg,
                                             target_name=target_name,
+                                            business_idempotency_key=business_key,
+                                            recipient_fingerprint=recipient_fingerprint_msg,
+                                            origin_type=origin_type_msg,
+                                            origin_id=origin_id_msg,
+                                            **trace_log_kwargs,
                                         )
                             except Exception as e:
                                 logger.exception("NotificationLog/rollback failed: %s", e)

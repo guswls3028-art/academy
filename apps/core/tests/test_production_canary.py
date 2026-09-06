@@ -96,7 +96,7 @@ class ProductionCanaryTests(TestCase):
         self.assertEqual(check["data"]["status"], "idle")
         self.assertTrue(check["data"]["idle_scale_to_zero_allowed"])
 
-    def test_enabled_autosend_without_effective_approved_template_fails(self):
+    def test_enabled_autosend_without_registered_event_envelope_fails(self):
         template = MessageTemplate.objects.create(
             tenant=self.tenant,
             name="Pending Matchup",
@@ -117,7 +117,9 @@ class ProductionCanaryTests(TestCase):
         check = next(item for item in payload["checks"] if item["name"] == "messaging_autosend_ready")
         self.assertFalse(check["ok"])
         self.assertEqual(check["severity"], "error")
-        self.assertEqual(check["data"]["enabled_unapproved_template"], 1)
+        self.assertEqual(check["data"]["enabled_without_template"], 1)
+        self.assertEqual(check["data"]["enabled_unapproved_template"], 0)
+        self.assertEqual(check["data"]["enabled_manual_only"], 0)
         self.assertEqual(check["data"]["samples"][0]["trigger"], "matchup_report_submitted")
 
     def test_e2e_residue_fails(self):

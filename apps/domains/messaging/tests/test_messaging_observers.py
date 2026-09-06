@@ -14,6 +14,7 @@ from apps.domains.messaging.models import MessagingObserver, ScheduledNotificati
 from apps.domains.messaging.scheduled import (
     create_notification_outboxes,
     dispatch_notification_now,
+    process_due_notifications,
 )
 
 
@@ -116,6 +117,30 @@ class MessagingObserverOutboxTests(TestCase):
 
         self.assertEqual(len(originals), 1)
         self.assertEqual(ScheduledNotification.objects.count(), 1)
+
+    @patch("apps.domains.messaging.services.enqueue_alimtalk")
+    def test_retry_rechecks_and_blocks_observer_copy_that_became_sensitive(self, enqueue):
+        original = self._create()[0]
+        observer_copy = ScheduledNotification.objects.exclude(pk=original.pk).get()
+        observer_copy.trigger = "password_reset_student"
+        observer_copy.payload = {
+            **observer_copy.payload,
+            "event_type": "password_reset_student",
+        }
+        observer_copy.save(update_fields=["trigger", "payload"])
+
+        process_due_notifications(
+            batch_size=1,
+            notification_ids=[observer_copy.id],
+        )
+
+        observer_copy.refresh_from_db()
+        self.assertEqual(observer_copy.status, ScheduledNotification.Status.FAILED)
+        self.assertEqual(
+            observer_copy.error_message,
+            "sensitive_observer_copy_blocked",
+        )
+        enqueue.assert_not_called()
 
     def test_inactive_membership_suppresses_observer_copy(self):
         self.membership.is_active = False

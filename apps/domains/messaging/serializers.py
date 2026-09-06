@@ -117,6 +117,7 @@ class MessageTemplateSerializer(serializers.ModelSerializer):
             "body",
             "is_system",
             "is_user_default",
+            "retired_at",
             "solapi_template_id",
             "solapi_status",
             "has_content_var",
@@ -133,17 +134,12 @@ class MessageTemplateSerializer(serializers.ModelSerializer):
             "has_content_var",
             "created_at",
             "updated_at",
+            "retired_at",
         ]
 
     @staticmethod
     def _alimtalk_envelope(obj) -> tuple[str, str]:
-        from apps.domains.messaging.alimtalk_content_builders import get_unified_for_category
-
-        template_type, template_id = get_unified_for_category(
-            obj.category,
-            obj.name or "",
-        )
-        return template_type or "", (template_id or "").strip()
+        return "", ""
 
     def get_alimtalk_envelope_type(self, obj) -> str:
         return self._alimtalk_envelope(obj)[0]
@@ -154,6 +150,8 @@ class MessageTemplateSerializer(serializers.ModelSerializer):
             return "ready"
         if template_type:
             return "provider_template_missing"
+        if obj.is_system and obj.solapi_template_id and obj.solapi_status == "APPROVED":
+            return "ready"
         if obj.is_system:
             return "system_managed"
         return "envelope_selection_required"
@@ -174,6 +172,10 @@ class MessageTemplateSerializer(serializers.ModelSerializer):
 
 class SendMessageRequestSerializer(serializers.Serializer):
     """알림톡 발송 요청: 학생/학부모 수신자 + 직접 입력 본문 또는 템플릿 ID."""
+    client_request_id = serializers.UUIDField(
+        required=False,
+        help_text="한 발송 동작의 학생/학부모 요청을 묶는 PII-free 요청 식별자",
+    )
     student_ids = serializers.ListField(
         child=serializers.IntegerField(min_value=1),
         max_length=200,
@@ -202,6 +204,14 @@ class SendMessageRequestSerializer(serializers.Serializer):
         help_text="alimtalk",
     )
     template_id = serializers.IntegerField(required=False, allow_null=True)
+    template_version = serializers.CharField(required=False, allow_blank=True, max_length=64)
+    manual_event = serializers.CharField(required=False, allow_blank=True, max_length=64)
+    preflight_identity = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=128,
+        help_text="발송 전 확인에서 발급한 서명된 1회용 발송 정체성",
+    )
     raw_body = serializers.CharField(required=False, allow_blank=True, max_length=5000)
     raw_subject = serializers.CharField(
         required=False,
@@ -220,9 +230,8 @@ class SendMessageRequestSerializer(serializers.Serializer):
         default="",
         max_length=40,
         help_text=(
-            "frontend 발송 진입점의 블록 카테고리 (grades/attendance/clinic 등). "
-            "template_id 누락 또는 t.category 매핑 안 될 때 unified 봉투 fallback 매칭에 사용. "
-            "학원장 본문 어떻게 수정해도 봉투(검수 양식)는 유지되어 발송 (domain.md §5)."
+            "본문 개인화 검증에 사용하는 발송 진입점 범주. "
+            "승인 봉투 선택에는 사용하지 않으며 manual_event가 유일한 기준입니다."
         ),
     )
     alimtalk_extra_vars = serializers.DictField(

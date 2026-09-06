@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from types import SimpleNamespace
+import uuid
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
@@ -308,6 +309,81 @@ class NotificationLogRedactionTests(TestCase):
                     {item["status"] for item in response.data["results"]},
                     expected,
                 )
+
+    def test_log_api_filters_and_projects_exact_request_batch_and_origin_identity(self):
+        request_id = uuid.uuid4()
+        batch_id = uuid.uuid4()
+        claimed, log_id = claim_notification_slot(
+            tenant_id=self.tenant.id,
+            message_mode="alimtalk",
+            business_idempotency_key=f"manual-{request_id}",
+            sqs_message_id="sqs-manual-request-log",
+            batch_id=batch_id,
+            origin_type="manual_send",
+            origin_id=str(request_id),
+            sender_staff_id=self.admin.id,
+        )
+        self.assertTrue(claimed)
+        self.assertTrue(mark_notification_sending(log_id))
+        finalize_notification(
+            log_id,
+            success=True,
+            provider_message_id="provider-accepted",
+            notification_type="manual_send",
+        )
+        expected = NotificationLog.objects.get(pk=log_id)
+        self.assertEqual(expected.sender_staff_id, self.admin.id)
+        NotificationLog.objects.create(
+            tenant=self.tenant,
+            success=True,
+            status="sent",
+            message_mode="alimtalk",
+            batch_id=uuid.uuid4(),
+            origin_type="manual_send",
+            origin_id=str(uuid.uuid4()),
+        )
+        request = self.factory.get(
+            "/api/v1/messaging/log/",
+            {
+                "request_id": str(request_id),
+                "batch_id": str(batch_id),
+                "origin_type": "manual_send",
+                "origin_id": str(request_id),
+            },
+        )
+        force_authenticate(request, user=self.admin)
+        request.user = self.admin
+        request.tenant = self.tenant
+
+        response = NotificationLogListView.as_view()(request)
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["count"], 1)
+        item = response.data["results"][0]
+        self.assertEqual(item["id"], expected.id)
+        self.assertEqual(item["request_id"], str(request_id))
+        self.assertEqual(item["batch_id"], str(batch_id))
+        self.assertEqual(item["origin_type"], "manual_send")
+        self.assertEqual(item["origin_id"], str(request_id))
+        self.assertEqual(item["status"], "sent")
+        self.assertEqual(item["provider_delivery_status"], "provider_accepted")
+
+    def test_log_api_rejects_malformed_exact_identity_filters(self):
+        for key, value in (
+            ("request_id", "not-a-uuid"),
+            ("batch_id", "not-a-uuid"),
+            ("origin_type", "manual send"),
+            ("origin_id", "contains/private?value"),
+        ):
+            with self.subTest(key=key):
+                request = self.factory.get("/api/v1/messaging/log/", {key: value})
+                force_authenticate(request, user=self.admin)
+                request.user = self.admin
+                request.tenant = self.tenant
+
+                response = NotificationLogListView.as_view()(request)
+
+                self.assertEqual(response.status_code, 400, response.data)
 
     def test_log_api_excludes_non_alimtalk_legacy_records(self):
         legacy = NotificationLog.objects.create(

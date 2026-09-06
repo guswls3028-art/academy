@@ -89,14 +89,11 @@ class TestReplyAlimtalkDispatch(TestCase):
 
     @patch("apps.domains.community.services.qna_notifications.notify_qna_answered")
     @patch("apps.domains.messaging.services.send_event_notification", return_value=False)
-    def test_qna_reply_falls_back_to_freeform_alimtalk_when_trigger_not_sent(self, mock_send, mock_fallback):
+    def test_qna_reply_does_not_fallback_when_provider_contract_is_missing(self, mock_send, mock_fallback):
         resp = self._post_reply(self.qna)
         self.assertEqual(resp.status_code, 201, resp.data)
         self.assertEqual(mock_send.call_count, 1)
-        mock_fallback.assert_called_once()
-        kwargs = mock_fallback.call_args.kwargs
-        self.assertEqual(kwargs["send_to"], "student")
-        self.assertEqual(kwargs["actor_user"], self.staff)
+        mock_fallback.assert_not_called()
 
     @patch("apps.domains.messaging.services.send_event_notification")
     def test_counsel_reply_dispatches_to_student_and_parent(self, mock_send):
@@ -117,12 +114,11 @@ class TestReplyAlimtalkDispatch(TestCase):
 
     @patch("apps.domains.community.services.qna_notifications.notify_qna_answered")
     @patch("apps.domains.messaging.services.send_event_notification")
-    def test_qna_reply_falls_back_when_primary_dispatch_raises(self, mock_send, mock_fallback):
+    def test_qna_reply_does_not_fallback_when_primary_dispatch_raises(self, mock_send, mock_fallback):
         mock_send.side_effect = RuntimeError("solapi down")
         resp = self._post_reply(self.qna)
         self.assertEqual(resp.status_code, 201, "알림톡 실패가 답변 등록을 막아선 안 됨")
-        mock_fallback.assert_called_once()
-        self.assertEqual(mock_fallback.call_args.kwargs["send_to"], "student")
+        mock_fallback.assert_not_called()
 
     @patch("apps.domains.messaging.services.send_event_notification")
     def test_parent_authored_qna_dispatches_to_parent_only(self, mock_send):

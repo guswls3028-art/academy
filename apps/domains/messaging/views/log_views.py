@@ -4,6 +4,7 @@
 """
 
 import re
+import uuid
 
 from rest_framework import status
 from rest_framework.views import APIView
@@ -93,9 +94,11 @@ def _project_log(
     visible_body = stored_body if include_body and body_visibility in {"available", "sensitive_redacted"} else ""
     provider_id = str(log.provider_message_id or "")
     failure_code, failure_summary = _safe_failure_projection(log)
+    # ``sent`` is the durable provider-acceptance state. Final carrier delivery
+    # is a separate read-only provider verification below and is never inferred.
     delivery_status = (
         "provider_accepted"
-        if provider_id and (log.status == "sent" or log.success)
+        if log.status == "sent" or log.success
         else "unavailable"
     )
     return {
@@ -122,6 +125,13 @@ def _project_log(
         "message_body": visible_body,
         "message_mode": log.message_mode or "",
         "notification_type": log.notification_type or "",
+        "request_id": (
+            log.origin_id
+            if log.origin_type == "manual_send" and log.origin_id
+            else ""
+        ),
+        "batch_id": str(log.batch_id or ""),
+        "origin_type": log.origin_type or "",
         "origin_id": log.origin_id or "",
         "source_tenant_id": log.source_tenant_id,
         "target_type": log.target_type or "",
@@ -155,6 +165,50 @@ class NotificationLogListView(APIView):
         # status 필터: success / failure / all (기본 all)
         status_filter = (request.query_params.get("status") or "").strip().lower()
         base_qs = _alimtalk_logs_for_business_tenant(request.tenant)
+
+        request_id = (request.query_params.get("request_id") or "").strip()
+        if request_id:
+            try:
+                request_id = str(uuid.UUID(request_id))
+            except (ValueError, AttributeError):
+                return Response(
+                    {"request_id": "유효한 UUID 요청 식별자를 입력해 주세요."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            base_qs = base_qs.filter(
+                origin_type="manual_send",
+                origin_id=request_id,
+            )
+
+        batch_id = (request.query_params.get("batch_id") or "").strip()
+        if batch_id:
+            try:
+                batch_id = str(uuid.UUID(batch_id))
+            except (ValueError, AttributeError):
+                return Response(
+                    {"batch_id": "유효한 UUID 배치 식별자를 입력해 주세요."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            base_qs = base_qs.filter(batch_id=batch_id)
+
+        origin_type = (request.query_params.get("origin_type") or "").strip()
+        if origin_type:
+            if not re.fullmatch(r"[A-Za-z0-9:_-]{1,64}", origin_type):
+                return Response(
+                    {"origin_type": "유효한 원천 유형을 입력해 주세요."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            base_qs = base_qs.filter(origin_type=origin_type)
+
+        origin_id = (request.query_params.get("origin_id") or "").strip()
+        if origin_id:
+            if not re.fullmatch(r"[A-Za-z0-9:._-]{1,128}", origin_id):
+                return Response(
+                    {"origin_id": "유효한 원천 식별자를 입력해 주세요."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            base_qs = base_qs.filter(origin_id=origin_id)
+
         origin_id_prefix = (request.query_params.get("origin_id_prefix") or "").strip()
         if origin_id_prefix:
             if len(origin_id_prefix) > 128 or not re.fullmatch(

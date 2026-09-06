@@ -3,9 +3,9 @@ from unittest import TestCase
 from apps.domains.messaging.alimtalk_content_builders import (
     build_manual_replacements,
     build_unified_replacements,
+    get_provider_template_contract,
     get_solapi_template_id,
     get_template_type,
-    get_unified_for_category,
     get_unified_for_manual_send,
     render_alimtalk_preview_text,
     TYPE_ATTENDANCE,
@@ -16,76 +16,37 @@ from apps.domains.messaging.alimtalk_content_builders import (
 )
 
 
-class TestUnifiedCategoryClinicRouting(TestCase):
-    def test_clinic_change_korean_name(self):
-        tt, sid = get_unified_for_category("clinic", "클리닉 일정 변경 안내", {})
-        self.assertEqual(tt, "clinic_change")
-        self.assertTrue(bool(sid))
-
-    def test_clinic_change_english_name(self):
-        english_cases = [
-            "clinic change notice",
-            "clinic changed",
-            "clinic cancel",
-            "clinic cancelled",
-            "clinic canceled",
-            "clinic reschedule",
-            "clinic rescheduled",
-        ]
-        for name in english_cases:
-            with self.subTest(name=name):
-                tt, sid = get_unified_for_category("clinic", name, {})
-                self.assertEqual(tt, "clinic_change")
-                self.assertTrue(bool(sid))
-
-    def test_clinic_change_mixed_name(self):
-        tt, sid = get_unified_for_category("clinic", "클리닉 rescheduled 안내", {})
-        self.assertEqual(tt, "clinic_change")
-        self.assertTrue(bool(sid))
-
-    def test_clinic_change_from_extra_vars(self):
-        tt, sid = get_unified_for_category(
-            "clinic",
-            "클리닉 안내",
-            {"클리닉변동사항": "시간 변경"},
-        )
-        self.assertEqual(tt, "clinic_change")
-        self.assertTrue(bool(sid))
-
-
 class TestManualSendEnvelopeRouting(TestCase):
-    def test_entry_category_wins_over_saved_template_category(self):
-        template_type, template_id = get_unified_for_manual_send(
-            "grades",
-            "clinic",
-            "클리닉 안내 문구",
-            {},
+    def test_each_explicit_event_uses_only_its_exact_provider_contract(self):
+        cases = {
+            "lesson_result": TYPE_SCORE,
+            "attendance_notice": TYPE_ATTENDANCE,
+            "clinic_reservation_notice": TYPE_CLINIC_INFO,
+            "clinic_change_notice": "clinic_change",
+        }
+        for manual_event, expected_type in cases.items():
+            with self.subTest(manual_event=manual_event):
+                template_type, template_id = get_unified_for_manual_send(manual_event)
+                contract = get_provider_template_contract(expected_type)
+                self.assertEqual(template_type, expected_type)
+                self.assertEqual(template_id, contract["template_id"])
+
+    def test_category_name_and_variables_cannot_infer_an_envelope(self):
+        for value in ("grades", "clinic", "payment", "수업 결과 기본형", ""):
+            with self.subTest(value=value):
+                self.assertEqual(get_unified_for_manual_send(value), (None, None))
+
+    def test_score_provider_contract_matches_approved_snapshot(self):
+        contract = get_provider_template_contract(TYPE_SCORE)
+        self.assertEqual(contract["template_id"], "KA01TP260406105458211774JKJ3OU55")
+        self.assertEqual(contract["template_version"], "Wy7Z91sBXK")
+        self.assertEqual(contract["structure_fingerprint"], "54f3fb7aca49daaf")
+        self.assertEqual(contract["content_fingerprint"], "a5605726f724dd9b")
+        self.assertEqual(contract["header_fingerprint"], "dbaf4d19b3af2b21")
+        self.assertEqual(
+            contract["variables"],
+            ("학원이름", "학생이름", "강의명", "차시명", "선생님메모", "사이트링크"),
         )
-
-        self.assertEqual(template_type, TYPE_SCORE)
-        self.assertEqual(template_id, get_solapi_template_id("exam_score_published"))
-
-    def test_saved_template_category_is_fallback_for_unmapped_entry(self):
-        template_type, template_id = get_unified_for_manual_send(
-            "default",
-            "clinic",
-            "클리닉 안내 문구",
-            {},
-        )
-
-        self.assertEqual(template_type, TYPE_CLINIC_INFO)
-        self.assertTrue(bool(template_id))
-
-    def test_fixed_payment_template_cannot_fall_back_to_entry_envelope(self):
-        template_type, template_id = get_unified_for_manual_send(
-            "attendance",
-            "payment",
-            "결제 안내",
-            {},
-        )
-
-        self.assertEqual(template_type, TYPE_NOTICE_PAYMENT)
-        self.assertFalse(template_id)
 
 
 class TestCommunityTriggers(TestCase):
@@ -128,12 +89,6 @@ class TestSystemNoticeMappings(TestCase):
                 self.assertEqual(get_template_type(trigger), TYPE_NOTICE_PAYMENT)
                 self.assertFalse(bool(get_solapi_template_id(trigger)))
 
-    def test_payment_category_uses_payment_notice(self):
-        tt, sid = get_unified_for_category("payment")
-        self.assertEqual(tt, TYPE_NOTICE_PAYMENT)
-        self.assertFalse(bool(sid))
-
-
 class TestExamAssignmentEnvelopeMappings(TestCase):
     """시험/과제 안내는 자동·수동 모두 출석 안내 ITEM_LIST 봉투를 재사용한다."""
 
@@ -149,13 +104,6 @@ class TestExamAssignmentEnvelopeMappings(TestCase):
             with self.subTest(trigger=trigger):
                 self.assertEqual(get_template_type(trigger), TYPE_ATTENDANCE)
                 self.assertTrue(bool(get_solapi_template_id(trigger)))
-
-    def test_exam_and_assignment_categories_use_attendance_envelope(self):
-        for category in ("exam", "assignment"):
-            with self.subTest(category=category):
-                tt, sid = get_unified_for_category(category)
-                self.assertEqual(tt, TYPE_ATTENDANCE)
-                self.assertTrue(bool(sid))
 
     def test_retake_trigger_uses_clinic_info_envelope(self):
         self.assertEqual(get_template_type("retake_assigned"), TYPE_CLINIC_INFO)

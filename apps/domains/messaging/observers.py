@@ -77,6 +77,10 @@ def build_messaging_observer_payloads(
         if recipient.phone == original_phone:
             continue
         observer_payload = dict(original_payload)
+        # The observer copy has a different provenance and business key. Keep
+        # request/batch correlation, but do not claim the original manual trace
+        # signature/version as its own.
+        observer_payload.pop("trace_identity_version", None)
         observer_payload.update(
             {
                 "to": recipient.phone,
@@ -89,3 +93,20 @@ def build_messaging_observer_payloads(
         )
         payloads.append(observer_payload)
     return payloads
+
+
+def observer_copy_block_reason(*, trigger: str = "", payload: object = None) -> str:
+    """Re-check sensitive observer copies at every retry/worker boundary."""
+
+    if not isinstance(payload, dict):
+        return ""
+    if not (
+        payload.get("target_type") == "messaging_observer"
+        or payload.get("origin_type") == "messaging_observer"
+    ):
+        return ""
+    from apps.domains.messaging.security import is_sensitive_notification
+
+    if is_sensitive_notification(trigger=trigger, payload=payload):
+        return "sensitive_observer_copy_blocked"
+    return ""

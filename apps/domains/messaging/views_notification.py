@@ -137,7 +137,7 @@ def _context_source_override_detail(context_conflicts, per_student_conflicts):
 def _messaging_access_error(request, tenant):
     if not can_send_messages(request, tenant):
         return Response(
-            {"detail": "알림톡 발송 권한이 없습니다. 관리자 또는 강사 권한이 필요합니다."},
+            {"detail": "알림톡 발송 권한이 없습니다. 관리자·강사·조교 권한이 필요합니다."},
             status=http_status.HTTP_403_FORBIDDEN,
         )
     from apps.domains.messaging.policy import (
@@ -314,7 +314,10 @@ class AttendanceNotificationConfirmView(APIView):
         batch_result = result["batch_result"]
 
         return Response({
+            "request_id": batch_result["request_id"],
             "batch_id": batch_result["batch_id"],
+            "origin_type": batch_result["origin_type"],
+            "origin_id": batch_result["origin_id"],
             "sent_count": batch_result["sent_count"],
             "pending_count": batch_result.get("pending_count", 0),
             "accepted_count": batch_result.get("accepted_count", 0),
@@ -359,11 +362,6 @@ class ManualNotificationPreviewView(APIView):
         # 매치업 보고서 (score 템플릿) — 강사→학원 owner/admin 수동 발송 가능
         "matchup_report_submitted",
     }
-    PARENT_ONLY_TRIGGERS = {
-        "exam_score_published",
-        "monthly_report_generated",
-    }
-
     def post(self, request):
         tenant = getattr(request, "tenant", None)
         if not tenant:
@@ -402,14 +400,6 @@ class ManualNotificationPreviewView(APIView):
         if send_to not in ("parent", "student"):
             return Response(
                 {"detail": "send_to는 'parent' 또는 'student'만 가능합니다."},
-                status=http_status.HTTP_400_BAD_REQUEST,
-            )
-        if trigger in self.PARENT_ONLY_TRIGGERS and send_to != "parent":
-            return Response(
-                {
-                    "detail": "성적 알림은 보호자에게만 발송할 수 있습니다.",
-                    "code": "grade_recipient_policy",
-                },
                 status=http_status.HTTP_400_BAD_REQUEST,
             )
         if context_source is not None:
@@ -570,7 +560,10 @@ class ManualNotificationConfirmView(APIView):
         batch_result = result["batch_result"]
 
         return Response({
+            "request_id": batch_result["request_id"],
             "batch_id": batch_result["batch_id"],
+            "origin_type": batch_result["origin_type"],
+            "origin_id": batch_result["origin_id"],
             "sent_count": batch_result["sent_count"],
             "pending_count": batch_result.get("pending_count", 0),
             "accepted_count": batch_result.get("accepted_count", 0),

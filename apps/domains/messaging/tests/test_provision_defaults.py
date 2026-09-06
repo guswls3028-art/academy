@@ -679,7 +679,7 @@ class ProvisionDefaultTemplatesTests(TestCase):
             ).exists()
         )
 
-    def test_autosend_patch_allows_enable_with_approved_tenant_template(self):
+    def test_autosend_patch_rejects_approved_row_without_provider_contract(self):
         template = MessageTemplate.objects.create(
             tenant=self.tenant,
             name="상담 답변",
@@ -706,13 +706,18 @@ class ProvisionDefaultTemplatesTests(TestCase):
             )
         )
 
-        self.assertEqual(response.status_code, 200)
-        config = AutoSendConfig.objects.get(
-            tenant=self.tenant,
-            trigger="counsel_answered",
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["trigger"], "counsel_answered")
+        self.assertEqual(
+            response.data["effective_template_source"],
+            "provider_contract_missing",
         )
-        self.assertTrue(config.enabled)
-        self.assertEqual(config.template_id, template.id)
+        self.assertFalse(
+            AutoSendConfig.objects.filter(
+                tenant=self.tenant,
+                trigger="counsel_answered",
+            ).exists()
+        )
 
     def test_provision_defaults_does_not_auto_submit_kakao_template_review(self):
         self.tenant.kakao_pfid = "KA01PF"
