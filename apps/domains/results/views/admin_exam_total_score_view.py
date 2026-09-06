@@ -59,7 +59,12 @@ class AdminExamTotalScoreView(APIView):
             exam_id=exam_id,
             tenant=request.tenant,
         )
-        require_score_edit_lease_from_headers(request, exam_id=exam_id)
+        require_score_edit_lease_from_headers(
+            request,
+            exam_id=exam_id,
+            enrollment_id=enrollment_id,
+            sub="total",
+        )
 
         # ✅ tenant isolation: verify enrollment belongs to tenant
         from apps.domains.results.guards.enrollment_tenant_guard import validate_enrollment_belongs_to_tenant
