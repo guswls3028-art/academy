@@ -95,6 +95,35 @@ class AIJobTerminalTransitionPostgresTests(TransactionTestCase):
         self.assertEqual(result.payload, {"winner": "success"})
 
     @patch("apps.domains.ai.redis_status_cache.cache_job_status", return_value=True)
+    def test_pending_job_can_fail_closed_before_worker_start(self, cache_status) -> None:
+        job = self._job(status="PENDING", tier="premium")
+        job.completed_at = None
+        job.error_message = ""
+        job.last_error = ""
+        job.save(
+            update_fields=[
+                "completed_at",
+                "error_message",
+                "last_error",
+                "updated_at",
+            ]
+        )
+
+        accepted = fail_ai_job(
+            DjangoUnitOfWork(),
+            job.job_id,
+            "tenant_guard_rejected",
+            tier="premium",
+        )
+
+        self.assertTrue(accepted)
+        job.refresh_from_db()
+        self.assertEqual(job.status, "FAILED")
+        self.assertEqual(job.error_message, "tenant_guard_rejected")
+        self.assertIsNotNone(job.completed_at)
+        self.assertEqual(cache_status.call_args.kwargs["status"], "FAILED")
+
+    @patch("apps.domains.ai.redis_status_cache.cache_job_status", return_value=True)
     def test_same_done_outcome_repairs_cache_without_replacing_first_result(
         self,
         cache_status,

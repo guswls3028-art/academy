@@ -83,8 +83,12 @@ class AIJob:
         self.updated_at = now
 
     def fail(self, error_message: str, final_status: AIJobStatus, now: datetime) -> None:
-        """RUNNING → FAILED/REVIEW_REQUIRED 등."""
-        if self.status != AIJobStatus.RUNNING:
+        """PENDING/RETRYING/RUNNING → FAILED/REVIEW_REQUIRED 등."""
+        if self.status not in (
+            AIJobStatus.PENDING,
+            AIJobStatus.RETRYING,
+            AIJobStatus.RUNNING,
+        ):
             raise ValueError(f"Cannot fail job {self.job_id}: status={self.status}")
         self.status = final_status
         self.error_message = (error_message or "")[:2000]

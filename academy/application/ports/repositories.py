@@ -56,5 +56,5 @@ class AIJobRepository(Protocol):
         tier: str,
         now: datetime,
     ) -> bool:
-        """RUNNING → tier별 실패 결과 CAS. 동일한 실패 결과만 True로 멱등 복구."""
+        """PENDING/RETRYING/RUNNING → tier별 실패 결과 CAS. 동일 결과는 멱등 복구."""
         ...

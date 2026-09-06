@@ -689,14 +689,16 @@ rejected → {} (종단)
 #### 허용 전이 (실제 사용되는 것만)
 
 ```
-PENDING → {RUNNING}
+PENDING/RETRYING → {RUNNING, fail-closed terminal}
 RUNNING → {DONE, FAILED}
 ```
 
 #### 불변조건
 
 1. **종단 상태 불변:** DONE, FAILED, REJECTED_BAD_INPUT에 도달한 job은 상태 변경 불가.
-   `mark_done`과 `mark_failed`는 `status=RUNNING`인 행 한 건만 조건부 갱신한다.
+   `mark_done`은 `status=RUNNING`, `mark_failed`는 `status∈{PENDING, RETRYING,
+   RUNNING}`인 행 한 건만 조건부 갱신한다. 시작 전 실패 전이는 tenant/message 검증이
+   거부된 작업을 열린 상태로 남기지 않기 위한 fail-closed 경계다.
    complete/fail 경합에서 먼저 성공한 한 전이만 `True`를 반환하고 반대 결과의 loser는
    종단 행, 오류, 결과 payload를 바꾸지 않는다.
 2. **같은 결과의 멱등 복구:** 동일한 완료 호출은 누락된 `completed_at`, 결과 행과

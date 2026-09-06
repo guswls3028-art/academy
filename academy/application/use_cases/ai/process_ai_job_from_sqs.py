@@ -123,7 +123,7 @@ def fail_ai_job(
     tier: str = "basic",
     now: Optional[datetime] = None,
 ) -> bool:
-    """RUNNING → tier별 실패 결과. 동일한 실패 결과만 True로 멱등 복구."""
+    """시작 가능 상태/RUNNING → tier별 실패 결과. 동일 결과는 멱등 복구."""
     if now is None:
         from datetime import timezone
         now = datetime.now(timezone.utc)

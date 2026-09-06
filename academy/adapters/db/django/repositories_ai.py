@@ -395,7 +395,8 @@ class DjangoAIJobRepository:
             )
             if job.status == final_str:
                 return self._recover_failed_job(job, now=now)
-            if job.status != "RUNNING":
+            allowed_statuses = ("PENDING", "RETRYING", "RUNNING")
+            if job.status not in allowed_statuses:
                 logger.warning(
                     "AI_JOB_TERMINAL_TRANSITION_REJECTED | job_id=%s from=%s to=%s",
                     job_id,
@@ -420,7 +421,7 @@ class DjangoAIJobRepository:
                 updates["payload"] = job.payload
             updated = AIJobModel.objects.filter(
                 pk=job.pk,
-                status="RUNNING",
+                status__in=allowed_statuses,
             ).update(**updates)
             if updated != 1:
                 current = AIJobModel.objects.filter(pk=job.pk).first()
