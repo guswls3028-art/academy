@@ -23,6 +23,49 @@ from apps.domains.messaging.tenant_channels import (
 )
 
 
+def _provider_variable_names(template: dict) -> set[str]:
+    names = set()
+    for value in template.get("variables") or []:
+        if not isinstance(value, dict):
+            continue
+        name = str(value.get("name") or "").strip()
+        if name.startswith("#{") and name.endswith("}"):
+            name = name[2:-1].strip()
+        if name:
+            names.add(name)
+    return names
+
+
+def _item_titles(template: dict) -> set[str]:
+    item = template.get("item") if isinstance(template.get("item"), dict) else {}
+    return {
+        str(value.get("title") or "").strip()
+        for value in item.get("list") or []
+        if isinstance(value, dict) and str(value.get("title") or "").strip()
+    }
+
+
+def _current_category_code(template: dict) -> str:
+    """Map approved legacy templates to the current Kakao category taxonomy."""
+
+    variables = _provider_variable_names(template)
+    if "인증번호" in variables or "임시비밀번호" in variables:
+        return "001002"
+    if "학생아이디" in variables and "학생비밀번호" in variables:
+        return "001001"
+    if variables == {"학원명", "학생이름2"}:
+        return "004002"
+
+    titles = _item_titles(template)
+    if "기존일정" in titles and "변동사항" in titles:
+        return "003002"
+    if {"장소", "날짜", "시간"}.issubset(titles):
+        return "003001"
+    if {"강의", "차시"}.issubset(titles):
+        return "005001"
+    raise CommandError("current_template_category_unresolved")
+
+
 class Command(BaseCommand):
     help = "Verify and configure a tenant Kakao channel on the shared Solapi account."
 
@@ -111,6 +154,7 @@ class Command(BaseCommand):
                     channel_id=channel_id,
                     source_template=source,
                     name=self._tenant_template_name(tenant.name, source),
+                    category_code=_current_category_code(source),
                 )
                 created += 1
                 destination_by_fingerprint[fingerprint] = destination
@@ -262,11 +306,7 @@ class Command(BaseCommand):
     def _select_test_template(templates: list[dict]) -> dict | None:
         candidates = []
         for item in templates:
-            variables = {
-                str(value.get("name") or "").strip()
-                for value in item.get("variables") or []
-                if isinstance(value, dict)
-            }
+            variables = _provider_variable_names(item)
             if (
                 str(item.get("status") or "").upper() == "APPROVED"
                 and variables == {"인증번호"}

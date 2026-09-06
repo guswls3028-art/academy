@@ -46,6 +46,29 @@ def _has_meaningful_value(value) -> bool:
         return any(_has_meaningful_value(item) for item in value)
     return value not in (None, "", False)
 
+
+def _without_empty_provider_defaults(value):
+    if isinstance(value, dict):
+        return {
+            key: normalized
+            for key, item in value.items()
+            if (normalized := _without_empty_provider_defaults(item))
+            not in (None, "", [], {})
+        }
+    if isinstance(value, list):
+        return [
+            normalized
+            for item in value
+            if (normalized := _without_empty_provider_defaults(item))
+            not in (None, "", [], {})
+        ]
+    return value
+
+
+def _masked_channel_ref(channel_id: str) -> str:
+    value = str(channel_id or "").strip()
+    return f"...{value[-4:]}" if value else "missing"
+
 # #{변수명} 형식 검증 시 참고 (필요 시 확장)
 VARIABLE_PATTERN = re.compile(r"#\{[^}]+\}")
 
@@ -149,7 +172,11 @@ def create_kakao_template(
         "emphasizeType": emphasize_type,
     }
 
-    logger.info("Solapi template create request channelId=%s name=%s", channel_id, name[:30])
+    logger.info(
+        "Solapi template create request channel_ref=%s name=%s",
+        _masked_channel_ref(channel_id),
+        name[:30],
+    )
     resp = requests.post(url, json=body, headers=headers, timeout=30)
 
     if resp.status_code != 200:
@@ -175,6 +202,7 @@ def clone_kakao_template(
     channel_id: str,
     source_template: dict,
     name: str,
+    category_code: str,
 ) -> dict:
     """Create an exact behavior-preserving copy on another channel."""
 
@@ -182,7 +210,7 @@ def clone_kakao_template(
         "channelId": (channel_id or "").strip(),
         "name": (name or "").strip(),
         "content": str(source_template.get("content") or "").strip(),
-        "categoryCode": str(source_template.get("categoryCode") or "").strip(),
+        "categoryCode": str(category_code or "").strip(),
         "messageType": str(source_template.get("messageType") or "BA").strip(),
         "emphasizeType": str(source_template.get("emphasizeType") or "NONE").strip(),
     }
@@ -191,7 +219,7 @@ def clone_kakao_template(
     for field in _CLONE_OPTIONAL_FIELDS:
         value = source_template.get(field)
         if _has_meaningful_value(value):
-            body[field] = value
+            body[field] = _without_empty_provider_defaults(value)
 
     response = requests.post(
         SOLAPI_BASE + TEMPLATE_CREATE_PATH,
@@ -288,7 +316,11 @@ def list_kakao_templates(
         headers["Authorization"] = _create_auth_header(api_key, api_secret)
         if start_key:
             params["startKey"] = start_key
-        logger.info("Solapi template list request channelId=%s page=%d", channel_id, page)
+        logger.info(
+            "Solapi template list request channel_ref=%s page=%d",
+            _masked_channel_ref(channel_id),
+            page,
+        )
         resp = requests.get(url, headers=headers, params=params, timeout=30)
         if resp.status_code != 200:
             try:
