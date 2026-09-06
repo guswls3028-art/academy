@@ -349,6 +349,8 @@ def test_base_image_backports_new_native_library_fixes_without_acceptance() -> N
     assert "COPY docker/native-security/build-fixed-libs.sh" in dockerfile
     assert "sh /usr/local/bin/build-fixed-libs.sh /build/native-security" in dockerfile
     assert "dpkg -i /tmp/academy-native-security/*.deb" in dockerfile
+    for build_tool in ("autoconf", "automake", "libtool"):
+        assert f"    {build_tool} \\" in dockerfile
     for package, minimum in (
         ("zlib1g", "1:1.3.3~academy.git20260904.e3dc0a8-1"),
         ("libpcre2-8-0", "10.48-2~academy1"),
