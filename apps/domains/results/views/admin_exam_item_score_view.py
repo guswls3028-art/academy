@@ -114,7 +114,13 @@ class AdminExamItemScoreView(APIView):
             exam_id=exam_id,
             tenant=request.tenant,
         )
-        require_score_edit_lease_from_headers(request, exam_id=exam_id)
+        require_score_edit_lease_from_headers(
+            request,
+            exam_id=exam_id,
+            enrollment_id=enrollment_id,
+            sub="item",
+            question_id=question_id,
+        )
         score_shape = get_exam_score_shape(exam)
 
         # ✅ tenant isolation: verify enrollment belongs to tenant
