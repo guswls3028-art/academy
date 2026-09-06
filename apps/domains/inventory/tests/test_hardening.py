@@ -306,6 +306,54 @@ class InventoryHardeningViewTests(TestCase):
         self.assertEqual(quota["plan"], "all")
         self.assertEqual(quota["limitBytes"], 200 * 1024**3)
 
+    def test_upload_removes_exact_r2_object_when_metadata_create_fails(self):
+        upload = SimpleUploadedFile("metadata-failure.pdf", b"%PDF-1.4", content_type="application/pdf")
+        request = self._multipart_request(
+            "/storage/inventory/upload/",
+            {"scope": "admin", "file": upload},
+        )
+
+        with self._auth(self.staff), patch(
+            "apps.domains.inventory.views.upload_fileobj_to_r2_storage"
+        ) as upload_r2, patch(
+            "apps.domains.inventory.views.inv_repo.inventory_file_create",
+            side_effect=RuntimeError("database unavailable"),
+        ), patch("apps.domains.inventory.views.delete_object_r2_storage") as delete_r2:
+            response = FileUploadView.as_view()(request)
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(json.loads(response.content)["code"], "inventory_metadata_save_failed")
+        upload_r2.assert_called_once()
+        uploaded_key = upload_r2.call_args.kwargs["key"]
+        delete_r2.assert_called_once_with(key=uploaded_key)
+        self.assertFalse(
+            InventoryFile.objects.filter(
+                tenant=self.tenant,
+                original_name="metadata-failure.pdf",
+            ).exists()
+        )
+
+    def test_upload_fails_closed_when_metadata_and_r2_cleanup_both_fail(self):
+        upload = SimpleUploadedFile("cleanup-failure.pdf", b"%PDF-1.4", content_type="application/pdf")
+        request = self._multipart_request(
+            "/storage/inventory/upload/",
+            {"scope": "admin", "file": upload},
+        )
+
+        with self._auth(self.staff), patch(
+            "apps.domains.inventory.views.upload_fileobj_to_r2_storage"
+        ), patch(
+            "apps.domains.inventory.views.inv_repo.inventory_file_create",
+            side_effect=RuntimeError("database unavailable"),
+        ), patch(
+            "apps.domains.inventory.views.delete_object_r2_storage",
+            side_effect=RuntimeError("storage unavailable"),
+        ):
+            response = FileUploadView.as_view()(request)
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(json.loads(response.content)["code"], "inventory_storage_cleanup_failed")
+
 
 class InventoryHardeningMoveTests(TestCase):
     def setUp(self):
