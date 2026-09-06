@@ -1533,6 +1533,36 @@ class SessionScoresRosterScopeTests(TestCase):
         targets = ClinicTargetService.list_admin_targets(tenant=self.tenant)
         self.assertFalse(any(target.get("clinic_link_id") == link.id for target in targets))
 
+    def test_session_scores_ignores_exam_clinic_link_when_student_is_unassigned(self):
+        ExamEnrollment.objects.filter(
+            exam=self.exam,
+            enrollment=self.active_enrollment,
+        ).delete()
+        link = ClinicLink.objects.create(
+            tenant=self.tenant,
+            enrollment=self.active_enrollment,
+            session=self.session,
+            reason=ClinicLink.Reason.AUTO_FAILED,
+            is_auto=True,
+            source_type="exam",
+            source_id=self.exam.id,
+            meta={"kind": "EXAM_FAILED", "exam_id": self.exam.id},
+        )
+
+        request = self.factory.get(f"/api/v1/results/admin/sessions/{self.session.id}/scores/")
+        request.tenant = self.tenant
+        force_authenticate(request, user=self.admin)
+        response = SessionScoresView.as_view()(request, session_id=self.session.id)
+
+        self.assertEqual(response.status_code, 200, response.data)
+        row = next(row for row in response.data["rows"] if row["enrollment_id"] == self.active_enrollment.id)
+        self.assertEqual(row["exams"], [])
+        self.assertFalse(row["clinic_required"])
+        self.assertFalse(row["name_highlight_clinic_target"])
+
+        targets = ClinicTargetService.list_admin_targets(tenant=self.tenant)
+        self.assertFalse(any(target.get("clinic_link_id") == link.id for target in targets))
+
     def test_session_scores_ignores_homework_clinic_link_when_assignment_removed(self):
         HomeworkAssignment.objects.filter(
             homework=self.homework,

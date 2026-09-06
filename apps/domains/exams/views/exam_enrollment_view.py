@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from typing import List, Set
 
 from django.db import transaction
@@ -19,6 +20,7 @@ from apps.support.exams.view_dependencies import (
     active_enrollment_ids_for_session,
     active_session_enrollments_for_session,
     refresh_exam_target_projections,
+    resolve_removed_exam_clinic_links,
 )
 
 from apps.domains.exams.serializers.exam_enrollment_serializer import (
@@ -216,7 +218,7 @@ class ExamEnrollmentManageView(APIView):
             )
 
         # ✅ 세션 범위 내 치환 (다른 세션의 enrollment은 유지)
-        with refresh_exam_target_projections(exam=exam):
+        with refresh_exam_target_projections(exam=exam) as removed_target_pairs:
             ExamEnrollment.objects.filter(
                 exam_id=exam_id,
                 enrollment__tenant=tenant,
@@ -230,11 +232,34 @@ class ExamEnrollmentManageView(APIView):
             if bulk:
                 ExamEnrollment.objects.bulk_create(bulk, ignore_conflicts=True)
 
+        removed_clinic_link_count = 0
+        removed_enrollment_ids_by_session: dict[int, set[int]] = defaultdict(set)
+        for removed_enrollment_id, removed_session_id in removed_target_pairs:
+            removed_enrollment_ids_by_session[int(removed_session_id)].add(
+                int(removed_enrollment_id)
+            )
+        for removed_session_id, removed_enrollment_ids in sorted(
+            removed_enrollment_ids_by_session.items()
+        ):
+            removed_clinic_link_count += resolve_removed_exam_clinic_links(
+                tenant_id=int(tenant.id),
+                session_id=removed_session_id,
+                exam_id=int(exam_id),
+                enrollment_ids=sorted(removed_enrollment_ids),
+                user_id=getattr(request.user, "id", None),
+                reason="exam_enrollment_removed",
+            )
+
         return Response(
             {
                 "exam_id": exam_id,
                 "session_id": int(session_id),
                 "selected_count": len(incoming_ids),
+                "removed_effective_target_count": len(removed_target_pairs),
+                "removed_effective_target_session_count": len(
+                    removed_enrollment_ids_by_session
+                ),
+                "removed_clinic_link_count": int(removed_clinic_link_count),
             },
             status=status.HTTP_200_OK,
         )

@@ -50,6 +50,7 @@ from apps.domains.results.utils.result_queries import (
 )
 from apps.domains.results.utils.exam_achievement import compute_exam_achievement_bulk
 from apps.domains.results.utils.exam_absence import current_exam_absence_counts
+from apps.domains.results.utils.clinic import filter_live_source_links
 from apps.domains.results.utils.clinic_highlight import compute_clinic_highlight_map
 from apps.domains.results.services.assessment_correction_status import (
     assessment_correction_payload,
@@ -168,33 +169,6 @@ def _clinic_source_id(row: Dict[str, Any], source_type: str) -> Optional[int]:
     if row.get("source_type") is None:
         return _int_or_none(meta.get(f"{source_type}_id"))
     return None
-
-
-def _is_live_session_clinic_link(
-    row: Dict[str, Any],
-    *,
-    live_exam_ids: Set[int],
-    live_homework_ids: Set[int],
-    homework_assigned_set: Set[tuple[int, int]],
-) -> bool:
-    enrollment_id = _int_or_none(row.get("enrollment_id"))
-    if enrollment_id is None:
-        return False
-
-    exam_id = _clinic_source_id(row, "exam")
-    if exam_id is not None:
-        return exam_id in live_exam_ids
-
-    homework_id = _clinic_source_id(row, "homework")
-    if homework_id is not None:
-        return (
-            homework_id in live_homework_ids
-            and (enrollment_id, homework_id) in homework_assigned_set
-        )
-
-    # Legacy automatic links without source metadata are already session-scoped.
-    # Keep them visible rather than silently hiding an ambiguous historical target.
-    return row.get("source_type") is None
 
 
 def _build_exam_attempt_summary(
@@ -450,27 +424,30 @@ class SessionScoresView(APIView):
             .distinct()
         )
 
-        clinic_link_rows = list(
+        clinic_links = list(
             ClinicLink.objects.filter(
+                tenant=tenant,
                 session=session,
                 enrollment_id__in=enrollment_ids,
                 is_auto=True,
                 resolved_at__isnull=True,
             )
-            .values("enrollment_id", "source_type", "source_id", "meta")
+            .only("id", "enrollment_id", "session_id", "source_type", "source_id", "meta")
             .order_by("id")
         )
-        live_exam_ids = set(exam_ids)
-        live_homework_ids = set(homework_ids)
+        live_clinic_links = filter_live_source_links(clinic_links, tenant=tenant)
+        clinic_link_rows = [
+            {
+                "enrollment_id": int(link.enrollment_id),
+                "source_type": link.source_type,
+                "source_id": link.source_id,
+                "meta": link.meta,
+            }
+            for link in live_clinic_links
+        ]
         raw_clinic_ids: Set[int] = {
-            int(row["enrollment_id"])
-            for row in clinic_link_rows
-            if _is_live_session_clinic_link(
-                row,
-                live_exam_ids=live_exam_ids,
-                live_homework_ids=live_homework_ids,
-                homework_assigned_set=hw_assigned_set,
-            )
+            int(link.enrollment_id)
+            for link in live_clinic_links
         }
         # 최종 완료 상태가 SSOT다. 과거/특례 등록으로 남은 미해소 ClinicLink가 있어도
         # SessionProgress.completed=True면 현재 클리닉 대상에서 제외한다.

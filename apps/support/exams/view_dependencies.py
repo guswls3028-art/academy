@@ -244,7 +244,9 @@ def resolve_removed_exam_clinic_links(
     tenant_id: int,
     session_id: int,
     exam_id: int,
+    enrollment_ids=None,
     user_id: int | None,
+    reason: str = "exam_removed_from_session",
 ) -> int:
     from apps.domains.progress.dispatcher import resolve_removed_source_clinic_links
 
@@ -253,6 +255,7 @@ def resolve_removed_exam_clinic_links(
         session_id=session_id,
         source_type="exam",
         source_id=exam_id,
+        enrollment_ids=enrollment_ids,
         user_id=user_id,
-        reason="exam_removed_from_session",
+        reason=reason,
     )

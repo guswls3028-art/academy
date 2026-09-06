@@ -83,9 +83,21 @@ FK key-share와 양립하는 잠금으로 공유 차시/강의의 교착 위험�
 | `calculated_at`, `updated_at` | 실제 파생값이 달라진 행만 갱신한다. 출결·영상·과제 필드와 수동 `meta`는 보존한다. |
 | `LectureProgress` | 영향 수강 등록의 기존 canonical 강의 집계와 같은 위험수준 규칙을 사용한다. `meta`와 소유 강의는 보존하며 `RiskLog`를 만들지 않는다. |
 
-전체 `ProgressPipelineService`는 클리닉 자동 생성·해소 부작용을 가지므로 이
-대상자 편집 경로에서 호출하지 않는다. `Result`, `ResultFact`, `ExamAttempt`,
-`ClinicLink`/해소 이력, `AssessmentCorrection`, 발송 로그·예약·outbox는 바꾸지 않는다.
+파생값 갱신 context 자체는 클리닉 자동 생성·해소 부작용을 가진
+전체 `ProgressPipelineService`를 호출하지 않는다. 다만 대상 완전 치환이
+끝나면 같은 트랜잭션에서 변경 전·후 실제 유효
+`(enrollment, session)` 대상 집합의 차이를 구한다. 이 시험에서 빠진
+학생×연결 차시의 미해소 source-specific `ClinicLink`만
+`SOURCE_REMOVED`로 감사 해소하고 해당 진척 지점을 재계산한다. 이로써
+일부 대상을 처음 명시하는 legacy 전환과 하나의 시험이 여러 차시에
+연결된 경우도 모든 유효 차이를 빠짐없이 닫는다.
+
+`SOURCE_REMOVED` 근거에는 시험·차시·정확한 수강 등록 ID 목록·요청
+사용자·`exam_enrollment_removed` 사유를 남긴다. 오늘 계획 선택은
+비활성화하지만 기존 예약·등원·완료 사실과 append-only 해소 이력은
+보존하며, 대상 제거 자체로 제품 알림·예약 발송·push outbox를 만들지
+않는다. `Result`, `ResultFact`, `ExamAttempt`, `AssessmentCorrection`도 변경하지
+않는다. 해소 실패 시 대상 치환과 파생값 갱신까지 모두 롤백한다.
 신규 roster에 아직 진척 행이 없다면 시험 생성만으로 출결·과제 값을 추측해 행을
 만들지 않는다. 누락 수는 구조화 로그에 남고, roster/시험 조회는 실제 새 시험을
 반환하며 세션 요약의 participant_count는 기존 진척 행 수(없으면 0)를 유지한다.
@@ -93,7 +105,8 @@ FK key-share와 양립하는 잠금으로 공유 차시/강의의 교착 위험�
 
 검증: `apps/domains/progress/tests/test_exam_target_projection_pg.py`의 PostgreSQL
 API 생성→대상 편집→요약 조회, 진척 부재→최초 채점, rollback/중복/commit 후 예외,
-동시 치환·생성 교차, 다중 연결·legacy 전환·tenant 격리, 원본/수동/발송 불변 테스트.
+동시 치환·생성 교차, 다중 연결·legacy 전환·tenant 격리, 제거된 학생만의
+클리닉 감사 해소·발송 0건·해소 실패 전체 rollback, 원본/수동 불변 테스트.
 
 ### 하나의 시험을 여러 강의에서 운영
 
