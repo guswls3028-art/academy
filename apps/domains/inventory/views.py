@@ -1,6 +1,8 @@
 # PATH: apps/domains/inventory/views.py
 # 저장소 API — R2 업로드 후 DB 메타데이터, 비어있지 않은 폴더 삭제 방지
 
+import logging
+
 from django.http import JsonResponse
 from django.views import View
 from django.utils.decorators import method_decorator
@@ -49,6 +51,7 @@ except ImportError:
 
 STORAGE_QUOTA_BYTES = 200 * 1024**3
 SCORE_EVIDENCE_MAX_BYTES = 20 * 1024**2
+logger = logging.getLogger(__name__)
 
 
 def _score_evidence_signature_matches(file_obj, content_type: str) -> bool:
@@ -488,19 +491,48 @@ class FileUploadView(View):
         except Exception as e:
             return JsonResponse({"detail": f"R2 upload failed: {e}"}, status=502)
 
-        inv_file = inv_repo.inventory_file_create(
-            tenant=tenant,
-            scope=scope,
-            student_ps=student_ps,
-            folder=folder,
-            display_name=display_name or file_obj.name,
-            description=description,
-            icon=icon,
-            r2_key=r2_key,
-            original_name=file_obj.name,
-            size_bytes=file_obj.size,
-            content_type=file_obj.content_type or "application/octet-stream",
-        )
+        try:
+            inv_file = inv_repo.inventory_file_create(
+                tenant=tenant,
+                scope=scope,
+                student_ps=student_ps,
+                folder=folder,
+                display_name=display_name or file_obj.name,
+                description=description,
+                icon=icon,
+                r2_key=r2_key,
+                original_name=file_obj.name,
+                size_bytes=file_obj.size,
+                content_type=file_obj.content_type or "application/octet-stream",
+            )
+        except Exception:
+            logger.exception(
+                "Inventory metadata creation failed after R2 upload tenant=%s scope=%s",
+                tenant.id,
+                scope,
+            )
+            try:
+                delete_object_r2_storage(key=r2_key)
+            except Exception:
+                logger.exception(
+                    "Inventory orphan cleanup failed tenant=%s scope=%s",
+                    tenant.id,
+                    scope,
+                )
+                return JsonResponse(
+                    {
+                        "detail": "파일 정보 저장과 원본 정리에 실패했습니다. 관리자에게 문의해 주세요.",
+                        "code": "inventory_storage_cleanup_failed",
+                    },
+                    status=502,
+                )
+            return JsonResponse(
+                {
+                    "detail": "파일 정보를 저장하지 못했습니다. 다시 시도해 주세요.",
+                    "code": "inventory_metadata_save_failed",
+                },
+                status=500,
+            )
 
         reported_scores = []
         if validated_scores is not None:
