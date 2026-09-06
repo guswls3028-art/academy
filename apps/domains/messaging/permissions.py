@@ -1,7 +1,7 @@
 from apps.core.models import TenantMembership
 
 
-MESSAGE_SEND_ROLES = ("owner", "admin", "teacher")
+MESSAGE_SEND_ROLES = ("owner", "admin", "teacher", "staff")
 
 
 def can_send_messages(request, tenant) -> bool:

@@ -199,6 +199,39 @@ def _worker_tenant_binding_error(data: dict) -> str:
     return ""
 
 
+def _worker_delivery_identity_error(data: dict) -> str:
+    """Read v1/v2 payloads during rollout and reject any supplied v2 drift."""
+
+    from django.conf import settings
+    from apps.domains.messaging.security import (
+        DELIVERY_IDENTITY_SIGNATURE_VERSION,
+        verify_delivery_identity_signature,
+    )
+
+    version = str(data.get("delivery_identity_version") or "").strip()
+    signature = str(data.get("delivery_identity_signature") or "").strip()
+    if version or signature:
+        if version != DELIVERY_IDENTITY_SIGNATURE_VERSION:
+            return "unsupported_delivery_identity_version"
+        if not signature:
+            return "missing_delivery_identity_signature"
+        if not verify_delivery_identity_signature(data, signature=signature):
+            return "invalid_delivery_identity_signature"
+
+        event_type = str(data.get("event_type") or "").strip()
+        from apps.domains.messaging.services.manual_delivery_identity import (
+            validate_delivery_identity,
+        )
+
+        return validate_delivery_identity(data, event_type=event_type)
+
+    if bool(
+        getattr(settings, "MESSAGING_DELIVERY_IDENTITY_V2_ENFORCED", False)
+    ):
+        return "missing_delivery_identity_v2"
+    return ""
+
+
 def _is_non_retryable_send_failure(reason: str) -> bool:
     return any(item in (reason or "") for item in _NON_RETRYABLE_SEND_FAILURES)
 
@@ -338,24 +371,8 @@ def _allowed_common_template_ids(event_type: str) -> set[str]:
         template_id = (get_solapi_template_id(trigger) or "").strip()
         return {template_id} if template_id else set()
 
-    from apps.domains.messaging.models import AutoSendConfig
-    from apps.domains.messaging.policy import get_owner_tenant_id
-
-    owner_id = int(get_owner_tenant_id())
-    config = (
-        AutoSendConfig.objects.select_related("template")
-        .filter(tenant_id=owner_id, trigger=trigger)
-        .first()
-    )
-    template = config.template if config else None
-    if (
-        not template
-        or int(template.tenant_id) != owner_id
-        or template.solapi_status != "APPROVED"
-    ):
-        return set()
-    template_id = (template.solapi_template_id or "").strip()
-    return {template_id} if template_id else set()
+    # 매핑되지 않은 이벤트는 DB의 임의 승인 행로 대체하지 않는다.
+    return set()
 
 
 # 메시지 발송 구간별 진행률 (n/4): 업로드 마법사처럼 단계별 0~100% 제공
@@ -1028,6 +1045,7 @@ def main() -> int:
                         allowed_template_ids = _allowed_common_template_ids(event_type_msg)
                         if template_id_normalized not in allowed_template_ids:
                             template_policy_block_reason = "common_template_not_allowed"
+                    delivery_identity_block_reason = _worker_delivery_identity_error(data)
                     channel_policy_block_reason = ""
                     if message_mode != "alimtalk":
                         from apps.domains.messaging.policy import (
@@ -1040,6 +1058,7 @@ def main() -> int:
                         channel_policy_block_reason
                         or video_encoding_block_reason
                         or template_policy_block_reason
+                        or delivery_identity_block_reason
                     )
                     if policy_block_reason:
                         logger.error(

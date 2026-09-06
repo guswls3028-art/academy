@@ -25,7 +25,6 @@ from apps.domains.messaging.views_notification import (
     ManualNotificationConfirmView,
     ManualNotificationPreviewView,
 )
-from apps.worker.messaging_worker.sqs_main import _allowed_common_template_ids
 User = get_user_model()
 Student = apps.get_model("students", "Student")
 
@@ -50,7 +49,7 @@ class NotificationPreviewViewValidationTests(TestCase):
         request.tenant = self.tenant
         return view.as_view()(request)
 
-    def test_generic_staff_cannot_preview_or_confirm_external_messages(self):
+    def test_staff_membership_reaches_preview_and_confirm_validation(self):
         staff = User.objects.create_user(
             username="msg-preview-staff",
             password="test1234",
@@ -84,7 +83,29 @@ class NotificationPreviewViewValidationTests(TestCase):
         for view, path, data in cases:
             with self.subTest(path=path):
                 response = self._post(view, path, data, user=staff)
-                self.assertEqual(response.status_code, 403)
+                self.assertEqual(response.status_code, 400)
+                self.assertNotIn("권한이 없습니다", response.data["detail"])
+
+    def test_staff_can_open_manual_message_preview(self):
+        staff = User.objects.create_user(
+            username="msg-preview-staff-positive",
+            password="test1234",
+            tenant=self.tenant,
+            is_staff=True,
+        )
+        TenantMembership.ensure_active(tenant=self.tenant, user=staff, role="staff")
+        with patch(
+            "apps.domains.messaging.views_notification.build_student_list_preview",
+            return_value={"recipients": [], "total_count": 0, "excluded_count": 0},
+        ):
+            response = self._post(
+                ManualNotificationPreviewView,
+                "/api/v1/messaging/manual-notification/preview/",
+                {"trigger": "exam_score_published", "student_ids": [1]},
+                user=staff,
+            )
+
+        self.assertEqual(response.status_code, 200)
 
     def test_teacher_can_open_manual_message_preview(self):
         teacher = User.objects.create_user(
@@ -383,7 +404,7 @@ class NotificationPreviewViewValidationTests(TestCase):
         self.assertEqual(payload_recipient["phone_raw"], "01055556666")
         self.assertNotIn("full_message_body", payload_recipient)
 
-    def test_manual_student_list_preview_uses_owner_exact_template_for_non_owner_tenant(self):
+    def test_manual_student_list_preview_rejects_unmapped_owner_template(self):
         owner = Tenant.objects.create(code="msg-owner", name="Owner", is_active=True)
         tenant = Tenant.objects.create(code="msg-child", name="Child", is_active=True)
         student_user = User.objects.create_user(
@@ -443,24 +464,9 @@ class NotificationPreviewViewValidationTests(TestCase):
                 send_to="parent",
             )
 
-        self.assertNotIn("error", preview)
-        self.assertEqual(preview["solapi_template_id"], "OWNER-APPROVED")
-        self.assertEqual(preview["message_template_body"], "오너 검수 문구 #{학생이름}")
-        self.assertEqual(preview["recipients"][0]["message_body"], "오너 검수 문구 비오너학생")
-
-        with override_settings(OWNER_TENANT_ID=owner.id):
-            batch = execute_notification_batch(
-                tenant,
-                preview,
-                batch_id="owner-exact-contract",
-                staff_id=None,
-                process=False,
-            )
-            scheduled = ScheduledNotification.objects.get(tenant=tenant)
-            self.assertEqual(scheduled.trigger, "owner_exact_manual_notice")
-            self.assertEqual(scheduled.payload["event_type"], "owner_exact_manual_notice")
-            self.assertIn("OWNER-APPROVED", _allowed_common_template_ids("owner_exact_manual_notice"))
-        self.assertEqual(batch["pending_count"], 1)
+        self.assertEqual(preview["error"], "승인된 알림톡 템플릿이 없습니다.")
+        self.assertEqual(preview["recipients"], [])
+        self.assertFalse(ScheduledNotification.objects.filter(tenant=tenant).exists())
 
     def test_manual_preview_rejects_cross_tenant_content_template_drift(self):
         other = Tenant.objects.create(code="msg-preview-drift", name="Drift", is_active=True)

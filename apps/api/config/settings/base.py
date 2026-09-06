@@ -597,6 +597,14 @@ MESSAGING_TENANT_BINDING_ENFORCED = os.getenv(
     "MESSAGING_TENANT_BINDING_ENFORCED",
     "true",
 ).lower() in ("1", "true", "yes")
+MESSAGING_DELIVERY_IDENTITY_V2_ENFORCED = os.getenv(
+    "MESSAGING_DELIVERY_IDENTITY_V2_ENFORCED",
+    "false",
+).lower() in ("1", "true", "yes")
+MESSAGING_MANUAL_PREFLIGHT_IDENTITY_ENFORCED = os.getenv(
+    "MESSAGING_MANUAL_PREFLIGHT_IDENTITY_ENFORCED",
+    "false",
+).lower() in ("1", "true", "yes")
 MESSAGING_PROVIDER_DAILY_DISPATCH_LIMIT = max(
     1,
     int(os.getenv("MESSAGING_PROVIDER_DAILY_DISPATCH_LIMIT", "900")),

@@ -53,7 +53,7 @@ class EffectiveTemplateStatusTests(TestCase):
         self.assertTrue(data["effective_template_is_approved"])
         self.assertEqual(data["effective_template_type"], "clinic_info")
 
-    def test_non_unified_trigger_uses_owner_exact_template_status(self):
+    def test_non_unified_trigger_does_not_use_linked_provider_template(self):
         template = MessageTemplate.objects.create(
             tenant=self.tenant,
             name="Matchup report",
@@ -74,10 +74,10 @@ class EffectiveTemplateStatusTests(TestCase):
         effective = resolve_effective_template_status(config)
 
         self.assertFalse(effective.is_approved)
-        self.assertEqual(effective.source, "owner_exact")
+        self.assertEqual(effective.source, "provider_contract_missing")
         self.assertEqual(effective.template_type, "")
-        self.assertEqual(effective.solapi_template_id, "tenant-pending")
-        self.assertEqual(effective.solapi_status, "PENDING")
+        self.assertEqual(effective.solapi_template_id, "")
+        self.assertEqual(effective.solapi_status, "")
 
     def test_mapped_trigger_without_provider_sid_does_not_fallback_to_linked_template(self):
         template = MessageTemplate.objects.create(
@@ -104,7 +104,7 @@ class EffectiveTemplateStatusTests(TestCase):
         self.assertEqual(effective.template_type, "notice_payment")
         self.assertEqual(effective.solapi_template_id, "")
 
-    def test_owner_exact_templates_are_batch_loaded_before_serialization(self):
+    def test_provider_fallback_is_not_loaded_before_serialization(self):
         owner_template = MessageTemplate.objects.create(
             tenant=self.tenant,
             name="Owner exact notice",
@@ -132,7 +132,7 @@ class EffectiveTemplateStatusTests(TestCase):
             message_mode="alimtalk",
         )
 
-        with self.assertNumQueries(1):
+        with self.assertNumQueries(0):
             primed = prime_effective_owner_templates([child_config])
         with self.assertNumQueries(0):
             effective = resolve_effective_template_status(primed[0])

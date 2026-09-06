@@ -77,6 +77,7 @@ class SendMessagePreflightViewTests(MessagingOperationsBase):
                     "student_ids": [student.id],
                     "raw_body": "성적표 안내입니다.",
                     "block_category": "grades",
+                    "manual_event": "lesson_result",
                     "alimtalk_extra_vars": {
                         "강의명": "중2 수학",
                         "차시명": "1차시",
@@ -108,6 +109,7 @@ class SendMessagePreflightViewTests(MessagingOperationsBase):
                     "student_ids": [first_student.id, second_student.id],
                     "raw_body": "전역 본문",
                     "block_category": "grades",
+                    "manual_event": "lesson_result",
                     "alimtalk_extra_vars": {
                         "강의명": "중2 과학",
                         "차시명": "2차시",
@@ -154,6 +156,7 @@ class SendMessagePreflightViewTests(MessagingOperationsBase):
                     "student_ids": [ok_student.id, no_phone_student.id, deleted_student.id, ok_student.id],
                     "raw_body": "성적표 안내입니다.",
                     "block_category": "attendance",
+                    "manual_event": "attendance_notice",
                 },
             )
         )
@@ -202,7 +205,7 @@ class SendMessagePreflightViewTests(MessagingOperationsBase):
         self.assertFalse(response.data["ok"])
         self.assertTrue(any(item["code"] == "template_not_ready" for item in response.data["blockers"]))
 
-    def test_preflight_keeps_score_envelope_when_reusing_clinic_copy(self):
+    def test_preflight_rejects_reusing_clinic_copy_for_score(self):
         student = self._student("010")
         clinic_copy = MessageTemplate.objects.create(
             tenant=self.tenant,
@@ -222,6 +225,7 @@ class SendMessagePreflightViewTests(MessagingOperationsBase):
                     "template_id": clinic_copy.id,
                     "raw_body": "이번 수업 결과를 안내드립니다.",
                     "block_category": "grades",
+                    "manual_event": "lesson_result",
                     "alimtalk_extra_vars": {
                         "강의명": "중2 수학",
                         "차시명": "1차시",
@@ -235,13 +239,12 @@ class SendMessagePreflightViewTests(MessagingOperationsBase):
             )
         )
 
-        self.assertTrue(response.data["ok"], response.data)
-        self.assertEqual(response.data["template"]["template_type"], "score")
-        preview = response.data["preview_recipients"][0]["full_message_body"]
-        self.assertIn("성적표 안내", preview)
-        self.assertIn("중2 수학", preview)
-        self.assertIn("1차시", preview)
-        self.assertNotIn("장소\n-", preview)
+        self.assertFalse(response.data["ok"], response.data)
+        self.assertEqual(
+            response.data["template"]["error_code"],
+            "content_template_category_mismatch",
+        )
+        self.assertEqual(response.data["preview_recipients"], [])
 
     def test_preflight_fail_closes_payment_when_provider_sid_is_missing(self):
         student = self._student("006")
@@ -271,7 +274,7 @@ class SendMessagePreflightViewTests(MessagingOperationsBase):
 
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.data["ok"])
-        self.assertEqual(response.data["template"]["source"], "unified_missing")
+        self.assertEqual(response.data["template"]["source"], "missing")
         self.assertEqual(response.data["template"]["solapi_template_id"], "")
 
     def test_preflight_quota_uses_source_business_tenant_only(self):
@@ -309,6 +312,7 @@ class SendMessagePreflightViewTests(MessagingOperationsBase):
                         "student_ids": [student.id],
                         "raw_body": "쿼터 확인 안내입니다.",
                         "block_category": "attendance",
+                        "manual_event": "attendance_notice",
                     },
                 )
             )
@@ -330,6 +334,7 @@ class SendMessagePreflightViewTests(MessagingOperationsBase):
                         "student_ids": [student.id],
                         "raw_body": "예약 안내입니다.",
                         "block_category": "attendance",
+                        "manual_event": "attendance_notice",
                         "scheduled_send_at": (
                             timezone.now() + timedelta(hours=2)
                         ).isoformat(),
@@ -363,6 +368,7 @@ class SendMessagePreflightViewTests(MessagingOperationsBase):
                         "student_ids": [student.id],
                         "raw_body": "일일 한도 확인",
                         "block_category": "attendance",
+                        "manual_event": "attendance_notice",
                     },
                 )
             )
@@ -395,6 +401,7 @@ class SendMessagePreflightViewTests(MessagingOperationsBase):
                         "student_ids": [student.id],
                         "raw_body": "중지 상태 안내",
                         "block_category": "attendance",
+                        "manual_event": "attendance_notice",
                     },
                 )
             )

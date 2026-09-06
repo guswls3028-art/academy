@@ -228,6 +228,11 @@ class MessageTemplate(models.Model):
         default=False,
         help_text="사용자가 해당 카테고리에서 기본 양식으로 지정한 템플릿. tenant+category당 1개만.",
     )
+    retired_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="발송 문구 선택에서 영구 제외한 시각. 과거 발송 추적을 위해 행은 보존합니다.",
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

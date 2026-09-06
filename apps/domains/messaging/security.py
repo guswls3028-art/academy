@@ -2,13 +2,29 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import re
 from typing import Any
 
 from django.core.exceptions import ImproperlyConfigured
 
 TENANT_BINDING_SIGNATURE_VERSION = "v1"
+DELIVERY_IDENTITY_SIGNATURE_VERSION = "v2"
+MANUAL_PREFLIGHT_SIGNATURE_VERSION = "v1"
 RECIPIENT_FINGERPRINT_VERSION = "v1"
+
+_DELIVERY_IDENTITY_FIELDS = (
+    "event_type",
+    "template_id",
+    "provider_template_type",
+    "provider_template_version",
+    "provider_template_structure_fingerprint",
+    "provider_template_content_fingerprint",
+    "provider_template_header_fingerprint",
+    "content_template_id",
+    "content_template_version",
+    "content_snapshot_sha256",
+)
 
 SENSITIVE_NOTIFICATION_TYPES = frozenset(
     {
@@ -149,6 +165,142 @@ def verify_tenant_binding_signature(
     )
 
 
+def _delivery_identity_material(payload: dict[str, Any]) -> bytes:
+    identity = {
+        field: payload.get(field) if payload.get(field) is not None else ""
+        for field in _DELIVERY_IDENTITY_FIELDS
+    }
+    canonical = json.dumps(
+        identity,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return (
+        f"messaging-delivery-identity:{DELIVERY_IDENTITY_SIGNATURE_VERSION}:"
+        f"{canonical}"
+    ).encode("utf-8")
+
+
+def build_delivery_identity_signature(
+    payload: dict[str, Any],
+    *,
+    key: str | None = None,
+) -> str:
+    """Authenticate an immutable provider-envelope and content snapshot identity."""
+
+    from django.conf import settings
+
+    resolved_key = str(
+        key
+        if key is not None
+        else getattr(settings, "MESSAGING_TENANT_BINDING_KEY", "")
+        or ""
+    ).strip()
+    if not resolved_key:
+        raise ImproperlyConfigured("MESSAGING_TENANT_BINDING_KEY is required")
+    return hmac.new(
+        resolved_key.encode("utf-8"),
+        _delivery_identity_material(payload),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def verify_delivery_identity_signature(
+    payload: dict[str, Any],
+    *,
+    signature: str,
+) -> bool:
+    """Verify v2 identity with the active key and configured rotation fallbacks."""
+
+    from django.conf import settings
+
+    primary = str(getattr(settings, "MESSAGING_TENANT_BINDING_KEY", "") or "").strip()
+    fallbacks = tuple(
+        str(key).strip()
+        for key in getattr(settings, "MESSAGING_TENANT_BINDING_FALLBACK_KEYS", ())
+        if str(key).strip()
+    )
+    if not primary:
+        raise ImproperlyConfigured("MESSAGING_TENANT_BINDING_KEY is required")
+    supplied = str(signature or "")
+    material = _delivery_identity_material(payload)
+    return any(
+        hmac.compare_digest(
+            supplied,
+            hmac.new(key.encode("utf-8"), material, hashlib.sha256).hexdigest(),
+        )
+        for key in (primary, *fallbacks)
+    )
+
+
+def _manual_preflight_material(*, token: str, identity: dict[str, Any]) -> bytes:
+    canonical = json.dumps(
+        identity,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return (
+        f"messaging-manual-preflight:{MANUAL_PREFLIGHT_SIGNATURE_VERSION}:"
+        f"{token}:{canonical}"
+    ).encode("utf-8")
+
+
+def build_manual_preflight_signature(
+    *,
+    token: str,
+    identity: dict[str, Any],
+    key: str | None = None,
+) -> str:
+    """Sign the exact one-time manual-send identity returned by preflight."""
+
+    from django.conf import settings
+
+    resolved_key = str(
+        key
+        if key is not None
+        else getattr(settings, "MESSAGING_TENANT_BINDING_KEY", "")
+        or ""
+    ).strip()
+    if not resolved_key:
+        raise ImproperlyConfigured("MESSAGING_TENANT_BINDING_KEY is required")
+    return hmac.new(
+        resolved_key.encode("utf-8"),
+        _manual_preflight_material(token=token, identity=identity),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def verify_manual_preflight_signature(
+    *,
+    token: str,
+    identity: dict[str, Any],
+    signature: str,
+) -> bool:
+    """Verify a preflight identity across configured signing-key rotation."""
+
+    from django.conf import settings
+
+    primary = str(getattr(settings, "MESSAGING_TENANT_BINDING_KEY", "") or "").strip()
+    fallbacks = tuple(
+        str(key).strip()
+        for key in getattr(settings, "MESSAGING_TENANT_BINDING_FALLBACK_KEYS", ())
+        if str(key).strip()
+    )
+    if not primary:
+        raise ImproperlyConfigured("MESSAGING_TENANT_BINDING_KEY is required")
+    supplied = str(signature or "")
+    material = _manual_preflight_material(token=token, identity=identity)
+    return any(
+        hmac.compare_digest(
+            supplied,
+            hmac.new(key.encode("utf-8"), material, hashlib.sha256).hexdigest(),
+        )
+        for key in (primary, *fallbacks)
+    )
+
+
 def sanitize_message_body_for_log(
     message_body: str,
     *,
@@ -223,6 +375,15 @@ def redact_terminal_delivery_payload(*, trigger: str, payload: object) -> object
         "occurrence_key",
         "message_mode",
         "template_id",
+        "provider_template_type",
+        "provider_template_version",
+        "provider_template_structure_fingerprint",
+        "provider_template_content_fingerprint",
+        "provider_template_header_fingerprint",
+        "delivery_identity_version",
+        "content_template_id",
+        "content_template_version",
+        "content_snapshot_sha256",
         "recipient_fingerprint",
         "origin_type",
         "origin_id",

@@ -149,6 +149,13 @@ class TestSendEventNotification(_DispatchThroughQueueMixin, TestCase):
         self.assertEqual(reps["학원이름"], "학원플러스")
         self.assertEqual(reps["학생이름"], "홍길동")
         self.assertEqual(reps["강의명"], "수학A반")
+        self.assertEqual(kw["provider_template_type"], "attendance")
+        self.assertEqual(kw["provider_template_version"], "CXHFcwKdJU")
+        self.assertEqual(
+            kw["provider_template_structure_fingerprint"],
+            "7f443b87eb8d8c95",
+        )
+        self.assertEqual(len(kw["content_snapshot_sha256"]), 64)
 
     @patch(f"{_QSV}.enqueue_alimtalk")
     @patch(f"{_SEL}.get_auto_send_config")
@@ -269,6 +276,12 @@ class TestSendEventNotification(_DispatchThroughQueueMixin, TestCase):
         self.assertEqual(replacements["클리닉날짜"], "2026-09-03")
         self.assertEqual(replacements["클리닉시간"], "21:40")
         self.assertIn("하원", replacements["선생님메모"])
+        self.assertEqual(payload["provider_template_type"], "clinic_info")
+        self.assertEqual(payload["provider_template_version"], "W6jQe04a0p")
+        self.assertEqual(
+            payload["provider_template_structure_fingerprint"],
+            "9e8c96df5beebac2",
+        )
 
     @patch(f"{_QSV}.enqueue_alimtalk")
     @patch(f"{_SEL}.get_auto_send_config")

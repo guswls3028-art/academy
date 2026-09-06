@@ -137,7 +137,7 @@ def _context_source_override_detail(context_conflicts, per_student_conflicts):
 def _messaging_access_error(request, tenant):
     if not can_send_messages(request, tenant):
         return Response(
-            {"detail": "알림톡 발송 권한이 없습니다. 관리자 또는 강사 권한이 필요합니다."},
+            {"detail": "알림톡 발송 권한이 없습니다. 관리자·강사·조교 권한이 필요합니다."},
             status=http_status.HTTP_403_FORBIDDEN,
         )
     from apps.domains.messaging.policy import (

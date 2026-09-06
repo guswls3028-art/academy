@@ -1,6 +1,6 @@
 # 메시징 도메인 SSOT (공용 카카오 알림톡 발송 시스템)
 
-> 최종 갱신: 2026-08-29 (일반 강의 출결을 수동 preview→confirm 전용으로 복구)
+> 최종 갱신: 2026-09-06 (명시적 수신자·exact provider identity·1회용 preflight 계약)
 > 근거: 코드 직접 확인. 추측 없음.
 
 ---
@@ -16,7 +16,7 @@
 
 선생님이 양식 UI에서 하는 모든 행위 — 변수블록 추가/제거, 문구 변경, 새 카테고리 안내, 양식 디자인 — 은 **전부 `#{선생님메모}` 한 자리 안에서 일어남**. 봉투 자체는 장식, 변경 불가.
 
-### 봉투 의미 매칭 (학원장이 카테고리 선택 = 봉투 선택)
+### 봉투 계약 (business event가 exact provider identity를 선택)
 
 | 봉투 | prefix (장식 고정) | 자동 슬롯 (장식) | 학원장 자유 편지 |
 |---|---|---|---|
@@ -27,7 +27,7 @@
 | NONE notice_withdrawal | `[HakwonPlus] 퇴원 처리 완료` | 학원명/학생이름2 | **없음** (시스템 안내) |
 | NONE notice_payment | `[HakwonPlus] 결제 완료 안내` | 학원명/학생이름2/사이트링크 | **없음** (시스템 안내) |
 
-성적 관련 안내 → score 봉투. 클리닉 관련 → clinic_info 봉투. 출석·시험 일정·과제 안내 → attendance 봉투. 클리닉 일정 변경/취소 → clinic_change 봉투. **ITEM_LIST 봉투 안 편지(`#{선생님메모}`)는 무제한 자유.** NONE 봉투는 카카오 승인 본문 고정이라 편지 영역이 없다.
+수동 발송은 `manual_event`가 exact provider identity를 선택한다. 카테고리·저장 문구 이름/본문·최신/기본 행으로 봉투를 추론하지 않는다. 저장 문구는 교사가 이번 발송에서 명시적으로 선택한 경우에만 `#{선생님메모}`의 content snapshot으로 사용한다. 승인 SID·버전·구조·변수 계약 중 하나라도 없거나 다르면 provider dispatch 0으로 실패 폐쇄한다.
 
 2026-07-08 Solapi 실등록 감사 기준 `notice_payment` 기존 SID는 provider 목록에 없어 현재 fail-closed다. 논리 매핑은 유지하지만 실제 승인 SID가 복구되기 전까지 결제 알림톡은 발송하지 않는다.
 
@@ -37,7 +37,7 @@
 - ❌ "notice/community/staff 카테고리에 매핑이 없으니 추가하자"
 - ❌ "새로운 양식이 필요하니 Solapi에 등록하자 / 봉투 새로 만들자"
 - ❌ "신규 알림톡 템플릿 만들자"
-- ❌ "fallback 양식이 필요할 수도 있다" 추론
+- ❌ "fallback 양식이 필요할 수도 있다" 또는 의미가 비슷한 다른 봉투를 쓰자는 추론
 - ❌ NONE 양식 본문 미반영을 결함으로 분류 / 매핑 제거 시도
 - ❌ 양식 추가 / 신규 검수를 backlog · P1 · P2 · 개선안으로 적기
 
@@ -53,8 +53,8 @@
 ### How to apply (모든 알림톡 작업 진행 전 자기 검토)
 
 1. 내가 양식 추가 / 카카오 검수 / 새 템플릿 / 새 봉투 권유하려 하나? → **멈춤**
-2. 모든 새 안내 문구 / 카테고리 / 트리거 → 4종 봉투 중 의미 가까운 것 선택 + `#{선생님메모}` 본문 자유 작성으로 cover
-3. 학원장이 명시적으로 "새 카카오 양식 검수 받자" 한 경우만 신규 검수 진행
+2. business event에 등록된 exact provider contract가 없으면 다른 봉투를 고르지 말고 실패 폐쇄
+3. 새 provider contract 등록은 별도 명시적 제품 결정과 공급사 승인 후에만 진행
 4. NONE 자동발송 매핑(withdrawal_complete/payment_complete/payment_due_days_before) 제거 금지 — 시스템 안내 자동발송이 정상
 5. UI에서 `#{선생님메모}` 본문 편집을 잠그지 않는다.
 
@@ -85,8 +85,9 @@
 
 ```
 관리자 UI (SendMessageModal)
+  -> POST /messaging/send/preflight/      [서명된 1회용 identity, 5분]
   -> SendMessageView.post()             [views/send_views.py]
-    -> 통합 승인 봉투 매핑 (CATEGORY_TO_TEMPLATE_TYPE)
+    -> manual_event exact provider contract + preflight identity 검증/소비
     -> build_manual_replacements()       [alimtalk_content_builders.py]
     -> enqueue_alimtalk()                     [services.py:111]
       -> (이하 동일, tenant별 PFID/provider fallback 없음)
@@ -113,9 +114,9 @@
 
 | 단계 | 파일 | 역할 |
 |------|------|------|
-| `send_event_notification` | services.py:267 | AutoSendConfig 조회, enabled/dry-run 확인, 공용 owner 템플릿 또는 unified 템플릿 resolve, 수신자 전화번호 추출 |
+| `send_event_notification` | services.py:267 | AutoSendConfig 조회, enabled/dry-run 확인, exact event provider contract resolve, 수신자 전화번호 추출 |
 | `enqueue_alimtalk` | `services/queue_service.py` | 정책 검증(disabled/restricted/whitelist/알림톡 전용), owner tenant_id 정규화, SQS enqueue |
-| `MessagingSQSQueue.enqueue` | sqs_queue.py:62 | SQS 메시지 구성, business_idempotency_key 생성, 큐 전송 |
+| `MessagingSQSQueue.enqueue` | sqs_queue.py:62 | 기존 v1 business key를 유지하고 별도 v2 provider/content identity 서명을 추가한 뒤 큐 전송 |
 | 메시징 워커 `main` | sqs_main.py:314 | SQS Long Polling, Redis 멱등 잠금, 예약 취소 확인, 잔액 검증/차감, 공급자별 발송, 로그 기록 |
 | 알림톡 provider dispatch | `sqs_main.py` | 공용 시스템 PFID + 공용 provider로 알림톡 발송. Solapi fallback은 `disable_sms=True` |
 | 비알림톡 boundary | `queue_service.py`, `sqs_queue.py`, `scheduled.py`, `sqs_main.py` | SMS/LMS는 `sms_disabled`, 그 밖의 명시 채널은 `unsupported_message_mode`로 닫고 provider를 호출하지 않음 |
@@ -208,17 +209,17 @@
 | 트리거 | 매핑 제외 사유 |
 |---|---|
 | `video_encoding_complete` / `matchup_report_submitted` | "[성적표 안내]" prefix 의미 불일치 (강사 본인/owner/admin 알림) |
-| `qna_answered` | 공용 ITEM_LIST 봉투와 의미가 맞지 않아 통합 매핑은 유지하지 않는다. 별도 owner exact 템플릿은 학생 이름과 사이트 링크만 치환하는 고정 문구이며, provider와 DB가 모두 `APPROVED`일 때만 발송한다. |
+| `qna_answered` | 공용 ITEM_LIST 봉투와 의미가 맞지 않아 provider contract 등록 전까지 dispatch 0으로 유지한다. |
 | `counsel_answered` | 한 때 TYPE_SCORE 재사용([v1.2.0 release](../releases/v1.2.0.md) §6) 이었으나 prefix 의미 불일치로 매핑 제거. test_alimtalk_content_builders.py:55-60 None assert 적용 |
 
 ### 매핑 X 트리거의 실제 발송 path
 
-`build_unified_replacements` → trigger 매핑 X → `return []` (빈 replacements). 이후 `notification_service.send_event_notification` 기존 모드 진입:
-1. tenant AutoSendConfig는 enabled/body memo 확인에만 사용
-2. owner tenant (T1 hakwonplus) 의 같은 trigger AutoSendConfig template이 `solapi_status=APPROVED`이고 SID가 있을 때만 발송
-3. owner exact approved template이 없으면 발송 차단 (`return False`)
-
-→ 즉, 위 매핑 제외 trigger 들의 실제 운영 발송 여부 = owner tenant AutoSendConfig 의 별도 승인 template 등록 상태에 의존. **tenant template, 자유양식, 다른 trigger로 fallback하지 않는다.** Q&A 답변 알림은 전용 고정 문구의 검수 상태가 `PENDING`/`REJECTED`이면 fail-closed하며, `APPROVED` 확인 뒤에만 opt-in 테넌트에서 발송한다. 기존 답변을 소급 발송하지 않는다.
+`notification_service.send_event_notification`은 exact event provider contract가 없는
+트리거를 즉시 `False`로 종료한다. owner/tenant DB의 승인 행, 이름, 최신/기본 문구,
+자유양식이나 다른 trigger를 조회해 봉투를 만들지 않는다. 따라서
+`video_encoding_complete`, `matchup_report_submitted`, `qna_answered`,
+`counsel_answered`는 별도 공급사 계약이 코드에 등록·검증되기 전까지 provider
+dispatch 0이다. 기존 이벤트를 소급 발송하지 않는다.
 
 **참고:** `clinic_reservation_changed`와 `clinic_cancelled`는 `clinic_change` 템플릿을 사용하여 기존일정/변동사항/수정자 변수를 ITEM_LIST에 표시.
 
@@ -319,18 +320,18 @@
 출처: `views/send_views.py`, `services/preflight.py`
 
 1. `message_mode == "alimtalk"`이면:
-2. 현재 화면이 보낸 `block_category`를 `get_unified_for_manual_send()`로 먼저 매핑
-3. 통합 ITEM_LIST 4종 또는 NONE 2종 매핑이 있으면 현재 화면의 Solapi 봉투를 사용하고, 저장 문구의 과거 카테고리는 편지 내용만 재사용한다. 단, 자체 승인 양식을 쓰는 `signup`과 고정 시스템 본문인 `payment`는 저장 템플릿 카테고리를 유지한다.
-4. `signup` 카테고리면 자체 Solapi 템플릿 유지 (`SYSTEM_TEMPLATE_CATEGORIES`)
-5. 현재 화면 카테고리에 봉투 매핑이 없을 때만 저장 템플릿의 `category`와 `name`을 fallback으로 사용
-6. 그래도 매핑이 없으면 fail-closed. 자유양식/공지형 fallback은 사용하지 않는다.
-7. 매핑된 봉투는 `build_manual_replacements()`로 실제 Solapi 등록 변수와 일치하는 replacements 세트를 빌드
-8. preflight 응답의 `preview_recipients[].full_message_body`는 같은 replacements로 승인 봉투 전체 문구를 서버에서 렌더링한다.
+2. 현재 화면이 보낸 `manual_event`를 `get_unified_for_manual_send()`로 exact 매핑한다.
+3. `manual_event`가 없거나 승인 provider contract가 없으면 fail-closed한다. `block_category`, 저장 문구 category/name/body, 최신/기본 행은 봉투 선택에 사용하지 않는다.
+4. 저장 문구는 이번 발송에서 교사가 명시적으로 선택했고 id/category/version이 맞을 때만 content snapshot으로 사용한다.
+5. `build_manual_replacements()`로 provider 등록 변수와 정확히 같은 replacements 세트를 만든다.
+6. preflight 응답의 `preview_recipients[].full_message_body`는 같은 replacements로 승인 봉투 전체 문구를 서버에서 렌더링한다.
+7. preflight가 tenant·actor·수신자·`send_to`·본문 hash·content id/version·event·provider SID/version/fingerprint·만료를 서명한 1회용 identity를 발급한다.
+8. send는 같은 identity를 원자적으로 소비하며 어느 값이든 바뀌거나 재사용되면 outbox 생성 전에 거절한다.
 
 ### 발송 직전 실제 문구 미리보기 계약
 
 - 최종 미리보기의 학원명, 학생명, 사이트 링크, 빈 값 `"-"`, ITEM_LIST 23자 절단은 실제 Solapi replacements와 동일한 서버 계산값을 사용한다.
-- 저장 문구가 다른 카테고리에서 만들어졌더라도 현재 발송 화면의 봉투를 바꾸지 않는다. 예를 들어 성적 화면에서 클리닉 문구를 재사용해도 preflight와 실발송은 모두 `score` 봉투를 사용한다.
+- 성적 발송에서 다른 카테고리의 저장 문구는 재사용하지 않는다. 현재 발송의 exact event와 content category/version이 모두 맞아야 한다.
 - `payment`처럼 본문과 봉투가 고정된 시스템 템플릿은 다른 진입 화면의 봉투로 fallback하지 않으며, 승인 SID가 없으면 발송을 차단한다.
 - 클라이언트가 샘플 학원명·강의명·차시·날짜를 임의로 조립하지 않는다. `preview_recipients` 또는 `full_message_body`가 없거나 수신자 수와 맞지 않으면 발송을 fail-close한다.
 - 전화번호는 마스킹해 반환하고, 유효한 학생/학부모 번호가 없는 대상은 `excluded`와 `exclude_reason`으로 구분한다.
@@ -339,29 +340,18 @@
 - `grades` 수동 발송은 해석된 전체 학생 ID 집합과 `alimtalk_extra_vars_per_student` 키 집합이 정확히 같고, 모든 학생 항목에 비어 있지 않은 `_body_subst`가 있어야 한다. preflight와 confirm이 같은 검사를 수행하며, 한 명이라도 누락·초과·형식 오류이면 `grade_personalization_incomplete`로 실패 폐쇄한다.
 - 성적 본문은 학생별 `_body_subst`만 사용한다. 공용 `raw_body`나 `alimtalk_extra_vars`에 들어온 첫 선택 학생의 점수는 다른 학생의 대체값이 될 수 없다. 이 경계는 예약 발송을 포함해 outbox 생성 전에 적용한다.
 
-### CATEGORY_TO_TEMPLATE_TYPE 매핑
+### MANUAL_EVENT_TO_TEMPLATE_TYPE 매핑
 
 출처: `alimtalk_content_builders.py:167-178` (2026-07-08 기준)
 
-| 카테고리 | 템플릿 타입 | 비고 |
+| manual event | 템플릿 타입 | 비고 |
 |----------|------------|---|
-| grades | score | "[성적표 안내]" prefix 의미 일치 |
-| attendance | attendance | |
-| lecture | attendance | |
-| exam | attendance | 시험 일정/미응시 안내를 강의/차시 컨텍스트 봉투에 담음 |
-| assignment | attendance | 과제 등록/마감/미제출 안내를 강의/차시 컨텍스트 봉투에 담음 |
-| clinic | clinic_info (또는 clinic_change*) | |
-| payment | notice_payment | NONE 고정 본문 시스템 안내. 2026-07-08 현재 provider SID 누락으로 fail-closed |
+| lesson_result | score | 수업 결과 전용 |
+| attendance_notice | attendance | 출결 안내 전용 |
+| clinic_reservation_notice | clinic_info | 클리닉 일정 안내 전용 |
+| clinic_change_notice | clinic_change | 클리닉 변경 전용 |
 
-### 매핑 의도적 제외 카테고리
-
-다음 카테고리는 코드 매핑 없음. `get_unified_for_category` → `(None, None)` 반환:
-
-- **notice / community / staff / default / student**: 카카오 등록 양식 부재
-
-→ 위 카테고리로 호출 시 `get_unified_for_category` 가 (None, None) 반환. 다른 카테고리/템플릿으로 fallback하지 않는다.
-
-*clinic 카테고리: template_name에 "변경/취소/change/cancel/reschedule" 키워드가 있거나, extra_vars에 클리닉기존일정/클리닉변동사항/클리닉수정자가 있으면 clinic_change. 그 외 clinic_info. (`get_unified_for_category` line 163-189)
+그 밖의 수동 event/category/name/body 값은 `(None, None)`이며 다른 provider 봉투로 대체하지 않는다.
 
 ### 시스템 기본양식 (통합 승인 봉투 제외)
 
@@ -377,6 +367,9 @@ signup 카테고리만 자체 Solapi 템플릿을 유지. 나머지 매핑 카�
 - Rate limit: 업무 tenant별 rolling 1시간 500건 + 공유 공급자 계정 KST 일일 900건 기본 안전 한도
 - 최대 200명 일괄 발송 (line 504-508)
 - 발신번호/PFID/provider는 공용 owner 설정만 사용한다.
+- 발송 역할은 현재 테넌트의 활성 `owner`, `admin`, `teacher`, `staff`다. 조교는
+  강사와 같은 학생/보호자 수동 발송 흐름을 사용하며, 메시징 공용 설정 변경은
+  계속 owner/admin 전용이다.
 
 ---
 
@@ -646,8 +639,8 @@ python manage.py diagnose_messaging_incident `
 출처: `services.py:309-320`
 
 1. 현재 테넌트의 AutoSendConfig 조회: enabled/delay/본문 메모만 사용
-2. 검수 템플릿은 명시 unified category 템플릿 또는 오너 테넌트(`OWNER_TENANT_ID`, 기본 1)의 exact trigger 승인 템플릿만 사용
-3. tenant template, 다른 trigger, SMS로 fallback하지 않음. 공용 승인 템플릿이 없으면 fail-closed
+2. 일반 업무 알림의 검수 템플릿은 코드에 등록된 exact event provider contract만 사용
+3. owner/tenant DB의 승인 행, 다른 trigger, 이름·최신·기본 문구, SMS로 fallback하지 않음. exact contract가 없으면 fail-closed
 
 ### send_alimtalk_via_owner
 
@@ -684,7 +677,10 @@ freeform_general, freeform_grades, freeform_lecture, freeform_exam, freeform_ass
 
 출처: `views.py:977`
 
-POST로 기존 기본 템플릿 리셋 가능. 이름이 기본값과 동일한 템플릿은 최신 기본값으로 덮어쓰기. 사용자가 새로 만든 템플릿은 유지. 새 자동발송 설정은 안전 기본값인 `enabled=false`로 생성한다.
+POST로 누락된 기본 템플릿과 설정을 명시적으로 생성할 수 있다. 이름이 같은 기존
+문구의 제목/본문은 덮어쓰지 않고, 사용자가 만든 문구도 유지한다. 새 자동발송
+설정은 안전 기본값인 `enabled=false`로 생성한다. 이 프로비저닝 문구가 수동
+발송 화면에 자동 선택되거나 provider 봉투로 사용되지는 않는다.
 
 ---
 

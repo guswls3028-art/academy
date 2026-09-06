@@ -103,6 +103,14 @@ class MessagingSQSQueue:
         message_mode: Optional[str] = None,
         alimtalk_replacements: Optional[list[dict]] = None,
         template_id: Optional[str] = None,
+        provider_template_type: Optional[str] = None,
+        provider_template_version: Optional[str] = None,
+        provider_template_structure_fingerprint: Optional[str] = None,
+        provider_template_content_fingerprint: Optional[str] = None,
+        provider_template_header_fingerprint: Optional[str] = None,
+        content_template_id: Optional[int] = None,
+        content_template_version: Optional[str] = None,
+        content_snapshot_sha256: Optional[str] = None,
         event_type: Optional[str] = None,
         target_type: Optional[str] = None,
         target_id: Optional[int | str] = None,
@@ -163,6 +171,28 @@ class MessagingSQSQueue:
             message["alimtalk_replacements"] = alimtalk_replacements
         if template_id:
             message["template_id"] = str(template_id)
+        if provider_template_type:
+            message["provider_template_type"] = str(provider_template_type)[:32]
+        if provider_template_version:
+            message["provider_template_version"] = str(provider_template_version)[:64]
+        if provider_template_structure_fingerprint:
+            message["provider_template_structure_fingerprint"] = str(
+                provider_template_structure_fingerprint
+            )[:64]
+        if provider_template_content_fingerprint:
+            message["provider_template_content_fingerprint"] = str(
+                provider_template_content_fingerprint
+            )[:64]
+        if provider_template_header_fingerprint:
+            message["provider_template_header_fingerprint"] = str(
+                provider_template_header_fingerprint
+            )[:64]
+        if content_template_id is not None:
+            message["content_template_id"] = int(content_template_id)
+        if content_template_version:
+            message["content_template_version"] = str(content_template_version)[:64]
+        if content_snapshot_sha256:
+            message["content_snapshot_sha256"] = str(content_snapshot_sha256)[:64]
         if target_type:
             message["target_type"] = str(target_type)[:20]
         if target_id:
@@ -206,7 +236,11 @@ class MessagingSQSQueue:
             occurrence_key=message["occurrence_key"],
             template_id=str(message.get("template_id") or ""),
         )
-        from apps.domains.messaging.security import build_tenant_binding_signature
+        from apps.domains.messaging.security import (
+            DELIVERY_IDENTITY_SIGNATURE_VERSION,
+            build_delivery_identity_signature,
+            build_tenant_binding_signature,
+        )
 
         message["tenant_binding_signature"] = build_tenant_binding_signature(
             tenant_id=int(tenant_id),
@@ -216,6 +250,13 @@ class MessagingSQSQueue:
             business_idempotency_key=message["business_idempotency_key"],
         )
         message["tenant_binding_signature_version"] = "v1"
+        if message.get("provider_template_version") and message.get(
+            "content_snapshot_sha256"
+        ):
+            message["delivery_identity_version"] = DELIVERY_IDENTITY_SIGNATURE_VERSION
+            message["delivery_identity_signature"] = build_delivery_identity_signature(
+                message
+            )
         if not message["to"] or not message["text"]:
             logger.warning("enqueue skipped: to or text empty")
             return False

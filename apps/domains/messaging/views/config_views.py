@@ -145,7 +145,11 @@ class AutoSendConfigView(APIView):
                         template_pk = int(template_id)
                     except (TypeError, ValueError):
                         return reject({"template_id": "템플릿 ID는 숫자여야 합니다."})
-                    template = MessageTemplate.objects.filter(tenant=tenant, pk=template_pk).first()
+                    template = MessageTemplate.objects.filter(
+                        tenant=tenant,
+                        pk=template_pk,
+                        retired_at__isnull=True,
+                    ).first()
                     if template is None:
                         return reject({"template_id": "해당 템플릿을 찾을 수 없습니다."})
                     config.template = template

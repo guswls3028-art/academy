@@ -1,7 +1,7 @@
 # 메시징 도메인 SSOT 인덱스
 
 **상태:** Active
-**최종 점검:** 2026-08-21
+**최종 점검:** 2026-09-06
 **목적:** 오래된 메시징 표가 여러 문서에 평행 진실로 남는 것을 막기 위한 현재 SSOT 진입점.
 
 ## 1. 권위 순서
@@ -25,13 +25,15 @@
 - SMS/LMS 예외는 없다. `check_dev_alerts`는 운영 룰을 평가해 설정된 Slack webhook으로만 알리며, SMS 설정·테스트·외부 신호 발송 옵션은 존재하지 않는다. 운영 절차는 `docs/operations/runbooks/incidents.md`가 정본이다.
 - 신규 발송 경계는 `enqueue_alimtalk()` 하나다. 명시된 비알림톡 `message_mode`는 알림톡으로 보정하지 않고 차단하며, 기존 로그와 테넌트별 공급자/발신번호/키 값은 삭제하지 않고 이력 데이터로 보존한다.
 - 계정 관련 시스템 알림(가입 승인, 아이디 찾기, 비밀번호 찾기)은 `send_alimtalk_via_owner()`를 통해 오너 테넌트 exact trigger 승인 템플릿으로 발송한다.
-- 알림톡 템플릿 fallback은 금지한다. exact 공용 승인 템플릿 또는 명시 unified category가 없으면 발송하지 않는다.
+- 알림톡 템플릿 fallback은 금지한다. exact business event의 공용 승인 SID·버전·구조·변수 계약이 없으면 발송하지 않으며 카테고리·저장 문구·최신/기본 행으로 추론하지 않는다.
 - 공용 트리거 운영 실발송 검증은 `scripts/v1/run-messaging-verify-send.ps1` → `messaging_verify_common_alimtalk`을 사용한다. 수동 UI 경로 검증은 프론트의 `e2e/stability/controlled-real-alimtalk-send.spec.ts`를 사용한다. 둘 다 수신번호를 `01031217466` 하나로 강제하며, 한 검증에서는 한 경로만 1회 실행하고 `NotificationLog.provider_message_id`와 공급사 최종 성공을 확인한다.
 - `password_find_otp`는 legacy OTP 경로용 트리거다. 공개 로그인 화면의 현재 정본은 `/api/v1/auth/account-recovery/dispatch/`다.
 - 수동/자동 발송 UX와 템플릿 본문 자유 정책은 [messaging-alimtalk.md](messaging-alimtalk.md)와 `backend/docs/ssot/messaging-policy.md`를 우선한다.
 - 클리닉 변경 알림처럼 도메인 상태에서 파생되는 수동 발송 변수/대상자는 프론트에서 재구현하지 않고 `context_source`로 백엔드 정본에 위임한다.
 - `context_source`가 만든 변수 키는 서버 계산값이 정본이다. 요청 `context`/`context_per_student`가 같은 키를 보내면 미리보기 API에서 거부한다.
 - 수동 발송의 최종 카카오 미리보기는 preflight의 `preview_recipients[].full_message_body`가 정본이다. 이 값은 실제 Solapi replacements와 같은 서버 계산값으로 만들며, 클라이언트 샘플 문구로 대체하지 않는다.
+- 수동 발송은 학생과 보호자를 독립적으로 선택하며 어느 한쪽을 정책상 기본 수신자로 강제하지 않는다. preflight는 tenant·actor·수신자·본문·저장 문구 버전·event·provider identity를 1회용으로 서명한다.
+- 활성 owner/admin/teacher/staff(조교)가 같은 수동 발송 흐름을 사용한다. 공용 메시징 설정 변경 권한은 owner/admin으로 분리한다.
 
 ## 3. 변경 규칙
 

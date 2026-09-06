@@ -11,17 +11,19 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 
 from apps.core.permissions import TenantResolvedAndStaff
-from apps.domains.messaging.models import MessageTemplate
 from apps.domains.messaging.permissions import can_send_messages
 from apps.domains.messaging.selectors import HOURLY_SEND_LIMIT, get_hourly_notification_usage
 from apps.domains.messaging.serializers import SendMessageRequestSerializer
 from apps.domains.messaging.services.grade_personalization import (
     validate_grade_personalization,
 )
+from apps.domains.messaging.services.manual_delivery_identity import (
+    ManualDeliveryIdentityError,
+    build_manual_delivery_identity,
+    consume_manual_send_preflight_identity,
+    resolve_content_template_snapshot,
+)
 from apps.domains.messaging.services.recipients import resolve_student_message_recipients
-
-
-CONTENT_PLACEHOLDERS = ("#{공지내용}", "#{내용}", "#{선생님메모}")
 
 
 def _dispatch_or_schedule_message(*, tenant_id: int, trigger: str, payload: dict, scheduled_send_at):
@@ -62,7 +64,7 @@ class SendMessageView(APIView):
         tenant = request.tenant
         if not can_send_messages(request, tenant):
             return Response(
-                {"detail": "알림톡 발송 권한이 없습니다. 관리자 또는 강사 권한이 필요합니다."},
+                {"detail": "알림톡 발송 권한이 없습니다. 관리자·강사·조교 권한이 필요합니다."},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
@@ -85,7 +87,6 @@ class SendMessageView(APIView):
         data = ser.validated_data
         send_to = data["send_to"]
         message_mode = "alimtalk"
-        template_id = data.get("template_id")
         raw_body = (data.get("raw_body") or "").strip()
         raw_subject = (data.get("raw_subject") or "").strip()
         scheduled_send_at = data.get("scheduled_send_at")
@@ -151,27 +152,23 @@ class SendMessageView(APIView):
         subject_base = (raw_subject or "").strip()
         t = None
         solapi_template_id = ""
-        user_custom_content = ""
-        use_unified = False       # 통합 승인 봉투 사용 여부
-        unified_template_type = None  # score / attendance / clinic_info / clinic_change / notice_*
+        unified_template_type = None
 
-        if template_id:
-            t = MessageTemplate.objects.filter(tenant=tenant, pk=template_id).first()
-            if not t:
-                return Response(
-                    {"detail": "템플릿을 찾을 수 없습니다."},
-                    status=status.HTTP_404_NOT_FOUND,
-                )
-            tpl_body = t.body or ""
-            if body_base and any(marker in tpl_body for marker in CONTENT_PLACEHOLDERS):
-                user_custom_content = body_base
+        try:
+            t = resolve_content_template_snapshot(tenant, data)
+        except ManualDeliveryIdentityError as exc:
+            return Response(
+                {"detail": exc.detail, "code": exc.code},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        if t:
             if not body_base:
                 body_base = (t.body or "").strip()
             if not subject_base:
                 subject_base = (t.subject or "").strip()
 
-        # ── 알림톡: 통합 승인 봉투 우선 사용 ──
-        # 시스템 기본양식(signup: 가입승인/비번찾기)만 자체 Solapi 템플릿 유지
+        # 수동 알림톡은 명시한 업무 이벤트의 정확한 승인 봉투만 사용한다.
         alimtalk_extra_vars = data.get("alimtalk_extra_vars") or {}
 
         if message_mode == "alimtalk":
@@ -179,16 +176,22 @@ class SendMessageView(APIView):
                 build_manual_replacements,
                 get_unified_for_manual_send,
             )
-            category = (t.category if t else "") or ""
-            tpl_name = (t.name if t else "") or ""
             unified_tt, unified_sid = get_unified_for_manual_send(
-                block_category,
-                category,
-                tpl_name,
-                alimtalk_extra_vars,
+                (data.get("manual_event") or "").strip()
             )
 
-            if unified_tt and not unified_sid:
+            if not unified_tt:
+                return Response(
+                    {
+                        "detail": (
+                            "알림톡 발송에는 정확한 업무 유형과 카카오 승인 봉투가 필요합니다. "
+                            "출석·성적·클리닉·일정변경 중 하나를 다시 선택해 주세요."
+                        ),
+                        "code": "manual_event_contract_missing",
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if not unified_sid:
                 return Response(
                     {
                         "detail": (
@@ -200,21 +203,8 @@ class SendMessageView(APIView):
                     },
                     status=status.HTTP_409_CONFLICT,
                 )
-            if unified_tt and unified_sid:
-                # 통합 승인 봉투 사용
-                use_unified = True
-                unified_template_type = unified_tt
-                solapi_template_id = unified_sid
-            else:
-                if not solapi_template_id:
-                    use_unified = False
-
-        if message_mode == "alimtalk" and solapi_template_id and not use_unified:
-            if t and getattr(t, "solapi_status", None) != "APPROVED":
-                return Response(
-                    {"detail": "선택한 알림톡 템플릿이 아직 카카오 승인 상태가 아닙니다. 승인된 봉투를 선택해 주세요."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+            unified_template_type = unified_tt
+            solapi_template_id = unified_sid
 
         if message_mode == "alimtalk" and not solapi_template_id:
             return Response(
@@ -232,6 +222,51 @@ class SendMessageView(APIView):
                 {"detail": "발송할 본문이 비어 있습니다."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        from django.conf import settings
+        from apps.domains.messaging.services.preflight import (
+            _resolve_template_for_manual_send,
+        )
+
+        signed_preflight = str(data.get("preflight_identity") or "").strip()
+        preflight_enforced = bool(
+            getattr(
+                settings,
+                "MESSAGING_MANUAL_PREFLIGHT_IDENTITY_ENFORCED",
+                False,
+            )
+        )
+        if signed_preflight or preflight_enforced:
+            template_plan = _resolve_template_for_manual_send(tenant, data)
+            if not template_plan.ok:
+                return Response(
+                    {
+                        "detail": template_plan.detail,
+                        "code": template_plan.error_code or "template_not_ready",
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if not signed_preflight:
+                return Response(
+                    {
+                        "detail": "발송 전 확인이 필요합니다. 다시 확인해 주세요.",
+                        "code": "preflight_identity_required",
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            preflight_error = consume_manual_send_preflight_identity(
+                signed_token=signed_preflight,
+                tenant=tenant,
+                data=data,
+                recipients=recipients,
+                template_plan=template_plan,
+                actor_id=request.user.pk,
+            )
+            if preflight_error:
+                return Response(
+                    {"detail": preflight_error.detail, "code": preflight_error.code},
+                    status=status.HTTP_409_CONFLICT,
+                )
 
         enqueued = 0
         scheduled = 0
@@ -286,39 +321,25 @@ class SendMessageView(APIView):
             alimtalk_replacements = None
             template_id_solapi = None
 
-            if message_mode == "alimtalk" and solapi_template_id:
+            if solapi_template_id and unified_template_type:
                 template_id_solapi = solapi_template_id
+                # student_body는 이번 발송에서 확정된 스냅샷이며, 다른 저장 문구나
+                # 기본 문구를 대체 입력으로 사용하지 않는다.
+                alimtalk_replacements = build_manual_replacements(
+                    template_type=unified_template_type,
+                    content_body=student_body,
+                    context=merged_context,
+                    tenant_name=academy_name,
+                    student_name=name,
+                    site_url=site_url,
+                )
 
-                if use_unified and unified_template_type:
-                    # ── 통합 승인 봉투: build_manual_replacements로 정확한 변수 세트 빌드 ──
-                    # SSOT (2026-05-13): student_body (학생별 치환된 본문) 사용 → 봉투의 #{선생님메모} 변수에
-                    # 정확한 학생별 점수가 들어감.
-                    alimtalk_replacements = build_manual_replacements(
-                        template_type=unified_template_type,
-                        content_body=student_body,
-                        context=merged_context,
-                        tenant_name=academy_name,
-                        student_name=name,
-                        site_url=site_url,
-                    )
-                else:
-                    # ── 시스템 기본양식: 기존 방식 유지 (가입승인/비번 등) ──
-                    alimtalk_replacements = [
-                        {"key": "학생이름", "value": name},
-                        {"key": "학생이름2", "value": name_2},
-                        {"key": "학생이름3", "value": name_3},
-                        {"key": "학원명", "value": academy_name},
-                        {"key": "사이트링크", "value": site_url},
-                    ]
-                    for var_key, var_val in merged_context.items():
-                        if var_key.startswith("_"):
-                            continue  # internal hint
-                        if var_val and var_key not in ("학생이름", "학생이름2", "학생이름3", "사이트링크"):
-                            alimtalk_replacements.append({"key": var_key, "value": str(var_val)})
-                    if user_custom_content:
-                        alimtalk_replacements.append({"key": "공지내용", "value": user_custom_content})
-                        alimtalk_replacements.append({"key": "내용", "value": user_custom_content})
-                        alimtalk_replacements.append({"key": "선생님메모", "value": user_custom_content})
+            delivery_identity = build_manual_delivery_identity(
+                template_type=unified_template_type or "",
+                content_template=t,
+                text=text,
+                replacements=alimtalk_replacements,
+            )
 
             try:
                 dispatch_result = _dispatch_or_schedule_message(
@@ -333,10 +354,11 @@ class SendMessageView(APIView):
                         "message_mode": message_mode,
                         "template_id": template_id_solapi,
                         "alimtalk_replacements": alimtalk_replacements,
-                        "event_type": "manual_send",
+                        "event_type": f"manual_{data.get('manual_event')}",
                         "target_type": "student" if send_to != "parent" else "parent",
                         "target_id": recipient.student_id,
                         "target_name": name,
+                        **delivery_identity,
                     },
                 )
             except MessagingPolicyError as e:

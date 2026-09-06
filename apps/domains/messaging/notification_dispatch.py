@@ -28,6 +28,36 @@ def _is_alimtalk_mode(raw_mode: str | None) -> bool:
     return (raw_mode or "alimtalk").strip().lower() == "alimtalk"
 
 
+def _provider_identity_fields(template_type: str, template_id: str, content_template) -> dict:
+    """Return the exact configured provider contract carried to confirm/worker."""
+    from apps.domains.messaging.alimtalk_content_builders import (
+        get_provider_template_contract,
+    )
+
+    contract = get_provider_template_contract(template_type) or {}
+    if not contract or str(contract.get("template_id") or "") != str(template_id or ""):
+        return {}
+    result = {
+        "provider_template_type": template_type,
+        "provider_template_version": str(contract.get("template_version") or ""),
+        "provider_template_structure_fingerprint": str(
+            contract.get("structure_fingerprint") or ""
+        ),
+    }
+    if contract.get("content_fingerprint"):
+        result["provider_template_content_fingerprint"] = str(
+            contract["content_fingerprint"]
+        )
+    if contract.get("header_fingerprint"):
+        result["provider_template_header_fingerprint"] = str(
+            contract["header_fingerprint"]
+        )
+    if content_template is not None:
+        result["content_template_id"] = int(content_template.id)
+        result["content_template_version"] = content_template.updated_at.isoformat()
+    return result
+
+
 def build_attendance_preview(
     tenant,
     session_id: int,
@@ -53,7 +83,6 @@ def build_attendance_preview(
         }
     """
     from apps.domains.messaging.selectors import get_auto_send_config
-    from apps.domains.messaging.policy import get_owner_tenant_id
     from apps.domains.messaging.services import get_tenant_site_url
 
     session = enroll_repo.get_session_with_lecture_by_id_for_tenant(session_id, tenant)
@@ -69,26 +98,19 @@ def build_attendance_preview(
     if not trigger:
         return {"error": f"지원하지 않는 알림 유형: {notification_type}", "recipients": [], "total_count": 0, "excluded_count": 0}
 
-    # 템플릿 resolve: tenant config는 본문/설정, 검수 템플릿은 owner exact 또는 unified만 사용.
+    # 테넌트 config는 이번 발송의 내용만 소유한다. 공급사 봉투는 아래의
+    # 정확한 업무 이벤트 계약에서만 가져온다.
     config = get_auto_send_config(tenant.id, trigger)
     if not config:
         return {"error": "발송 설정이 없습니다.", "recipients": [], "total_count": 0, "excluded_count": 0}
     content_template = config.template if config else None
-    owner_tenant_id = get_owner_tenant_id()
-    owner_config = get_auto_send_config(owner_tenant_id, trigger)
-    owner_template = owner_config.template if owner_config else None
     if content_template and content_template.tenant_id != tenant.id:
         return {"error": "발송 템플릿의 테넌트가 일치하지 않습니다.", "recipients": [], "total_count": 0, "excluded_count": 0}
-    if owner_template and owner_template.tenant_id != owner_tenant_id:
-        return {"error": "공용 승인 템플릿의 테넌트가 일치하지 않습니다.", "recipients": [], "total_count": 0, "excluded_count": 0}
     template = content_template
     if not _is_alimtalk_mode(config.message_mode if config else "alimtalk"):
         return {"error": "알림톡 전용 설정이 아닙니다.", "recipients": [], "total_count": 0, "excluded_count": 0}
     effective_mode = "alimtalk"
-    solapi_template_id = ""
-    solapi_approved = False
-
-    # ── 통합 알림톡 템플릿 감지 (승인 봉투가 있으면 항상 우선 사용) ──
+    # 업무 이벤트에 등록된 승인 봉투 외에는 사용하지 않는다.
     from apps.domains.messaging.alimtalk_content_builders import (
         get_solapi_template_id as get_unified_tid,
         get_template_type,
@@ -97,26 +119,22 @@ def build_attendance_preview(
     )
     unified_type = get_template_type(trigger)
     unified_tid = get_unified_tid(trigger)
-    use_unified = bool(unified_tid)
-    if use_unified:
-        # 통합 템플릿 존재 → 개별 APPROVED 여부와 무관하게 항상 통합 사용
-        solapi_template_id = unified_tid
-        solapi_approved = True
-    elif unified_type:
+    if not unified_type or not unified_tid:
         return {"error": "승인된 알림톡 템플릿이 없습니다.", "recipients": [], "total_count": 0, "excluded_count": 0}
-    elif owner_template:
-        template = owner_template
-        solapi_template_id = (owner_template.solapi_template_id or "").strip()
-        solapi_approved = bool(solapi_template_id and owner_template.solapi_status == "APPROVED")
+    solapi_template_id = unified_tid
+    provider_identity = _provider_identity_fields(
+        unified_type,
+        solapi_template_id,
+        template,
+    )
+    if not provider_identity.get("provider_template_version"):
+        return {"error": "승인된 알림톡 템플릿 계약이 없습니다.", "recipients": [], "total_count": 0, "excluded_count": 0}
 
     # Manual notification dispatch is alimtalk-only; approved template required.
     if not template or not (template.body or "").strip():
         return {"error": "발송 템플릿이 없습니다.", "recipients": [], "total_count": 0, "excluded_count": 0}
     if len(template.body or "") > MAX_PREVIEW_MESSAGE_BODY_LENGTH:
         return {"error": "알림톡 문구가 허용 길이를 초과했습니다.", "recipients": [], "total_count": 0, "excluded_count": 0}
-    if not solapi_approved:
-        return {"error": "승인된 알림톡 템플릿이 없습니다.", "recipients": [], "total_count": 0, "excluded_count": 0}
-
     # 출결 상태별 필터
     if notification_type == "check_in":
         status_filter = ["PRESENT", "LATE", "ONLINE", "SUPPLEMENT"]
@@ -176,24 +194,15 @@ def build_attendance_preview(
         for k, v in context.items():
             body = body.replace(f"#{{{k}}}", v)
 
-        # 통합 템플릿 사용 시: Solapi 등록 변수와 정확히 매칭되는 replacements 빌드
-        if use_unified:
-            template_type = get_template_type(trigger)
-            alimtalk_reps = build_manual_replacements(
-                template_type=template_type,
-                content_body=(template.body or "").strip(),
-                context=context,
-                tenant_name=academy_name,
-                student_name=name,
-                site_url=site_url,
-            ) if template_type else [{"key": k, "value": v} for k, v in context.items()]
-        else:
-            alimtalk_reps = [{"key": k, "value": v} for k, v in context.items()]
-        full_message_body = (
-            render_alimtalk_preview_text(unified_type, alimtalk_reps)
-            if use_unified and unified_type
-            else body
+        alimtalk_reps = build_manual_replacements(
+            template_type=unified_type,
+            content_body=(template.body or "").strip(),
+            context=context,
+            tenant_name=academy_name,
+            student_name=name,
+            site_url=site_url,
         )
+        full_message_body = render_alimtalk_preview_text(unified_type, alimtalk_reps)
 
         recipients.append({
             "student_id": student.id,
@@ -218,8 +227,9 @@ def build_attendance_preview(
         "notification_type": notification_type,
         "session_title": session.title or session.display_label,
         "lecture_title": session.lecture.title or "",
-        "solapi_template_id": solapi_template_id if solapi_approved else "",
+        "solapi_template_id": solapi_template_id,
         "message_mode": effective_mode,
+        **provider_identity,
     }
 
 
@@ -236,7 +246,6 @@ def build_student_list_preview(
     시험 성적 공개, 퇴원 안내, 과제 미제출 등 모든 MANUAL_DEFAULT에 사용.
     """
     from apps.domains.messaging.selectors import get_auto_send_config
-    from apps.domains.messaging.policy import get_owner_tenant_id
     from apps.domains.messaging.services import get_tenant_site_url
     from apps.domains.messaging.services.recipients import resolve_student_message_recipients
 
@@ -244,21 +253,13 @@ def build_student_list_preview(
     if not config:
         return {"error": "발송 설정이 없습니다.", "recipients": [], "total_count": 0, "excluded_count": 0}
     content_template = config.template if config else None
-    owner_tenant_id = get_owner_tenant_id()
-    owner_config = get_auto_send_config(owner_tenant_id, trigger)
-    owner_template = owner_config.template if owner_config else None
     if content_template and content_template.tenant_id != tenant.id:
         return {"error": "발송 템플릿의 테넌트가 일치하지 않습니다.", "recipients": [], "total_count": 0, "excluded_count": 0}
-    if owner_template and owner_template.tenant_id != owner_tenant_id:
-        return {"error": "공용 승인 템플릿의 테넌트가 일치하지 않습니다.", "recipients": [], "total_count": 0, "excluded_count": 0}
     template = content_template
     if not _is_alimtalk_mode(config.message_mode if config else "alimtalk"):
         return {"error": "알림톡 전용 설정이 아닙니다.", "recipients": [], "total_count": 0, "excluded_count": 0}
     effective_mode = "alimtalk"
-    solapi_template_id = ""
-    solapi_approved = False
-
-    # ── 통합 알림톡 템플릿 감지 (승인 봉투가 있으면 항상 우선 사용) ──
+    # 업무 이벤트에 등록된 승인 봉투 외에는 사용하지 않는다.
     from apps.domains.messaging.alimtalk_content_builders import (
         get_solapi_template_id as get_unified_tid,
         get_template_type,
@@ -267,24 +268,21 @@ def build_student_list_preview(
     )
     unified_type = get_template_type(trigger)
     unified_tid = get_unified_tid(trigger)
-    use_unified = bool(unified_tid)
-    if use_unified:
-        solapi_template_id = unified_tid
-        solapi_approved = True
-    elif unified_type:
+    if not unified_type or not unified_tid:
         return {"error": "승인된 알림톡 템플릿이 없습니다.", "recipients": [], "total_count": 0, "excluded_count": 0}
-    elif owner_template:
-        template = owner_template
-        solapi_template_id = (owner_template.solapi_template_id or "").strip()
-        solapi_approved = bool(solapi_template_id and owner_template.solapi_status == "APPROVED")
+    solapi_template_id = unified_tid
+    provider_identity = _provider_identity_fields(
+        unified_type,
+        solapi_template_id,
+        template,
+    )
+    if not provider_identity.get("provider_template_version"):
+        return {"error": "승인된 알림톡 템플릿 계약이 없습니다.", "recipients": [], "total_count": 0, "excluded_count": 0}
 
     if not template or not (template.body or "").strip():
         return {"error": "발송 템플릿이 없습니다.", "recipients": [], "total_count": 0, "excluded_count": 0}
     if len(template.body or "") > MAX_PREVIEW_MESSAGE_BODY_LENGTH:
         return {"error": "알림톡 문구가 허용 길이를 초과했습니다.", "recipients": [], "total_count": 0, "excluded_count": 0}
-    if not solapi_approved:
-        return {"error": "승인된 알림톡 템플릿이 없습니다.", "recipients": [], "total_count": 0, "excluded_count": 0}
-
     resolved_recipients = resolve_student_message_recipients(
         tenant,
         student_ids,
@@ -328,24 +326,15 @@ def build_student_list_preview(
                 "excluded_count": 0,
             }
 
-        # 통합 템플릿 사용 시: Solapi 등록 변수와 정확히 매칭되는 replacements 빌드
-        if use_unified:
-            template_type = get_template_type(trigger)
-            alimtalk_reps = build_manual_replacements(
-                template_type=template_type,
-                content_body=(template.body or "").strip(),
-                context=ctx,
-                tenant_name=academy_name,
-                student_name=name,
-                site_url=site_url,
-            ) if template_type else [{"key": k, "value": str(v)} for k, v in ctx.items()]
-        else:
-            alimtalk_reps = [{"key": k, "value": str(v)} for k, v in ctx.items()]
-        full_message_body = (
-            render_alimtalk_preview_text(unified_type, alimtalk_reps)
-            if use_unified and unified_type
-            else body
+        alimtalk_reps = build_manual_replacements(
+            template_type=unified_type,
+            content_body=(template.body or "").strip(),
+            context=ctx,
+            tenant_name=academy_name,
+            student_name=name,
+            site_url=site_url,
         )
+        full_message_body = render_alimtalk_preview_text(unified_type, alimtalk_reps)
 
         recipients.append({
             "student_id": resolved.student_id,
@@ -366,8 +355,9 @@ def build_student_list_preview(
         "excluded_count": len(recipients) - len(sendable),
         "message_template_body": (template.body or "").strip(),
         "notification_type": trigger,
-        "solapi_template_id": solapi_template_id if solapi_approved else "",
+        "solapi_template_id": solapi_template_id,
         "message_mode": effective_mode,
+        **provider_identity,
     }
 
 
@@ -404,6 +394,18 @@ def create_preview_token(
         "notification_type": notification_type,
         "send_to": send_to,
     }
+    for key in (
+        "provider_template_type",
+        "provider_template_version",
+        "provider_template_structure_fingerprint",
+        "provider_template_content_fingerprint",
+        "provider_template_header_fingerprint",
+        "content_template_id",
+        "content_template_version",
+    ):
+        value = preview_data.get(key)
+        if value not in (None, ""):
+            payload[key] = value
     payload_bytes = len(
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     )
@@ -503,6 +505,19 @@ def execute_notification_batch(
     notification_type = payload.get("notification_type", "")
     send_to = payload.get("send_to", "parent")
     target_type = "parent" if send_to == "parent" else "student"
+    provider_identity = {
+        key: payload[key]
+        for key in (
+            "provider_template_type",
+            "provider_template_version",
+            "provider_template_structure_fingerprint",
+            "provider_template_content_fingerprint",
+            "provider_template_header_fingerprint",
+            "content_template_id",
+            "content_template_version",
+        )
+        if payload.get(key) not in (None, "")
+    }
 
     _can_alimtalk = raw_message_mode == "alimtalk" and bool(solapi_template_id)
     modes_to_send = ["alimtalk"] if _can_alimtalk else []
@@ -540,6 +555,16 @@ def execute_notification_batch(
             "check_in": "check_in_complete",
             "absent": "absent_occurred",
         }.get(notification_type, notification_type)
+        delivery_identity = dict(provider_identity)
+        if delivery_identity.get("provider_template_version"):
+            from apps.domains.messaging.services.manual_delivery_identity import (
+                build_content_snapshot_sha256,
+            )
+
+            delivery_identity["content_snapshot_sha256"] = build_content_snapshot_sha256(
+                text=str(r.get("message_body") or ""),
+                replacements=r.get("alimtalk_replacements") or [],
+            )
         for mode in modes_to_send:
             outbox_specs.append(
                 {
@@ -557,6 +582,7 @@ def execute_notification_batch(
                         "target_id": r.get("student_id"),
                         "target_name": r.get("student_name", ""),
                         "occurrence_key": f"batch_{batch_id}",
+                        **delivery_identity,
                     },
                 }
             )
