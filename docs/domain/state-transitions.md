@@ -1,6 +1,6 @@
 # State Transition SSOT (Single Source of Truth)
 
-**Version:** V1.1.1
+**Version:** V1.1.2
 **Created:** 2026-03-19
 **Status:** ACTIVE
 
@@ -909,6 +909,19 @@ EXPIRED → {} (종단)
 교직원에게 현재 상태 확인을 요구한다. 기존 `PRESENT`, `SECESSION`, 비활성
 수강등록은 일괄 변경과 복구 대상에 포함하지 않는다.
 
+`ABSENT`는 이 차시에 현장·영상 학습 요청이 모두 없는 실제 결석이며 시험·과제
+todo 대상이 아니다. `ONLINE`은 영상 요청 상태이므로 `PRESENT`와 함께 todo
+대상이다. 성적 roster 자체는 모든 출결 상태를 유지하지만 실제 결석의 아직
+수행하지 않은 시험·과제 칸과 현재 클리닉 투영만 제외한다. 기존 응시·제출·점수,
+수동 판정, 대상 행과 클리닉 이력은 출결 전환으로 삭제하지 않는다.
+
+개별 PATCH/PUT과 전체 현장 출석은 출결 행을 잠근 같은 트랜잭션 안에서 마지막
+상태를 저장한다. `ABSENT → ONLINE/PRESENT` 등 대상 상태 복구는 활성 정규
+시험·과제 대상을 멱등하게 보강하고 진행도를 재계산한다. `ONLINE/PRESENT →
+ABSENT`는 원본을 삭제하지 않고 조회·쓰기 경계에서 todo를 실패 폐쇄한다. 출결
+전환은 메시지나 provider 요청을 자동 생성하지 않는다. 세부 데이터·API 계약은
+[`attendance.md`](attendance.md#시험과제-학습-todo-경계)가 소유한다.
+
 대부분은 상태기계가 아닌 분류 값이다. 단,
 `SECESSION`은 단순 출결
 분류가 아니라 퇴원 처리 workflow로 동작한다. 전환 시 `confirm_secession:
@@ -919,6 +932,8 @@ true`가 필요하며 수강등록 비활성화, 자동 수납 비활성화, 시
 **검증:** `apps/domains/attendance/tests/test_bulk_present_undo.py`는 직전 상태
 정확 복원, 일부 행 재수정 시 전체 거부, 테넌트 경계, 토큰 변조 거부,
 변경 없음 응답을 증명한다.
+`tests/test_attendance_learning_todo_eligibility_pg.py`는 상태별 대상,
+이력 보존, 복구 멱등성, 클리닉 투영과 PostgreSQL 동시 전환을 증명한다.
 
 ---
 

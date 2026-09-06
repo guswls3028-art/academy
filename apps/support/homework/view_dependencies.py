@@ -32,15 +32,32 @@ def get_homework_for_assignment(
 
 
 def active_enrollment_ids_for_session(*, tenant: Any, session_id: int) -> set[int]:
-    from apps.domains.enrollment.selectors import active_enrollment_ids_for_session as _active_ids
+    from apps.domains.lectures.models import Session
+    from apps.support.attendance.learning_todo_eligibility import (
+        eligible_learning_todo_enrollment_ids,
+    )
 
-    return _active_ids(tenant=tenant, session_id=session_id)
+    session = Session.objects.filter(
+        id=int(session_id),
+        lecture__tenant=tenant,
+    ).select_related("lecture").first()
+    if session is None:
+        return set()
+    return eligible_learning_todo_enrollment_ids(
+        tenant=tenant,
+        session=session,
+    )
 
 
 def active_session_enrollments_for_session(*, tenant: Any, session_id: int):
-    from apps.domains.enrollment.selectors import active_session_enrollments_for_session as _active_rows
+    from apps.support.attendance.learning_todo_eligibility import (
+        eligible_session_enrollments,
+    )
 
-    return _active_rows(tenant=tenant, session_id=session_id)
+    return eligible_session_enrollments(
+        tenant=tenant,
+        session_id=session_id,
+    )
 
 
 def session_exists_for_tenant(*, session_id: int, tenant: Any) -> bool:

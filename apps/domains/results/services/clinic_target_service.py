@@ -34,6 +34,9 @@ from apps.domains.results.models import Result, ResultFact, ExamAttempt
 from apps.support.results.exam_policy_dependencies import (
     effective_exam_pass_score,
 )
+from apps.support.attendance.learning_todo_eligibility import (
+    learning_todo_eligible_pairs,
+)
 
 # ✅ 단일 진실 유틸
 from apps.domains.results.utils.clinic import (
@@ -211,6 +214,21 @@ class ClinicTargetService:
             )
         if not include_resolved and links_list:
             links_list = filter_current_clinic_links(links_list, tenant=tenant)
+        unresolved_links = [link for link in links_list if link.resolved_at is None]
+        if unresolved_links:
+            eligible_pairs = learning_todo_eligible_pairs(
+                tenant=tenant,
+                enrollment_session_pairs={
+                    (int(link.enrollment_id), int(link.session_id))
+                    for link in unresolved_links
+                },
+            )
+            links_list = [
+                link
+                for link in links_list
+                if link.resolved_at is not None
+                or (int(link.enrollment_id), int(link.session_id)) in eligible_pairs
+            ]
 
         # ✅ enrollment 일괄 조회 (N+1 방지 + 학생 SSOT 표시 필드)
         # 🔐 tenant 강제 — links는 tenant 스코프이지만 enrollment_id 참조는 강제 제약 없음.
@@ -531,10 +549,22 @@ class ClinicTargetService:
         # 명시적으로 미응시 처리된 시험은 점수 미달과 구분된 "판정 대기" 행이다.
         # 조회가 ClinicLink를 만들지는 않는다. 사용자가 면제 사유를 확정할 때만
         # source-specific WAIVED 이력을 생성한다.
-        for result, session in explicit_not_submitted_exam_targets(
+        explicit_missing_targets = list(
+            explicit_not_submitted_exam_targets(
+                tenant=tenant,
+                section_id=section_id,
+            )
+        )
+        eligible_explicit_pairs = learning_todo_eligible_pairs(
             tenant=tenant,
-            section_id=section_id,
-        ):
+            enrollment_session_pairs={
+                (int(result.enrollment_id), int(session.id))
+                for result, session in explicit_missing_targets
+            },
+        )
+        for result, session in explicit_missing_targets:
+            if (int(result.enrollment_id), int(session.id)) not in eligible_explicit_pairs:
+                continue
             enrollment = result.enrollment
             student = getattr(enrollment, "student", None)
             exam = result.attempt.exam

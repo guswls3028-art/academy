@@ -29,6 +29,9 @@ from apps.support.progress.clinic_trigger_dependencies import (
 from apps.support.progress.assessment_correction_dependencies import (
     is_current_teacher_exam_resolution,
 )
+from apps.support.attendance.learning_todo_eligibility import (
+    enrollment_session_is_learning_todo_eligible,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +188,14 @@ class ClinicTriggerService:
         V1.1.2: 개별 시험 단위로 ClinicLink 생성.
         세션 집계(completed)와 독립적으로, 각 시험의 pass/fail을 개별 판정.
         """
+        tenant_id = _resolve_tenant_id(int(session_progress.enrollment_id))
+        if tenant_id is None or not enrollment_session_is_learning_todo_eligible(
+            tenant_id=int(tenant_id),
+            enrollment_id=int(session_progress.enrollment_id),
+            session_id=int(session_progress.session_id),
+        ):
+            return
+
         exam_meta = session_progress.exam_meta or {}
         exam_rows = exam_meta.get("exams", [])
 
@@ -199,15 +210,27 @@ class ClinicTriggerService:
                 exam_id=exam_id,
             )
 
-            # Missing/ungraded exams keep the session incomplete, but they are
-            # not a scored failure. Creating a ClinicLink here makes multi-exam
-            # sessions emit premature remediation/resolution notifications while
-            # the remaining exams are still being graded.
-            if (
-                exam_row.get("no_result")
-                or exam_row.get("score") is None
-                or exam_row.get("meta_status") == "NOT_SUBMITTED"
-            ):
+            # Explicit NOT_SUBMITTED is projected separately as a reviewable
+            # absence row. A genuinely missing ONLINE/PRESENT result is still
+            # an actionable learning todo and needs a source-specific link.
+            if exam_row.get("meta_status") == "NOT_SUBMITTED":
+                continue
+
+            if exam_row.get("no_result") or exam_row.get("score") is None:
+                _idempotent_create_clinic_link(
+                    enrollment_id=session_progress.enrollment_id,
+                    session=session_progress.session,
+                    source_type="exam",
+                    source_id=exam_id,
+                    reason=ClinicLink.Reason.AUTO_FAILED,
+                    meta={
+                        "kind": "EXAM_MISSING",
+                        "kinds": ["EXAM_MISSING"],
+                        "exam_id": exam_id,
+                        "score": None,
+                        "pass_score": exam_row.get("pass_score"),
+                    },
+                )
                 continue
 
             passed = exam_row.get("passed", True)

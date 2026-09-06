@@ -119,6 +119,23 @@ def sync_homework_clinic_link(
         )
         return
 
+    from apps.support.attendance.learning_todo_eligibility import (
+        enrollment_session_is_learning_todo_eligible,
+    )
+
+    tenant_id = (
+        Enrollment.objects
+        .filter(id=enrollment_id)
+        .values_list("tenant_id", flat=True)
+        .first()
+    )
+    if tenant_id is None or not enrollment_session_is_learning_todo_eligible(
+        tenant_id=int(tenant_id),
+        enrollment_id=int(enrollment_id),
+        session_id=int(session.id),
+    ):
+        return
+
     latest_link = (
         ClinicLink.objects.filter(
             enrollment_id=enrollment_id,
@@ -160,12 +177,6 @@ def sync_homework_clinic_link(
         )
         .aggregate(Max("cycle_no"))["cycle_no__max"]
         or 0
-    )
-    tenant_id = (
-        Enrollment.objects
-        .filter(id=enrollment_id)
-        .values_list("tenant_id", flat=True)
-        .first()
     )
     try:
         ClinicLink.objects.create(

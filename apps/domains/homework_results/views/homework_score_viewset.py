@@ -253,6 +253,19 @@ class HomeworkScoreViewSet(ModelViewSet):
         obj: HomeworkScore = self.get_object()
 
         validate_enrollment_belongs_to_tenant(obj.enrollment_id, request.tenant)
+        from apps.support.attendance.learning_todo_eligibility import (
+            enrollment_session_is_learning_todo_eligible,
+        )
+
+        if not enrollment_session_is_learning_todo_eligible(
+            tenant_id=int(request.tenant.id),
+            enrollment_id=int(obj.enrollment_id),
+            session_id=int(obj.session_id),
+        ):
+            return Response(
+                {"enrollment_id": "실제 결석 차시의 학생에게는 점수를 입력할 수 없습니다."},
+                status=drf_status.HTTP_400_BAD_REQUEST,
+            )
         require_homework_score_edit_lease(
             request,
             session_id=obj.session_id,
@@ -412,6 +425,19 @@ class HomeworkScoreViewSet(ModelViewSet):
             ):
                 return Response(
                     {"enrollment_id": "이 과제의 배정 대상 수강생만 점수를 입력할 수 있습니다."},
+                    status=drf_status.HTTP_400_BAD_REQUEST,
+                )
+            from apps.support.attendance.learning_todo_eligibility import (
+                enrollment_session_is_learning_todo_eligible,
+            )
+
+            if not enrollment_session_is_learning_todo_eligible(
+                tenant_id=int(request.tenant.id),
+                enrollment_id=int(enrollment_id),
+                session_id=int(session.id),
+            ):
+                return Response(
+                    {"enrollment_id": "실제 결석 차시의 학생에게는 점수를 입력할 수 없습니다."},
                     status=drf_status.HTTP_400_BAD_REQUEST,
                 )
 
