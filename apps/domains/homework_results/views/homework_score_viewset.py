@@ -52,10 +52,10 @@ from apps.core.permissions import TenantResolvedAndStaff
 from apps.domains.results.contracts import (
     require_homework_score_edit_lease,
 )
+from apps.support.homework.review_lock import lock_homework_review_target
 from apps.support.homework_results.score_dependencies import (
     calc_homework_passed_and_clinic,
     dispatch_progress_pipeline,
-    homework_assignment_exists,
     latest_homework_submission,
     sync_homework_clinic_link,
     validate_enrollment_belongs_to_tenant,
@@ -253,12 +253,24 @@ class HomeworkScoreViewSet(ModelViewSet):
         obj: HomeworkScore = self.get_object()
 
         validate_enrollment_belongs_to_tenant(obj.enrollment_id, request.tenant)
+        assignment = lock_homework_review_target(
+            tenant=request.tenant,
+            session_id=obj.session_id,
+            enrollment_id=obj.enrollment_id,
+            homework_id=obj.homework_id,
+        )
+        if assignment is None:
+            return Response(
+                {"enrollment_id": "이 과제의 배정 대상 수강생만 점수를 입력할 수 있습니다."},
+                status=drf_status.HTTP_400_BAD_REQUEST,
+            )
         require_homework_score_edit_lease(
             request,
             session_id=obj.session_id,
             enrollment_id=obj.enrollment_id,
             homework_id=obj.homework_id,
         )
+        obj = self.get_queryset().select_for_update(of=("self",)).get(pk=obj.pk)
 
         if getattr(obj, "is_locked", False):
             return _locked_response(obj)
@@ -398,22 +410,23 @@ class HomeworkScoreViewSet(ModelViewSet):
                     {"session_id": "과제의 차시와 요청 차시가 일치하지 않습니다."},
                     status=drf_status.HTTP_400_BAD_REQUEST,
                 )
+            assignment = lock_homework_review_target(
+                tenant=request.tenant,
+                session_id=session.id,
+                enrollment_id=enrollment_id,
+                homework_id=homework_id,
+            )
+            if assignment is None:
+                return Response(
+                    {"enrollment_id": "이 과제의 배정 대상 수강생만 점수를 입력할 수 있습니다."},
+                    status=drf_status.HTTP_400_BAD_REQUEST,
+                )
             require_homework_score_edit_lease(
                 request,
                 session_id=session.id,
                 enrollment_id=enrollment_id,
                 homework_id=homework_id,
             )
-            if not homework_assignment_exists(
-                tenant=request.tenant,
-                homework=homework,
-                session=session,
-                enrollment_id=enrollment_id,
-            ):
-                return Response(
-                    {"enrollment_id": "이 과제의 배정 대상 수강생만 점수를 입력할 수 있습니다."},
-                    status=drf_status.HTTP_400_BAD_REQUEST,
-                )
 
             with transaction.atomic():
                 obj = (

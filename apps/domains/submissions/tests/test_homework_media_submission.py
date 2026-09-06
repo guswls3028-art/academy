@@ -13,7 +13,10 @@ from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps.core.models import Tenant, TenantMembership
-from apps.domains.enrollment.test_support import create_enrollment_fixture
+from apps.domains.enrollment.test_support import (
+    create_enrollment_fixture,
+    create_session_enrollment_fixture,
+)
 from apps.domains.homework.test_support import create_homework_assignment_fixture
 from apps.domains.homework_results.test_support import (
     create_homework_fixture,
@@ -127,6 +130,11 @@ class HomeworkSubmissionMediaTests(TestCase):
         create_homework_assignment_fixture(
             tenant=self.tenant,
             homework=self.homework,
+            session=self.session,
+            enrollment=self.enrollment,
+        )
+        create_session_enrollment_fixture(
+            tenant=self.tenant,
             session=self.session,
             enrollment=self.enrollment,
         )
