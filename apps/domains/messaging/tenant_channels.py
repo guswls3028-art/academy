@@ -10,7 +10,6 @@ from django.db.models import F
 
 _TEMPLATE_FINGERPRINT_FIELDS = (
     "content",
-    "categoryCode",
     "buttons",
     "quickReplies",
     "messageType",
@@ -27,6 +26,24 @@ _TEMPLATE_FINGERPRINT_FIELDS = (
 )
 
 
+def _without_provider_defaults(value: Any) -> Any:
+    """Remove response-only empty defaults before comparing template behavior."""
+
+    if isinstance(value, dict):
+        return {
+            key: normalized
+            for key, item in value.items()
+            if (normalized := _without_provider_defaults(item)) not in (None, "", [], {})
+        }
+    if isinstance(value, list):
+        return [
+            normalized
+            for item in value
+            if (normalized := _without_provider_defaults(item)) not in (None, "", [], {})
+        ]
+    return value
+
+
 class TenantAlimtalkRouteError(RuntimeError):
     """A verified tenant channel cannot safely serve the requested template."""
 
@@ -41,10 +58,9 @@ class AlimtalkDeliveryRoute:
 def build_template_fingerprint(template: dict[str, Any]) -> str:
     """Hash only provider fields that affect an Alimtalk template's behavior."""
 
-    canonical = {
-        field: template.get(field)
-        for field in _TEMPLATE_FINGERPRINT_FIELDS
-    }
+    canonical = _without_provider_defaults(
+        {field: template.get(field) for field in _TEMPLATE_FINGERPRINT_FIELDS}
+    )
     material = json.dumps(
         canonical,
         ensure_ascii=False,

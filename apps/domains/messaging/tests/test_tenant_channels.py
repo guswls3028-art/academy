@@ -20,6 +20,10 @@ from apps.domains.messaging.tenant_channels import (
     get_tenant_channel_status,
     resolve_alimtalk_delivery_route,
 )
+from apps.domains.messaging.management.commands.configure_tenant_alimtalk_channel import (
+    _current_category_code,
+    _provider_variable_names,
+)
 from academy.adapters.messaging.solapi_template_client import clone_kakao_template
 
 
@@ -50,7 +54,10 @@ class SolapiTemplateCloneTests(SimpleTestCase):
             "emphasizeType": "ITEM_LIST",
             "header": "수업 안내",
             "highlight": {"title": "#{학원명}", "description": "#{학생이름}"},
-            "item": {"list": [{"title": "일정", "description": "#{날짜}"}]},
+            "item": {
+                "list": [{"title": "일정", "description": "#{날짜}"}],
+                "summary": {"title": None, "description": None},
+            },
             "imageId": None,
         })
 
@@ -60,14 +67,78 @@ class SolapiTemplateCloneTests(SimpleTestCase):
             channel_id="TENANT-CHANNEL",
             source_template=source,
             name="tenant copy",
+            category_code="003001",
         )
 
         payload = post.call_args.kwargs["json"]
         self.assertEqual(payload["channelId"], "TENANT-CHANNEL")
         self.assertEqual(payload["emphasizeType"], "ITEM_LIST")
+        self.assertEqual(payload["categoryCode"], "003001")
         self.assertEqual(payload["header"], "수업 안내")
-        self.assertEqual(payload["item"], source["item"])
+        self.assertEqual(
+            payload["item"],
+            {"list": [{"title": "일정", "description": "#{날짜}"}]},
+        )
+        self.assertNotIn("imageId", payload["highlight"])
         self.assertNotIn("imageId", payload)
+
+    def test_fingerprint_ignores_review_category_and_empty_response_defaults(self):
+        source = _template("SOURCE", content="#{안내}")
+        destination = {
+            **source,
+            "categoryCode": "004001",
+            "highlight": {"title": None, "description": None, "imageId": None},
+            "item": {"list": None, "summary": None},
+        }
+
+        self.assertEqual(
+            build_template_fingerprint(source),
+            build_template_fingerprint(destination),
+        )
+
+    def test_current_categories_are_selected_from_template_semantics(self):
+        registration = _template("REGISTRATION")
+        registration["variables"] = [
+            {"name": "#{학생아이디}"},
+            {"name": "#{학생비밀번호}"},
+        ]
+        otp = _template("OTP")
+        otp["variables"] = [{"name": "#{인증번호}"}]
+        clinic = _template("CLINIC")
+        clinic["item"] = {
+            "list": [
+                {"title": "장소", "description": "#{장소}"},
+                {"title": "날짜", "description": "#{날짜}"},
+                {"title": "시간", "description": "#{시간}"},
+            ]
+        }
+        clinic_change = _template("CLINIC-CHANGE")
+        clinic_change["item"] = {
+            "list": [
+                {"title": "기존일정", "description": "#{기존일정}"},
+                {"title": "변동사항", "description": "#{변동사항}"},
+            ]
+        }
+        feedback = _template("FEEDBACK")
+        feedback["item"] = {
+            "list": [
+                {"title": "강의", "description": "#{강의}"},
+                {"title": "차시", "description": "#{차시}"},
+            ]
+        }
+        withdrawal = _template("WITHDRAWAL")
+        withdrawal["variables"] = [
+            {"name": "#{학원명}"},
+            {"name": "#{학생이름2}"},
+        ]
+
+        self.assertEqual(_provider_variable_names(otp), {"인증번호"})
+        self.assertEqual(_current_category_code(registration), "001001")
+        self.assertEqual(_current_category_code(otp), "001002")
+        self.assertEqual(_current_category_code(clinic), "003001")
+        self.assertEqual(_current_category_code(clinic_change), "003002")
+        self.assertEqual(_current_category_code(feedback), "005001")
+        self.assertEqual(_current_category_code(withdrawal), "004002")
 
 
 class TenantChannelRoutingTests(TestCase):
@@ -297,6 +368,10 @@ class TenantChannelCommandTests(TestCase):
         _required,
     ):
         source = _template("SOURCE-TEMPLATE", content="정본 안내")
+        source["variables"] = [
+            {"name": "#{학생아이디}"},
+            {"name": "#{학생비밀번호}"},
+        ]
         pending = _template("TENANT-TEMPLATE", status="INSPECTING", content="정본 안내")
         test_template = _template("TEST-TEMPLATE", content="인증번호 #{인증번호}")
         test_template.update({"name": "인증번호", "variables": [{"name": "인증번호"}]})

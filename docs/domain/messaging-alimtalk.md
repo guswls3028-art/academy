@@ -389,8 +389,9 @@ signup 카테고리만 자체 Solapi 템플릿을 유지. 나머지 매핑 카�
 출처: `policy.py`, `queue_service.py`, `sqs_main.py`
 
 - 실발송 provider/API 키/발신번호는 `OWNER_TENANT_ID` 공용 Solapi 설정만 사용한다.
-- 기본 PFID는 공용 owner 채널이다. 새 `AlimtalkChannelBinding`이 `active`이고 요청된 공용 template ID에 대응하는 `AlimtalkTemplateBinding`이 `APPROVED`이며 양쪽 provider 본문 지문이 같을 때만 해당 tenant PFID/template ID로 치환한다.
+- 기본 PFID는 공용 owner 채널이다. 새 `AlimtalkChannelBinding`이 `active`이고 요청된 공용 template ID에 대응하는 `AlimtalkTemplateBinding`이 `APPROVED`이며 양쪽 provider 전달 동작 지문이 같을 때만 해당 tenant PFID/template ID로 치환한다. 전달 동작 지문은 본문·버튼·강조 구조를 비교하고, 검수용 카테고리와 provider 응답의 빈 기본값은 제외한다.
 - 과거 tenant `messaging_provider`, `kakao_pfid`, 자체 Solapi/Ppurio 키와 기존 MessageTemplate 승인 표시는 새 binding을 만들거나 활성화하는 근거로 사용하지 않는다.
+- 공용 템플릿의 legacy `categoryCode=TE`는 신규 복제 때 현재 Kakao 6자리 분류로 의미에 맞게 변환한다. 변수와 아이템 구조로 가입·인증·예약·서비스 신청·피드백 중 하나를 정확히 결정할 수 없으면 등록 전에 fail-closed한다.
 - `enqueue_alimtalk()`는 알림톡 payload의 `tenant_id`를 owner tenant로 정규화하고 원 업무 테넌트는 `source_tenant_id`로 남긴다.
 - worker도 raw/legacy SQS payload의 `tenant_id`를 owner tenant로 재정규화한다. 공용 채널의 물리 발송·로그 tenant는 owner를 유지하지만, 단가·잔액 차감·환불은 `source_tenant_id`로 식별한 실제 업무 테넌트에 귀속한다. 모든 canonical payload의 tenant 결합은 producer HMAC과 durable outbox tenant로 검증하며 서로 모순되는 payload는 발송 전에 폐기한다.
 - 신규 canonical payload는 `occurrence_key`를 싣는다. worker는 payload의 tenant/channel/event/target/recipient/occurrence/template로 business key를 다시 계산하며 producer key와 다르면 `invalid_business_idempotency_key`로 폐기한다. 따라서 유효한 signed key만 복사해 수신번호를 변경해도 provider로 진행하지 않는다.
