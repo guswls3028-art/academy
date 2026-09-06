@@ -326,6 +326,26 @@ patch, build, ABI load 또는 version check가 달라도 이미지 생성 자체
 그대로 만족하면서 세 CVE가 여섯 완료 scan에 없음을 입증해야만 persistent
 development, isolated preprod, production 순서로 진행한다.
 
+첫 수정 후보 run `34024203103`은 여섯 이미지를 정상 build했지만 AI 완료
+scan에서 `CVE-2023-45853`을 Critical로 다시 탐지해 같은 위치에서 실패
+폐쇄했다. development 이후 단계는 실행되지 않았고 shared lock은 반환됐다.
+ECR이 보고한 package는 `zlib` / `1.3.3~academy.git20260904.e3dc0a8-1`이었다.
+그러나 이 CVE는 zlib core가 아니라 `contrib/MiniZip`에만 해당하고 Academy
+runtime package에는 `libz.so`만 들어간다. 또한 고정한 upstream commit의
+`zlib.h` 선언은 `1.3.2.1-motley`이며 같은 commit에 `CVE-2026-85091`의
+`gz_vacate` 수정이 존재한다.
+
+후속 package는 Debian의 `+really` 관례를 사용한
+`1:1.3.3+really1.3.2.1+academy.git20260904.e3dc0a8-1`로 scanner의 1.3.3
+수정 경계보다 뒤에 정렬하면서 실제 upstream snapshot 1.3.2.1도 함께 기록한다.
+source package는 계속 `zlib`으로 노출하여 이후의 실제 libz finding도 scanner가
+탐지할 수 있게 하고, binary package와 ABI도 `zlib1g` / `libz.so.1`로 유지한다.
+build와 runtime 검증은 upstream version 선언, `gz_vacate` 수정 줄, Debian version
+정렬 범위 `(1:1.3.3, 1:1.3.4)`, MiniZip·pyminizip 파일 부재, 취약 MiniZip symbol
+`zipOpenNewFileInZip4_64` 부재를 모두 확인한다. 이 변경은 finding acceptance나
+service별 High 상한을 추가하지 않는다. 다음 후보의 여섯 완료 scan이 두 zlib
+CVE의 부재와 기존 exact 상한을 모두 입증하기 전에는 release를 진행하지 않는다.
+
 집중 검증:
 
 ```powershell

@@ -44,9 +44,12 @@ EOF
 }
 
 # CVE-2026-85091: the upstream post-1.3.2 commit fixes gz_vacate bounds
-# handling. Keep the zlib1g package name and ABI so Python and Debian runtime
-# packages consume the fixed library without a distribution migration.
-zlib_version='1:1.3.3~academy.git20260904.e3dc0a8-1'
+# handling. The source declares 1.3.2.1-motley. Debian's +really convention
+# keeps that actual snapshot visible while sorting this fixed package after the
+# scanner's 1.3.3 boundary. Keep the zlib source and zlib1g binary identities
+# scanner-visible, and retain the libz ABI for Python and Debian consumers.
+# contrib/MiniZip, the component affected by CVE-2023-45853, is not packaged.
+zlib_version='1:1.3.3+really1.3.2.1+academy.git20260904.e3dc0a8-1'
 zlib_archive="${work_root}/zlib.tar.gz"
 download \
     'https://github.com/madler/zlib/archive/e3dc0a85b7032e98380dec011bc8f2c2ee0d8fca.tar.gz' \
@@ -54,6 +57,8 @@ download \
     '33356dac6140d584347fe46bcf7083bd949dec49ac4b52417ae334ec70e3dbc3'
 tar -xzf "${zlib_archive}" -C "${work_root}"
 zlib_source="${work_root}/zlib-e3dc0a85b7032e98380dec011bc8f2c2ee0d8fca"
+grep -Fq '#define ZLIB_VERSION "1.3.2.1-motley"' "${zlib_source}/zlib.h"
+grep -Fq 'strm->next_in == NULL' "${zlib_source}/gzwrite.c"
 (
     cd "${zlib_source}"
     CFLAGS='-O2 -fstack-protector-strong -fPIC' ./configure --prefix=/usr
@@ -68,6 +73,10 @@ install -D -m 0644 \
     "${zlib_package}/usr/lib/${multiarch}/$(basename "${zlib_library}")"
 ln -s "$(basename "${zlib_library}")" \
     "${zlib_package}/usr/lib/${multiarch}/libz.so.1"
+test -z "$(find "${zlib_package}" \
+    \( -iname '*minizip*' -o -iname '*pyminizip*' \) -print -quit)"
+! nm -D --defined-only "${zlib_library}" | \
+    grep -Fq 'zipOpenNewFileInZip4_64'
 write_control \
     "${zlib_package}" \
     'zlib1g' \
