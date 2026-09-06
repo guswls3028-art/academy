@@ -65,7 +65,7 @@ class MessagingOperationsBase(TestCase):
 
 
 class SendMessagePreflightViewTests(MessagingOperationsBase):
-    def test_preflight_blocks_grade_messages_to_students(self):
+    def test_preflight_allows_complete_grade_messages_to_students(self):
         student = self._student("011")
 
         response = SendMessagePreflightView.as_view()(
@@ -77,16 +77,23 @@ class SendMessagePreflightViewTests(MessagingOperationsBase):
                     "student_ids": [student.id],
                     "raw_body": "성적표 안내입니다.",
                     "block_category": "grades",
+                    "alimtalk_extra_vars": {
+                        "강의명": "중2 수학",
+                        "차시명": "1차시",
+                    },
+                    "alimtalk_extra_vars_per_student": {
+                        str(student.id): {
+                            "_body_subst": "단원평가 85/100",
+                        },
+                    },
                 },
             )
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertFalse(response.data["ok"])
-        self.assertTrue(any(
-            item["code"] == "grade_recipient_policy"
-            for item in response.data["blockers"]
-        ))
+        self.assertTrue(response.data["ok"], response.data)
+        self.assertEqual(response.data["send_to"], "student")
+        self.assertEqual(response.data["recipient"]["valid_phone"], 1)
 
     def test_preflight_blocks_incomplete_grade_personalization(self):
         first_student = self._student("012", parent_phone="01033334444")

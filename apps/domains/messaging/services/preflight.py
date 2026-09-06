@@ -230,15 +230,6 @@ def build_send_preflight(tenant, data: dict[str, Any]) -> dict[str, Any]:
     blockers: list[PreflightIssue] = []
     warnings: list[PreflightIssue] = []
 
-    if (data.get("block_category") or "").strip() == "grades" and send_to != "parent":
-        blockers.append(
-            PreflightIssue(
-                "grade_recipient_policy",
-                "성적 알림 수신자 제한",
-                "성적 알림은 보호자에게만 발송할 수 있습니다.",
-            )
-        )
-
     if is_messaging_disabled(tenant.id):
         blockers.append(
             PreflightIssue(

@@ -268,7 +268,7 @@ class SendMessageViewTests(TestCase):
         self.assertEqual(kwargs["target_type"], "parent")
         self.assertEqual(kwargs["target_id"], self.student.id)
 
-    def test_grade_message_to_student_is_rejected_before_dispatch(self):
+    def test_grade_message_to_student_dispatches_to_student_phone(self):
         request = self.factory.post(
             "/api/v1/messaging/send/",
             data={
@@ -276,6 +276,15 @@ class SendMessageViewTests(TestCase):
                 "student_ids": [self.student.id],
                 "raw_body": "성적표 안내입니다.",
                 "block_category": "grades",
+                "alimtalk_extra_vars": {
+                    "강의명": "중2 수학",
+                    "차시명": "1차시",
+                },
+                "alimtalk_extra_vars_per_student": {
+                    str(self.student.id): {
+                        "_body_subst": "단원평가 85/100",
+                    },
+                },
             },
             format="json",
         )
@@ -283,15 +292,23 @@ class SendMessageViewTests(TestCase):
         request.user = self.admin
         request.tenant = self.tenant
 
-        with patch(
-            "apps.domains.messaging.services.enqueue_alimtalk",
-            return_value=True,
-        ) as enqueue_alimtalk:
+        with (
+            patch(
+                "apps.domains.messaging.services.get_tenant_site_url",
+                return_value="https://example.test",
+            ),
+            patch(
+                "apps.domains.messaging.services.enqueue_alimtalk",
+                return_value=True,
+            ) as enqueue_alimtalk,
+        ):
             response = self._send(request)
 
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.data["code"], "grade_recipient_policy")
-        enqueue_alimtalk.assert_not_called()
+        self.assertEqual(response.status_code, 200, response.data)
+        enqueue_alimtalk.assert_called_once()
+        self.assertEqual(enqueue_alimtalk.call_args.kwargs["to"], "01011112222")
+        self.assertEqual(enqueue_alimtalk.call_args.kwargs["target_type"], "student")
+        self.assertEqual(enqueue_alimtalk.call_args.kwargs["target_id"], self.student.id)
 
     def test_grade_message_rejects_incomplete_per_student_bodies(self):
         second_student = self._create_student(

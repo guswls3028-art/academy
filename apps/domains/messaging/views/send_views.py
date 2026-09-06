@@ -84,14 +84,6 @@ class SendMessageView(APIView):
         ser.is_valid(raise_exception=True)
         data = ser.validated_data
         send_to = data["send_to"]
-        if (data.get("block_category") or "").strip() == "grades" and send_to != "parent":
-            return Response(
-                {
-                    "detail": "성적 알림은 보호자에게만 발송할 수 있습니다.",
-                    "code": "grade_recipient_policy",
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
         message_mode = "alimtalk"
         template_id = data.get("template_id")
         raw_body = (data.get("raw_body") or "").strip()
