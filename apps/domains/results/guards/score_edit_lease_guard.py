@@ -6,8 +6,9 @@ from apps.domains.results.guards.score_edit_lease_state import (
     EDIT_LEASE_TTL as EDIT_LEASE_TTL,
     active_score_edit_drafts,
     invalidate_score_edit_leases_for_exam as invalidate_score_edit_leases_for_exam,
-    score_edit_active_homework_key,
-    score_edit_homework_keys,
+    normalize_score_active_cell,
+    score_edit_active_cell_key,
+    score_edit_cell_keys,
     score_edit_lease_payload as score_edit_lease_payload,
     score_edit_payload_active_cell,
     score_edit_payload_is_invalidated,
@@ -26,7 +27,7 @@ EDIT_SESSION_HEADER = "HTTP_X_SCORE_SESSION_ID"
 class ScoreEditLeaseConflict(APIException):
     status_code = 409
     default_detail = {
-        "detail": "이 차시는 다른 화면에서 수정 중입니다.",
+        "detail": "같은 성적 셀을 다른 화면에서 수정 중입니다.",
         "code": "SCORE_EDIT_LOCKED",
     }
     default_code = "SCORE_EDIT_LOCKED"
@@ -55,7 +56,13 @@ def _same_editor(draft, *, user_id: int, client_id: str) -> bool:
     )
 
 
-def require_score_edit_lease(request, *, session_id: int, exam_id: int | None = None):
+def require_score_edit_lease(
+    request,
+    *,
+    session_id: int,
+    exam_id: int | None = None,
+    target_cell: dict | None = None,
+):
     tenant = getattr(request, "tenant", None)
     if not tenant:
         raise ScoreEditLeaseConflict()
@@ -91,6 +98,7 @@ def require_score_edit_lease(request, *, session_id: int, exam_id: int | None = 
     )
     if draft is not None and score_edit_payload_is_invalidated(draft.payload):
         raise ScoreEditLeaseStale()
+    target_key = score_edit_active_cell_key(target_cell)
     for candidate in drafts:
         if score_edit_payload_is_invalidated(candidate.payload):
             continue
@@ -100,10 +108,23 @@ def require_score_edit_lease(request, *, session_id: int, exam_id: int | None = 
             user_id=request.user.id,
             client_id=client_id,
         )
-        if not same_editor and (
-            candidate_changes or score_edit_payload_active_cell(candidate.payload)
-        ):
-            raise ScoreEditLeaseConflict()
+        if same_editor:
+            continue
+        candidate_keys = score_edit_cell_keys(candidate_changes)
+        candidate_active_key = score_edit_active_cell_key(
+            score_edit_payload_active_cell(candidate.payload)
+        )
+        if candidate_keys is None or target_key is None:
+            if candidate_changes or candidate_active_key is not None:
+                raise ScoreEditLeaseConflict()
+            continue
+        if target_key in candidate_keys or target_key == candidate_active_key:
+            raise ScoreEditLeaseConflict(
+                {
+                    "detail": "같은 성적 셀을 다른 조교가 수정 중입니다.",
+                    "code": "SCORE_EDIT_LOCKED",
+                }
+            )
     if draft is None:
         raise ScoreEditLeaseConflict()
     if not _same_editor(draft, user_id=request.user.id, client_id=client_id):
@@ -132,7 +153,7 @@ def require_homework_score_edit_lease(
         raise NotFound({"detail": "session not found", "code": "NOT_FOUND"}) from None
 
     client_id = score_edit_client_id(request)
-    target_key = (int(enrollment_id), int(homework_id))
+    target_key = ("homework", int(enrollment_id), int(homework_id))
     drafts = list(
         active_score_edit_drafts(scope_ids=scope_ids, tenant_id=tenant.id)
         .select_for_update()
@@ -163,15 +184,15 @@ def require_homework_score_edit_lease(
         if score_edit_payload_is_invalidated(candidate.payload):
             continue
         if same_editor or not candidate_changes:
-            homework_keys = frozenset()
+            cell_keys = frozenset()
         else:
-            homework_keys = score_edit_homework_keys(candidate_changes)
-            if homework_keys is None:
+            cell_keys = score_edit_cell_keys(candidate_changes)
+            if cell_keys is None:
                 raise ScoreEditLeaseConflict()
-        active_key = score_edit_active_homework_key(
+        active_key = score_edit_active_cell_key(
             score_edit_payload_active_cell(candidate.payload)
         )
-        if not same_editor and (target_key in homework_keys or target_key == active_key):
+        if not same_editor and (target_key in cell_keys or target_key == active_key):
             raise ScoreEditLeaseConflict(
                 {
                     "detail": "같은 학생의 같은 과제 점수를 다른 조교가 수정 중입니다.",
@@ -186,7 +207,14 @@ def require_homework_score_edit_lease(
     return session
 
 
-def require_score_edit_lease_from_headers(request, *, exam_id: int | None = None):
+def require_score_edit_lease_from_headers(
+    request,
+    *,
+    exam_id: int,
+    enrollment_id: int,
+    sub: str,
+    question_id: int | None = None,
+):
     raw_session_id = str(request.META.get(EDIT_SESSION_HEADER, "") or "").strip()
     try:
         session_id = int(raw_session_id)
@@ -196,6 +224,15 @@ def require_score_edit_lease_from_headers(request, *, exam_id: int | None = None
         request,
         session_id=session_id,
         exam_id=exam_id,
+        target_cell=normalize_score_active_cell(
+            {
+                "type": "exam",
+                "enrollmentId": int(enrollment_id),
+                "examId": int(exam_id),
+                "sub": sub,
+                **({"questionId": int(question_id)} if question_id is not None else {}),
+            }
+        ),
     )
 
 

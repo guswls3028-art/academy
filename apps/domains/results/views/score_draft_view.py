@@ -36,11 +36,11 @@ from apps.domains.results.guards.score_edit_lease_guard import (
 )
 from apps.domains.results.guards.score_edit_lease_state import (
     active_score_edit_drafts,
-    normalize_homework_active_cell,
-    score_edit_active_homework_key,
+    normalize_score_active_cell,
+    score_edit_active_cell_key,
+    score_edit_cell_keys,
     score_edit_changes_are_exclusive,
     score_edit_changes_conflict,
-    score_edit_homework_keys,
     score_edit_payload_active_cell,
 )
 from apps.domains.results.models import ScoreEditDraft
@@ -173,10 +173,33 @@ class ScoreDraftView(APIView):
                 editor_user_id=request.user.id,
                 client_id="",
             ).first()
-        if draft is not None and not _is_current_editor(
-            draft,
-            user_id=request.user.id,
-            client_id=client_id,
+        if draft is None:
+            # A closed/lost device cannot release its client-scoped draft.
+            # Surface the latest expired draft to the same account so the
+            # existing explicit recovery UI can preserve or discard it.
+            draft = (
+                ScoreEditDraft.objects.filter(
+                    session_id=int(session_id),
+                    tenant_id=tenant.id,
+                    editor_user_id=request.user.id,
+                    updated_at__lt=active_since,
+                )
+                .order_by("-updated_at", "-id")
+                .first()
+            )
+        same_user_expired_recovery = bool(
+            draft is not None
+            and int(draft.editor_user_id) == int(request.user.id)
+            and draft.updated_at < active_since
+        )
+        if (
+            draft is not None
+            and not same_user_expired_recovery
+            and not _is_current_editor(
+                draft,
+                user_id=request.user.id,
+                client_id=client_id,
+            )
         ):
             draft = None
         if not draft:
@@ -210,9 +233,9 @@ class ScoreDraftView(APIView):
         if not isinstance(changes, list):
             return Response({"detail": "changes must be a list"}, status=400)
         raw_active_cell = request.data.get("active_cell")
-        active_cell = normalize_homework_active_cell(raw_active_cell)
+        active_cell = normalize_score_active_cell(raw_active_cell)
         if raw_active_cell is not None and active_cell is None:
-            return Response({"detail": "active_cell must be a homework cell"}, status=400)
+            return Response({"detail": "active_cell must be a score cell"}, status=400)
         acknowledge_stale = parse_bool(
             request.data.get("acknowledge_stale", False),
             field_name="acknowledge_stale",
@@ -229,7 +252,7 @@ class ScoreDraftView(APIView):
                 ScoreEditDraft.objects.select_for_update().filter(
                     session_id__in=scope_ids,
                     tenant_id=tenant.id,
-                )
+                ).order_by("-updated_at", "-id")
             )
             handoff_drafts = []
             for existing in drafts:
@@ -244,20 +267,20 @@ class ScoreDraftView(APIView):
                 ):
                     continue
                 _, existing_changes = score_edit_payload_parts(existing.payload)
-                existing_active_key = score_edit_active_homework_key(
+                existing_active_key = score_edit_active_cell_key(
                     score_edit_payload_active_cell(existing.payload)
                 )
-                incoming_active_key = score_edit_active_homework_key(active_cell)
-                existing_homework_keys = score_edit_homework_keys(existing_changes)
-                incoming_homework_keys = score_edit_homework_keys(changes)
+                incoming_active_key = score_edit_active_cell_key(active_cell)
+                existing_cell_keys = score_edit_cell_keys(existing_changes)
+                incoming_cell_keys = score_edit_cell_keys(changes)
                 presence_conflicts = (
                     incoming_active_key is not None
                     and (
                         score_edit_changes_are_exclusive(existing_changes)
                         or incoming_active_key == existing_active_key
                         or (
-                            existing_homework_keys is not None
-                            and incoming_active_key in existing_homework_keys
+                            existing_cell_keys is not None
+                            and incoming_active_key in existing_cell_keys
                         )
                     )
                 ) or (
@@ -265,8 +288,8 @@ class ScoreDraftView(APIView):
                     and (
                         score_edit_changes_are_exclusive(changes)
                         or (
-                            incoming_homework_keys is not None
-                            and existing_active_key in incoming_homework_keys
+                            incoming_cell_keys is not None
+                            and existing_active_key in incoming_cell_keys
                         )
                     )
                 )
@@ -310,21 +333,20 @@ class ScoreDraftView(APIView):
                     _, previous_changes = score_edit_payload_parts(
                         same_user_draft.payload
                     )
-                    reusable_empty_lease = (
-                        not score_edit_payload_is_invalidated(
-                            same_user_draft.payload
-                        )
-                        and not previous_changes
-                        and score_edit_payload_active_cell(
-                            same_user_draft.payload
-                        ) is None
-                    )
+                    # An expired lease with no score changes has nothing to
+                    # recover. Reuse it even when its old device left an
+                    # active-cell marker or automatic grading invalidated it.
+                    reusable_empty_lease = not previous_changes
                     if not reusable_empty_lease:
+                        if take_over_same_user and changes:
+                            handoff_drafts.append(same_user_draft)
+                            continue
                         return _locked_response()
                     draft = same_user_draft
                     break
             if draft is not None and score_edit_payload_is_invalidated(draft.payload):
-                if not acknowledge_stale:
+                _, invalidated_changes = score_edit_payload_parts(draft.payload)
+                if invalidated_changes and not acknowledge_stale:
                     return _stale_response()
             for previous in handoff_drafts:
                 previous_client_id, previous_changes = score_edit_payload_parts(

@@ -27,28 +27,70 @@ def score_edit_payload_active_cell(payload) -> dict | None:
     if not isinstance(payload, dict):
         return None
     active_cell = payload.get("active_cell")
-    return normalize_homework_active_cell(active_cell)
+    return normalize_score_active_cell(active_cell)
+
+
+def _positive_int(value) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def normalize_score_active_cell(value) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    enrollment_id = _positive_int(value.get("enrollmentId"))
+    if enrollment_id is None:
+        return None
+    if value.get("type") == "homework":
+        homework_id = _positive_int(value.get("homeworkId"))
+        if homework_id is None:
+            return None
+        return {
+            "type": "homework",
+            "enrollmentId": enrollment_id,
+            "homeworkId": homework_id,
+        }
+    if value.get("type") != "exam":
+        return None
+    exam_id = _positive_int(value.get("examId"))
+    sub = value.get("sub")
+    if exam_id is None or sub not in {"total", "objective", "subjective", "item"}:
+        return None
+    normalized = {
+        "type": "exam",
+        "enrollmentId": enrollment_id,
+        "examId": exam_id,
+        "sub": sub,
+    }
+    if sub == "item":
+        question_id = _positive_int(value.get("questionId"))
+        if question_id is None:
+            return None
+        normalized["questionId"] = question_id
+    return normalized
 
 
 def normalize_homework_active_cell(value) -> dict | None:
-    if not isinstance(value, dict) or value.get("type") != "homework":
+    normalized = normalize_score_active_cell(value)
+    if normalized is None or normalized["type"] != "homework":
         return None
-    enrollment_id = value.get("enrollmentId")
-    homework_id = value.get("homeworkId")
-    if (
-        isinstance(enrollment_id, bool)
-        or isinstance(homework_id, bool)
-        or not isinstance(enrollment_id, int)
-        or not isinstance(homework_id, int)
-        or enrollment_id <= 0
-        or homework_id <= 0
-    ):
+    return normalized
+
+
+def score_edit_active_cell_key(value) -> tuple | None:
+    active_cell = normalize_score_active_cell(value)
+    if active_cell is None:
         return None
-    return {
-        "type": "homework",
-        "enrollmentId": enrollment_id,
-        "homeworkId": homework_id,
-    }
+    if active_cell["type"] == "homework":
+        return ("homework", active_cell["enrollmentId"], active_cell["homeworkId"])
+    return (
+        "exam",
+        active_cell["enrollmentId"],
+        active_cell["examId"],
+        active_cell["sub"],
+        active_cell.get("questionId"),
+    )
 
 
 def score_edit_active_homework_key(value) -> tuple[int, int] | None:
@@ -56,6 +98,39 @@ def score_edit_active_homework_key(value) -> tuple[int, int] | None:
     if active_cell is None:
         return None
     return (active_cell["enrollmentId"], active_cell["homeworkId"])
+
+
+def score_edit_change_key(change) -> tuple | None:
+    if not isinstance(change, dict):
+        return None
+    enrollment_id = _positive_int(change.get("enrollmentId"))
+    if enrollment_id is None:
+        return None
+    change_type = change.get("type")
+    if change_type == "homework":
+        homework_id = _positive_int(change.get("homeworkId"))
+        return None if homework_id is None else ("homework", enrollment_id, homework_id)
+    sub_by_type = {
+        "examTotal": "total",
+        "examObjective": "objective",
+        "examSubjective": "subjective",
+    }
+    sub = sub_by_type.get(change_type)
+    exam_id = _positive_int(change.get("examId"))
+    if sub is not None and exam_id is not None:
+        return ("exam", enrollment_id, exam_id, sub, None)
+    return None
+
+
+def score_edit_cell_keys(changes: list) -> frozenset[tuple] | None:
+    """Return score-cell keys, or None for an unknown legacy change shape."""
+    keys: set[tuple] = set()
+    for change in changes:
+        key = score_edit_change_key(change)
+        if key is None:
+            return None
+        keys.add(key)
+    return frozenset(keys)
 
 
 def score_edit_payload_is_invalidated(payload) -> bool:
@@ -84,18 +159,18 @@ def score_edit_homework_keys(changes: list) -> frozenset[tuple[int, int]] | None
 
 
 def score_edit_changes_conflict(left_changes: list, right_changes: list) -> bool:
-    """Empty drafts coexist; disjoint homework cells coexist; all else is exclusive."""
+    """Empty drafts and disjoint score cells coexist; unknown legacy shapes are exclusive."""
     if not left_changes or not right_changes:
         return False
-    left_keys = score_edit_homework_keys(left_changes)
-    right_keys = score_edit_homework_keys(right_changes)
+    left_keys = score_edit_cell_keys(left_changes)
+    right_keys = score_edit_cell_keys(right_changes)
     if left_keys is None or right_keys is None:
         return True
     return bool(left_keys & right_keys)
 
 
 def score_edit_changes_are_exclusive(changes: list) -> bool:
-    return bool(changes) and score_edit_homework_keys(changes) is None
+    return bool(changes) and score_edit_cell_keys(changes) is None
 
 
 def score_edit_lease_payload(
@@ -109,7 +184,7 @@ def score_edit_lease_payload(
     payload = {
         "client_id": client_id,
         "changes": changes,
-        "active_cell": normalize_homework_active_cell(active_cell),
+        "active_cell": normalize_score_active_cell(active_cell),
     }
     if invalidated:
         payload["invalidated"] = True
