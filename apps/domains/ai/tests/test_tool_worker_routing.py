@@ -165,6 +165,13 @@ class ToolWorkerRoutingTests(TestCase):
         }
 
         repo = DjangoAIJobRepository()
+        started = timezone.now()
+        assert repo.mark_running(
+            job.job_id,
+            "tools-sqs-worker",
+            started + timedelta(minutes=30),
+            started,
+        )
         with self.captureOnCommitCallbacks(execute=True):
             assert repo.mark_done(job.job_id, timezone.now(), result)
 

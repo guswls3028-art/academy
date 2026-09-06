@@ -149,3 +149,40 @@ class AISQSWorkerCallbackTests(TestCase):
         self.assertTrue(queue.deleted)
         self.assertEqual(job.status, "DONE")
         self.assertTrue(AIResultModel.objects.filter(job=job, payload={"ok": True}).exists())
+
+    def test_basic_failure_callback_uses_persisted_status_and_error(self):
+        job = AIJobModel.objects.create(
+            job_id="callback-basic-failure",
+            job_type="ocr",
+            status="PENDING",
+            tenant_id=str(self.tenant.id),
+            tier="basic",
+        )
+        queue = _OneMessageQueue(self._message_for(job))
+
+        def inference_handler(contract_job):
+            ai_sqs_worker._shutdown = True
+            return AIResult.failed(contract_job.id, "provider-timeout")
+
+        with mock.patch(
+            "apps.domains.ai.callbacks.dispatch_ai_result_to_domain"
+        ) as dispatch:
+            exit_code = ai_sqs_worker.run_ai_sqs_worker(
+                queue=queue,
+                inference_handler=inference_handler,
+            )
+
+        job.refresh_from_db()
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(queue.deleted)
+        self.assertEqual(job.status, "DONE")
+        self.assertEqual(job.error_message, "provider-timeout")
+        dispatch.assert_called_once_with(
+            job_id=job.job_id,
+            status=job.status,
+            result_payload={},
+            error=job.error_message,
+            source_domain="matchup",
+            source_id="123",
+            tier="basic",
+        )

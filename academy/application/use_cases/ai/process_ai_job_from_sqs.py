@@ -108,7 +108,7 @@ def complete_ai_job(
     result_payload: Optional[dict] = None,
     now: Optional[datetime] = None,
 ) -> bool:
-    """RUNNING → DONE. 이미 DONE이면 True (멱등)."""
+    """RUNNING → DONE. 동일한 성공 DONE만 True로 멱등 복구."""
     if now is None:
         from datetime import timezone
         now = datetime.now(timezone.utc)
@@ -123,7 +123,7 @@ def fail_ai_job(
     tier: str = "basic",
     now: Optional[datetime] = None,
 ) -> bool:
-    """RUNNING → 최종 상태 (tier에 따라 DONE/FAILED). 이미 최종 상태면 True (멱등)."""
+    """RUNNING → tier별 실패 결과. 동일한 실패 결과만 True로 멱등 복구."""
     if now is None:
         from datetime import timezone
         now = datetime.now(timezone.utc)

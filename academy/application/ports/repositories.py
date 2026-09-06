@@ -37,14 +37,15 @@ class AIJobRepository(Protocol):
         now: datetime,
     ) -> bool:
         """
-        PENDING → RUNNING 전이 (멱등: 이미 RUNNING이면 True).
+        PENDING/RETRYING 또는 lease가 만료된 RUNNING → RUNNING 전이.
+        유효 lease의 중복 RUNNING claim은 False.
         Returns: 성공 여부.
         """
         ...
 
     @abstractmethod
     def mark_done(self, job_id: str, now: datetime, result_payload: Optional[dict] = None) -> bool:
-        """RUNNING → DONE. result_payload 있으면 결과 저장. 이미 DONE이면 True (멱등)."""
+        """RUNNING → DONE CAS. 동일한 성공 DONE만 True로 멱등 복구."""
         ...
 
     @abstractmethod
@@ -55,5 +56,5 @@ class AIJobRepository(Protocol):
         tier: str,
         now: datetime,
     ) -> bool:
-        """RUNNING → 최종 상태 (tier에 따라 DONE/FAILED 등). 이미 최종 상태면 True (멱등)."""
+        """RUNNING → tier별 실패 결과 CAS. 동일한 실패 결과만 True로 멱등 복구."""
         ...

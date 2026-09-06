@@ -18,6 +18,7 @@ from academy.application.use_cases.ai.process_ai_job_from_sqs import (
 from academy.framework.workers.ai_sqs_worker import (
     _dispatch_terminal_callback_from_message,
 )
+from apps.domains.ai.callbacks import _is_failed_terminal
 from apps.domains.ai.models import AIJobModel, AIResultModel
 
 
@@ -92,6 +93,64 @@ class AIJobTerminalTransitionPostgresTests(TransactionTestCase):
         self.assertEqual(job.error_message, "original-error")
         self.assertEqual(job.completed_at, completed_at)
         self.assertEqual(result.payload, {"winner": "success"})
+
+    @patch("apps.domains.ai.redis_status_cache.cache_job_status", return_value=True)
+    def test_same_done_outcome_repairs_cache_without_replacing_first_result(
+        self,
+        cache_status,
+    ) -> None:
+        job = self._job(status="DONE")
+        job.error_message = ""
+        job.last_error = ""
+        job.completed_at = None
+        job.save(
+            update_fields=[
+                "error_message",
+                "last_error",
+                "completed_at",
+                "updated_at",
+            ]
+        )
+        result = AIResultModel.objects.create(job=job, payload={"winner": "first"})
+
+        accepted = complete_ai_job(
+            DjangoUnitOfWork(),
+            job.job_id,
+            {"winner": "duplicate"},
+        )
+
+        self.assertTrue(accepted)
+        job.refresh_from_db()
+        result.refresh_from_db()
+        self.assertIsNotNone(job.completed_at)
+        self.assertEqual(result.payload, {"winner": "first"})
+        self.assertEqual(cache_status.call_args.kwargs["result"], {"winner": "first"})
+
+    @patch("apps.domains.ai.redis_status_cache.cache_job_status", return_value=True)
+    def test_same_failed_outcome_repairs_metadata_without_replacing_first_error(
+        self,
+        cache_status,
+    ) -> None:
+        job = self._job(status="FAILED")
+        job.completed_at = None
+        job.save(update_fields=["completed_at", "updated_at"])
+
+        accepted = fail_ai_job(
+            DjangoUnitOfWork(),
+            job.job_id,
+            "duplicate-error",
+            tier="premium",
+        )
+
+        self.assertTrue(accepted)
+        job.refresh_from_db()
+        self.assertIsNotNone(job.completed_at)
+        self.assertEqual(job.error_message, "original-error")
+        self.assertEqual(job.last_error, "original-error")
+        self.assertEqual(
+            cache_status.call_args.kwargs["error_message"],
+            "original-error",
+        )
 
     @patch("apps.domains.ai.redis_status_cache.cache_job_status", return_value=True)
     def test_concurrent_complete_and_fail_have_exactly_one_winner(
@@ -203,5 +262,7 @@ class AIJobTerminalTransitionPostgresTests(TransactionTestCase):
             )
 
         callback_status = dispatch_callback.call_args.kwargs["status"]
+        callback_error = dispatch_callback.call_args.kwargs["error"]
         self.assertEqual(callback_status, job.status)
         self.assertEqual(callback_status, cached_status)
+        self.assertTrue(_is_failed_terminal(callback_status, callback_error))
