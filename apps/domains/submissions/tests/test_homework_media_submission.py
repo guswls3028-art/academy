@@ -22,6 +22,7 @@ from apps.domains.lectures.test_support import (
     create_lecture_fixture,
     create_session_fixture,
 )
+from apps.domains.results.views.session_scores_view import SessionScoreCorrectionView
 from apps.domains.students.test_support import create_student_fixture
 from apps.domains.submissions.models import Submission, SubmissionMedia
 from apps.domains.submissions.services import dispatcher
@@ -136,6 +137,8 @@ class HomeworkSubmissionMediaTests(TestCase):
             request = self.factory.post(path, data=data, format="multipart")
         elif method == "delete":
             request = self.factory.delete(path, data=data, format="json")
+        elif method == "patch":
+            request = self.factory.patch(path, data=data, format="json")
         else:
             raise AssertionError(f"unsupported method: {method}")
         request.tenant = self.tenant
@@ -717,6 +720,95 @@ class HomeworkSubmissionMediaTests(TestCase):
         upload_fileobj_to_r2.assert_not_called()
         self.assertEqual(Submission.objects.count(), submission_count)
         self.assertEqual(SubmissionMedia.objects.count(), media_count)
+
+    @patch("apps.domains.submissions.services.homework_media.upload_fileobj_to_r2")
+    def test_upload_reload_teacher_view_grade_then_retry_and_delete_are_denied(
+        self,
+        upload_fileobj_to_r2,
+    ):
+        client_file_id = str(uuid.uuid4())
+        created = self._post(
+            file=_jpeg("positive-journey.jpg", body=b"positive-journey"),
+            client_file_id=client_file_id,
+        )
+        self.assertEqual(created.status_code, 201, created.data)
+
+        reload_request = self._request(
+            "get",
+            f"/api/v1/submissions/submissions/homework/{self.homework.id}/media/",
+            data={"enrollment_id": self.enrollment.id},
+        )
+        reloaded = HomeworkSubmissionMediaCollectionView.as_view()(
+            reload_request,
+            homework_id=self.homework.id,
+        )
+        self.assertEqual(reloaded.status_code, 200, reloaded.data)
+        self.assertEqual([item["id"] for item in reloaded.data["files"]], [created.data["id"]])
+
+        teacher_request = self._request(
+            "get",
+            f"/api/v1/submissions/submissions/homework/{self.homework.id}/",
+            user=self.teacher,
+        )
+        teacher_view = HomeworkSubmissionsListView.as_view()(
+            teacher_request,
+            homework_id=self.homework.id,
+        )
+        self.assertEqual(teacher_view.status_code, 200, teacher_view.data)
+        viewed_fingerprint = teacher_view.data[0]["media_set_fingerprint"]
+        self.assertEqual(len(viewed_fingerprint), 64)
+
+        grade_request = self._request(
+            "patch",
+            f"/api/v1/results/admin/sessions/{self.session.id}/score-correction/",
+            user=self.teacher,
+            data={
+                "enrollment_id": self.enrollment.id,
+                "source_type": "homework",
+                "source_id": self.homework.id,
+                "completed": True,
+                "note": "제출 파일 확인 완료",
+                "expected_updated_at": None,
+            },
+        )
+        graded = SessionScoreCorrectionView.as_view()(
+            grade_request,
+            session_id=self.session.id,
+        )
+        self.assertEqual(graded.status_code, 200, graded.data)
+        AssessmentCorrection = django_apps.get_model("progress", "AssessmentCorrection")
+        correction = AssessmentCorrection.objects.get(
+            tenant=self.tenant,
+            enrollment=self.enrollment,
+            session=self.session,
+            source_type=AssessmentCorrection.SourceType.HOMEWORK,
+            source_id=self.homework.id,
+        )
+        self.assertEqual(correction.source_fingerprint, viewed_fingerprint)
+
+        retry = self._post(
+            file=_jpeg("positive-journey.jpg", body=b"positive-journey"),
+            client_file_id=client_file_id,
+        )
+        delete_request = self._request(
+            "delete",
+            f"/api/v1/submissions/submissions/homework/{self.homework.id}/media/{created.data['id']}/",
+            data={"enrollment_id": self.enrollment.id},
+        )
+        deleted = HomeworkSubmissionMediaDetailView.as_view()(
+            delete_request,
+            homework_id=self.homework.id,
+            media_id=str(created.data["id"]),
+        )
+
+        self.assertEqual(retry.status_code, 409, retry.data)
+        self.assertEqual(retry.data["code"], "HOMEWORK_MEDIA_REVIEWED")
+        self.assertEqual(deleted.status_code, 409, deleted.data)
+        self.assertEqual(deleted.data["code"], "HOMEWORK_MEDIA_REVIEWED")
+        upload_fileobj_to_r2.assert_called_once()
+        media = SubmissionMedia.objects.get(id=int(created.data["id"]))
+        self.assertEqual(media.status, SubmissionMedia.Status.UPLOADED)
+        self.assertIsNone(media.removed_at)
 
     @patch("apps.domains.submissions.services.homework_media.upload_fileobj_to_r2")
     def test_student_cannot_remove_another_students_file(
