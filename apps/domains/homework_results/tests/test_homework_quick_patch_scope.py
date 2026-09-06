@@ -1,5 +1,4 @@
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
 from unittest import skipUnless
 from unittest.mock import patch
 
@@ -506,21 +505,12 @@ class HomeworkQuickPatchCreateRaceTests(TransactionTestCase):
 
     @skipUnless(connection.vendor == "postgresql", "unique create race requires PostgreSQL")
     def test_expected_empty_cell_create_race_allows_one_winner_and_one_conflict(self):
-        barrier = Barrier(2)
-        original_create = HomeworkScore.objects.create
-
-        def racing_create(*args, **kwargs):
-            barrier.wait(timeout=10)
-            return original_create(*args, **kwargs)
-
-        # The lease contract is covered separately. Bypass its row lock here so both
-        # requests reach the post-lease empty-cell create window at the same time.
-        with (
-            patch(
-                "apps.domains.homework_results.views.homework_score_viewset."
-                "require_homework_score_edit_lease"
-            ),
-            patch.object(HomeworkScore.objects, "create", side_effect=racing_create),
+        # The lease contract is covered separately. The canonical assignment lock
+        # now serializes the empty-cell create window itself, so forcing both calls
+        # to pause inside create would deadlock the test behind that intended lock.
+        with patch(
+            "apps.domains.homework_results.views.homework_score_viewset."
+            "require_homework_score_edit_lease"
         ):
             with ThreadPoolExecutor(max_workers=2) as executor:
                 results = list(executor.map(self._request, [71, 82]))
