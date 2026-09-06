@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import json
 import logging
 import mimetypes
 from pathlib import PurePath
@@ -492,6 +493,84 @@ def serialize_legacy_homework_media(submission: Submission) -> dict:
         "removed_at": removed_at,
         "created_at": submission.created_at.isoformat() if submission.created_at else None,
     }
+
+
+def homework_media_set_fingerprint_for_submissions(submissions) -> str:
+    """Fingerprint the active media evidence represented by submission rows."""
+    evidence: list[dict] = []
+    for submission in submissions:
+        if (
+            submission.source not in _HOMEWORK_MEDIA_SOURCES
+            or submission.status == Submission.Status.SUPERSEDED
+        ):
+            continue
+        if _legacy_is_active(submission):
+            evidence.append(
+                {
+                    "kind": "legacy",
+                    "submission_id": int(submission.id),
+                    "source": str(submission.source),
+                    "object_key": str(submission.file_key),
+                    "file_type": str(submission.file_type or ""),
+                    "file_size": int(submission.file_size or 0),
+                    "status": str(submission.status),
+                }
+            )
+        for media in submission.media_files.all():
+            if media.removed_at is not None:
+                continue
+            evidence.append(
+                {
+                    "kind": "media",
+                    "submission_id": int(submission.id),
+                    "media_id": int(media.id),
+                    "client_upload_id": str(media.client_upload_id),
+                    "fingerprint": str(media.fingerprint),
+                    "object_key": str(media.object_key),
+                    "original_filename": str(media.original_filename),
+                    "media_kind": str(media.media_kind),
+                    "mime_type": str(media.mime_type),
+                    "size": int(media.size),
+                    "position": int(media.position),
+                    "status": str(media.status),
+                }
+            )
+    evidence.sort(
+        key=lambda item: (
+            int(item["submission_id"]),
+            0 if item["kind"] == "legacy" else 1,
+            int(item.get("position", 0)),
+            int(item.get("media_id", 0)),
+        )
+    )
+    encoded = json.dumps(
+        evidence,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def homework_media_set_fingerprint(
+    *,
+    tenant,
+    enrollment_id: int,
+    homework_id: int,
+) -> str:
+    submissions = list(
+        Submission.objects.filter(
+            tenant=tenant,
+            enrollment_id=int(enrollment_id),
+            target_type=Submission.TargetType.HOMEWORK,
+            target_id=int(homework_id),
+            source__in=_HOMEWORK_MEDIA_SOURCES,
+        )
+        .exclude(status=Submission.Status.SUPERSEDED)
+        .prefetch_related("media_files")
+        .order_by("id")
+    )
+    return homework_media_set_fingerprint_for_submissions(submissions)
 
 
 def homework_media_limits_payload() -> dict:
