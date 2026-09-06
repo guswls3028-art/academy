@@ -667,6 +667,7 @@ class MyGradesSummaryHomeworkTests(TestCase):
         self.assertIsNone(row["score"])
         self.assertEqual(row["max_score"], 20.0)
         self.assertEqual(row["achievement"], "NOT_SUBMITTED")
+        self.assertFalse(row["submission_media_locked"])
         self.assertEqual(row["lecture_title"], "수학")
         self.assertEqual(row["recorded_at"], assignment.created_at.isoformat())
 
@@ -722,6 +723,7 @@ class MyGradesSummaryHomeworkTests(TestCase):
         self.assertFalse(student_row["passed"])
         self.assertEqual(student_row["achievement"], "REMEDIATED")
         self.assertTrue(student_row["teacher_resolved"])
+        self.assertTrue(student_row["submission_media_locked"])
         self.assertNotIn("correction_note", student_row)
 
         parent_user = User.objects.create_user(
@@ -753,6 +755,7 @@ class MyGradesSummaryHomeworkTests(TestCase):
 
         self.assertEqual(parent_response.status_code, 200)
         self.assertTrue(parent_response.data["homeworks"][0]["teacher_resolved"])
+        self.assertTrue(parent_response.data["homeworks"][0]["submission_media_locked"])
         self.assertIsNone(parent_response.data["homeworks"][0]["score"])
         self.assertNotIn("correction_note", parent_response.data["homeworks"][0])
 
@@ -787,6 +790,87 @@ class MyGradesSummaryHomeworkTests(TestCase):
         self.assertIsNone(row["score"])
         self.assertIsNone(row["passed"])
         self.assertIsNone(row["achievement"])
+
+    def test_retake_pass_exposes_submission_media_lock_without_changing_initial_grade(self):
+        homework = Homework.objects.create(
+            tenant=self.tenant,
+            session=self.session,
+            title="재응시 통과 과제",
+            meta={"default_max_score": 20},
+        )
+        HomeworkAssignment.objects.create(
+            tenant=self.tenant,
+            homework=homework,
+            session=self.session,
+            enrollment=self.enrollment,
+        )
+        HomeworkScore.objects.create(
+            enrollment=self.enrollment,
+            session=self.session,
+            homework=homework,
+            attempt_index=1,
+            score=8,
+            max_score=20,
+            passed=False,
+        )
+        HomeworkScore.objects.create(
+            enrollment=self.enrollment,
+            session=self.session,
+            homework=homework,
+            attempt_index=2,
+            score=18,
+            max_score=20,
+            passed=True,
+        )
+
+        response = self._call()
+
+        self.assertEqual(response.status_code, 200, response.data)
+        row = response.data["homeworks"][0]
+        self.assertFalse(row["passed"])
+        self.assertEqual(row["achievement"], "FAIL")
+        self.assertEqual(row["retake_count"], 2)
+        self.assertTrue(row["submission_media_locked"])
+
+    def test_latest_retake_failure_keeps_media_unlocked_after_initial_pass(self):
+        homework = Homework.objects.create(
+            tenant=self.tenant,
+            session=self.session,
+            title="재응시 보완 과제",
+            meta={"default_max_score": 20},
+        )
+        HomeworkAssignment.objects.create(
+            tenant=self.tenant,
+            homework=homework,
+            session=self.session,
+            enrollment=self.enrollment,
+        )
+        HomeworkScore.objects.create(
+            enrollment=self.enrollment,
+            session=self.session,
+            homework=homework,
+            attempt_index=1,
+            score=18,
+            max_score=20,
+            passed=True,
+        )
+        HomeworkScore.objects.create(
+            enrollment=self.enrollment,
+            session=self.session,
+            homework=homework,
+            attempt_index=2,
+            score=8,
+            max_score=20,
+            passed=False,
+        )
+
+        response = self._call()
+
+        self.assertEqual(response.status_code, 200, response.data)
+        row = response.data["homeworks"][0]
+        self.assertTrue(row["passed"])
+        self.assertEqual(row["retake_count"], 2)
+        self.assertFalse(row["submission_media_locked"])
 
     def test_homeworks_are_session_ordered_and_expose_regular_supplement_scope(self):
         supplement_session = Session.objects.create(

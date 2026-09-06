@@ -114,6 +114,53 @@ def _homework_session_metadata(session: Any) -> dict[str, Any]:
     }
 
 
+def _homework_submission_media_lock_keys(
+    *,
+    tenant: Any,
+    enrollment_ids: list[int],
+    homework_ids: list[int],
+) -> set[tuple[int, int]]:
+    """Bulk-project the same latest-result lock enforced by the media API."""
+    if not enrollment_ids or not homework_ids:
+        return set()
+
+    latest_scores: dict[tuple[int, int], bool] = {}
+    for score in (
+        HomeworkScore.objects.filter(
+            enrollment_id__in=enrollment_ids,
+            enrollment__tenant=tenant,
+            homework_id__in=homework_ids,
+            homework__tenant=tenant,
+        )
+        .only("enrollment_id", "homework_id", "passed", "attempt_index", "updated_at")
+        .order_by(
+            "enrollment_id",
+            "homework_id",
+            "-attempt_index",
+            "-updated_at",
+            "-id",
+        )
+    ):
+        latest_scores.setdefault(
+            (int(score.enrollment_id), int(score.homework_id)),
+            bool(score.passed),
+        )
+
+    locked = {key for key, passed in latest_scores.items() if passed}
+    locked.update(
+        (int(enrollment_id), int(homework_id))
+        for enrollment_id, homework_id in AssessmentCorrection.objects.filter(
+            tenant=tenant,
+            enrollment_id__in=enrollment_ids,
+            source_type=AssessmentCorrection.SourceType.HOMEWORK,
+            source_id__in=homework_ids,
+            completed=True,
+        ).values_list("enrollment_id", "source_id")
+        if (int(enrollment_id), int(homework_id)) not in latest_scores
+    )
+    return locked
+
+
 def _homework_history_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
     session_order = row.get("session_order")
     return (
@@ -326,6 +373,11 @@ def build_student_grades_summary(*, tenant: Any, student: Any) -> dict[str, Any]
     homework_ids = list(
         {score.homework_id for score in homework_scores} | assigned_homework_ids
     )
+    submission_media_lock_keys = _homework_submission_media_lock_keys(
+        tenant=tenant,
+        enrollment_ids=enrollment_ids,
+        homework_ids=homework_ids,
+    )
     resolved_homework_links = {}
     if homework_ids and enrollment_ids:
         for link in ClinicLink.objects.filter(
@@ -400,6 +452,10 @@ def build_student_grades_summary(*, tenant: Any, student: Any) -> dict[str, Any]
             "passed": is_pass_1st,
             "achievement": achievement,
             "teacher_resolved": resolution == "MANUAL_OVERRIDE",
+            "submission_media_locked": (
+                score.enrollment_id,
+                score.homework_id,
+            ) in submission_media_lock_keys,
             "retake_count": max_attempt,
             "grading_mode": score.homework.grading_mode,
             "display_order": score.homework.display_order,
@@ -451,6 +507,10 @@ def build_student_grades_summary(*, tenant: Any, student: Any) -> dict[str, Any]
                 else None if was_submitted else "NOT_SUBMITTED"
             ),
             "teacher_resolved": teacher_resolved,
+            "submission_media_locked": (
+                assignment.enrollment_id,
+                assignment.homework_id,
+            ) in submission_media_lock_keys,
             "retake_count": 0,
             "grading_mode": homework.grading_mode,
             "display_order": homework.display_order,
