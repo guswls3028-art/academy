@@ -46,9 +46,10 @@ EOF
 # CVE-2026-85091: the upstream post-1.3.2 commit fixes gz_vacate bounds
 # handling. The source declares 1.3.2.1-motley. Debian's +really convention
 # keeps that actual snapshot visible while sorting this fixed package after the
-# scanner's 1.3.3 boundary. Keep the zlib source and zlib1g binary identities
-# scanner-visible, and retain the libz ABI for Python and Debian consumers.
-# contrib/MiniZip, the component affected by CVE-2023-45853, is not packaged.
+# scanner's 1.3.3 boundary. The binary package and libz ABI stay compatible for
+# Python and Debian consumers. Name the source academy-zlib-core because this
+# package contains only the core shared library, not contrib/MiniZip. ECR maps
+# Source: zlib to MiniZip-only CVE-2023-45853 even when that component is absent.
 zlib_version='1:1.3.3+really1.3.2.1+academy.git20260904.e3dc0a8-1'
 zlib_archive="${work_root}/zlib.tar.gz"
 download \
@@ -80,7 +81,7 @@ test -z "$(find "${zlib_package}" \
 write_control \
     "${zlib_package}" \
     'zlib1g' \
-    'zlib' \
+    'academy-zlib-core' \
     "${zlib_version}" \
     'required' \
     'Pre-Depends: libc6 (>= 2.34)' \

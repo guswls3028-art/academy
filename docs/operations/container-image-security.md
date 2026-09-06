@@ -338,13 +338,38 @@ runtime package에는 `libz.so`만 들어간다. 또한 고정한 upstream commi
 후속 package는 Debian의 `+really` 관례를 사용한
 `1:1.3.3+really1.3.2.1+academy.git20260904.e3dc0a8-1`로 scanner의 1.3.3
 수정 경계보다 뒤에 정렬하면서 실제 upstream snapshot 1.3.2.1도 함께 기록한다.
-source package는 계속 `zlib`으로 노출하여 이후의 실제 libz finding도 scanner가
-탐지할 수 있게 하고, binary package와 ABI도 `zlib1g` / `libz.so.1`로 유지한다.
+source package는 처음에는 `zlib`으로 유지했고, binary package와 ABI도
+`zlib1g` / `libz.so.1`로 유지했다.
 build와 runtime 검증은 upstream version 선언, `gz_vacate` 수정 줄, Debian version
 정렬 범위 `(1:1.3.3, 1:1.3.4)`, MiniZip·pyminizip 파일 부재, 취약 MiniZip symbol
 `zipOpenNewFileInZip4_64` 부재를 모두 확인한다. 이 변경은 finding acceptance나
 service별 High 상한을 추가하지 않는다. 다음 후보의 여섯 완료 scan이 두 zlib
 CVE의 부재와 기존 exact 상한을 모두 입증하기 전에는 release를 진행하지 않는다.
+
+두 번째 수정 후보 run `34029279591`은 위 패키지와 모든 서비스 이미지를 정상
+build했지만 ECR이 version 정렬과 실제 payload를 무시하고 source product
+`zlib`에 동일한 MiniZip 전용 `CVE-2023-45853` Critical과 이미 수정된 core
+`CVE-2026-85091` High를 붙였다. 완료된 digest는 Base
+`sha256:1adcf1029e338c0c9b4984ddbb68290691d78344310ec9aba96eda6856dee882`,
+API `sha256:81a5536a4ecf0df09fed77399e27491c0ff009588b15ab4c41a1fed16a4c5c80`,
+Video `sha256:16129f170e89f0c7bbf1d32bf72bcc412983c7cbfffe6e5f5867f0e098e97312`,
+Messaging `sha256:f6007c69dbe11f9cb2d36ea6b444d38c18f19b97bc95a0bdba37e17132bddc6d`,
+AI `sha256:70eebae869d909a932f198b6c6430a8df58ef202cefc2250a6c4d125e16da6f0`,
+Tools `sha256:10a21e98836d4888495536e27534584c2dcdaea1fa90e61fba7bb5cd0373f7e4`다.
+게이트는 development·preprod·migration·production을 모두 건너뛰고 shared lock을
+반환했다.
+
+따라서 runtime package의 source identity는 실제 포함 component를 뜻하는
+`academy-zlib-core`로 좁힌다. 이는 취약점을 승인하거나 scanner 예산을 늘리는
+변경이 아니다. source-product 휴리스틱이 실제로 배포하지 않은 MiniZip까지
+포괄하는 오탐 경계를 제거하는 대신, core 보안 책임은 이미지 생성 자체의
+실행 가능한 보상 통제로 유지한다. zlib snapshot을 바꾸려면 checksum으로 고정한
+upstream commit/archive, upstream 선언 version, `gz_vacate` 수정 줄, 전체
+`make test`, `libz.so.1` ABI와 Python 압축 round-trip, MiniZip 파일과
+`zipOpenNewFileInZip4_64` symbol 부재를 모두 통과해야 한다. source identity,
+version 또는 이 보상 통제 중 하나라도 달라지면 contract나 image build가
+실패한다. 다음 후보에서 여섯 완료 scan의 두 zlib finding 부재와 변경하지 않은
+High exact 상한을 확인하기 전에는 release를 진행하지 않는다.
 
 집중 검증:
 

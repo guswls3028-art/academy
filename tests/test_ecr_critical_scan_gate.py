@@ -381,26 +381,36 @@ def test_base_image_backports_new_native_library_fixes_without_acceptance() -> N
         assert runtime_contract in verifier
 
 
-def test_zlib_package_remains_scanner_visible_but_excludes_minizip() -> None:
+def test_zlib_core_package_has_truthful_component_identity_and_compensating_gates() -> None:
+    repository = Path(__file__).parents[1]
     build_script = (
-        Path(__file__).parents[1]
-        / "docker"
-        / "native-security"
-        / "build-fixed-libs.sh"
+        repository / "docker" / "native-security" / "build-fixed-libs.sh"
     ).read_text(encoding="utf-8")
+    verifier = (
+        repository / "docker" / "native-security" / "verify-fixed-libs.sh"
+    ).read_text(encoding="utf-8")
+    dockerfile = (repository / "docker" / "Dockerfile.base").read_text(
+        encoding="utf-8"
+    )
 
     assert (
         "zlib_version='1:1.3.3+really1.3.2.1+academy.git20260904.e3dc0a8-1'"
         in build_script
     )
-    assert "'zlib'" in build_script
-    assert "'academy-zlib-core'" not in build_script
+    assert "'academy-zlib-core'" in build_script
+    assert "academy-zlib-core" in verifier
+    assert "academy-zlib-core" in dockerfile
+    assert "e3dc0a85b7032e98380dec011bc8f2c2ee0d8fca.tar.gz" in build_script
+    assert "33356dac6140d584347fe46bcf7083bd949dec49ac4b52417ae334ec70e3dbc3" in build_script
     assert '#define ZLIB_VERSION "1.3.2.1-motley"' in build_script
     assert "strm->next_in == NULL" in build_script
+    assert "make test" in build_script
     assert "find \"${zlib_package}\"" in build_script
     assert "-iname '*minizip*'" in build_script
     assert "-iname '*pyminizip*'" in build_script
     assert "zipOpenNewFileInZip4_64" in build_script
+    assert "zipOpenNewFileInZip4_64" in verifier
+    assert "zlib.decompress(zlib.compress" in verifier
 
 
 def test_tesseract_runtimes_pin_security_fixed_libcurl() -> None:
