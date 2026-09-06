@@ -451,6 +451,27 @@ class ScoreDraftEditLeaseTests(TestCase):
                     session_id=self.session.id,
                 )
 
+    def test_active_changed_draft_is_recoverable_only_by_same_account_new_device(self):
+        desktop_change = {
+            "type": "examTotal",
+            "examId": 11,
+            "enrollmentId": 21,
+            "score": 70,
+        }
+        self.assertEqual(
+            self._put(self.admin_a, "desktop", [desktop_change]).status_code,
+            200,
+        )
+
+        same_account = self._get(self.admin_a, "iphone")
+        other_account = self._get(self.admin_b, "iphone")
+
+        self.assertEqual(same_account.status_code, 200)
+        self.assertEqual(same_account.data["changes"], [desktop_change])
+        self.assertFalse(same_account.data["stale"])
+        self.assertEqual(other_account.status_code, 200)
+        self.assertEqual(other_account.data["changes"], [])
+
     def test_other_account_can_edit_disjoint_exam_cell_but_not_same_cell(self):
         change = {
             "type": "examTotal",

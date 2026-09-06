@@ -173,6 +173,29 @@ class ScoreDraftView(APIView):
                 editor_user_id=request.user.id,
                 client_id="",
             ).first()
+        same_user_active_recovery = False
+        if draft is None:
+            # A teacher may reopen the same score screen on another device
+            # while the first device still owns an active draft. Return only
+            # that same account's latest changed draft so the existing UI can
+            # ask before explicitly taking it over. Empty presence leases do
+            # not need recovery, and invalidated drafts stay fenced.
+            for candidate in (
+                active_drafts.filter(
+                    session_id=int(session_id),
+                    editor_user_id=request.user.id,
+                )
+                .exclude(client_id=client_id)
+                .order_by("-updated_at", "-id")
+            ):
+                if score_edit_payload_is_invalidated(candidate.payload):
+                    continue
+                _, candidate_changes = score_edit_payload_parts(candidate.payload)
+                if not candidate_changes:
+                    continue
+                draft = candidate
+                same_user_active_recovery = True
+                break
         if draft is None:
             # A closed/lost device cannot release its client-scoped draft.
             # Surface the latest expired draft to the same account so the
@@ -194,6 +217,7 @@ class ScoreDraftView(APIView):
         )
         if (
             draft is not None
+            and not same_user_active_recovery
             and not same_user_expired_recovery
             and not _is_current_editor(
                 draft,
