@@ -7,8 +7,6 @@ from typing import Iterable
 from django.db import transaction
 from django.utils import timezone
 
-from apps.domains.exams.models import Exam
-from apps.domains.enrollment.models import Enrollment
 from apps.domains.results.models import (
     ExamAttempt,
     ExamResult,
@@ -16,9 +14,13 @@ from apps.domains.results.models import (
     ResultFact,
     ResultItem,
 )
-from apps.domains.submissions.models import Submission
 from apps.support.omr.score_shape import get_exam_score_shape
 from apps.support.results.exam_policy_dependencies import effective_exam_pass_score
+from apps.support.results.omr_subjective_completion_dependencies import (
+    enrollments_by_id,
+    exams_by_id,
+    submissions_by_id,
+)
 
 
 @dataclass(frozen=True)
@@ -107,30 +109,44 @@ def omr_subjective_completion_states(
         for attempt in attempts.values()
         if attempt.submission_id
     }
-    submissions = Submission.objects.filter(id__in=submission_ids).in_bulk()
-    exam_ids = {
+    submissions = submissions_by_id(submission_ids)
+    omr_result_ids = {
+        int(result.id)
+        for result in result_rows
+        if (
+            (attempt := attempts.get(int(result.attempt_id or 0))) is not None
+            and (submission := submissions.get(int(attempt.submission_id or 0)))
+            is not None
+            and submission.source == "omr_scan"
+        )
+    }
+    omr_exam_ids = {
         int(result.target_id)
         for result in result_rows
-        if result.target_type == "exam"
+        if int(result.id) in omr_result_ids and result.target_type == "exam"
     }
-    exams = Exam.objects.filter(id__in=exam_ids).in_bulk()
-    enrollments = Enrollment.objects.filter(
-        id__in=[
-            int(result.enrollment_id)
-            for result in result_rows
-            if result.enrollment_id
-        ]
-    ).in_bulk()
+    exams = exams_by_id(omr_exam_ids)
+    omr_enrollment_ids = {
+        int(result.enrollment_id)
+        for result in result_rows
+        if int(result.id) in omr_result_ids and result.enrollment_id
+    }
+    enrollments = enrollments_by_id(omr_enrollment_ids)
 
     completed_by_result: dict[int, set[int]] = defaultdict(set)
     for result_id, question_id in ResultItem.objects.filter(
-        result_id__in=[int(result.id) for result in result_rows],
+        result_id__in=omr_result_ids,
     ).values_list("result_id", "question_id"):
         completed_by_result[int(result_id)].add(int(question_id))
 
+    omr_attempt_ids = {
+        int(result.attempt_id)
+        for result in result_rows
+        if int(result.id) in omr_result_ids and result.attempt_id
+    }
     aggregate_attempt_ids = set(
         ResultFact.objects.filter(
-            attempt_id__in=attempt_ids,
+            attempt_id__in=omr_attempt_ids,
             source="manual_subjective",
         ).values_list("attempt_id", flat=True)
     )
@@ -156,7 +172,7 @@ def omr_subjective_completion_states(
         enrollment = enrollments.get(int(result.enrollment_id or 0))
         is_omr = bool(
             submission is not None
-            and submission.source == Submission.Source.OMR_SCAN
+            and submission.source == "omr_scan"
         )
         scope_valid = bool(
             is_omr
@@ -164,7 +180,7 @@ def omr_subjective_completion_states(
             and attempt is not None
             and exam is not None
             and enrollment is not None
-            and submission.target_type == Submission.TargetType.EXAM
+            and submission.target_type == "exam"
             and int(submission.target_id) == int(result.target_id)
             and int(submission.enrollment_id or 0) == int(result.enrollment_id or 0)
             and int(attempt.exam_id) == int(result.target_id)

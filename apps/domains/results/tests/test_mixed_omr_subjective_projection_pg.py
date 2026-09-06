@@ -8,17 +8,6 @@ from django.test import TestCase
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps.core.models import Tenant, TenantMembership
-from apps.domains.enrollment.models import Enrollment, SessionEnrollment
-from apps.domains.exams.models import (
-    AnswerKey,
-    Exam,
-    ExamEnrollment,
-    ExamQuestion,
-    Sheet,
-)
-from apps.domains.lectures.models import Lecture, Session
-from apps.domains.progress.dispatcher import dispatch_progress_pipeline
-from apps.domains.progress.models import ClinicLink, ProgressPolicy
 from apps.domains.results.models import (
     ExamResult,
     Result,
@@ -44,8 +33,23 @@ from apps.domains.results.views.admin_exam_item_score_view import (
     AdminExamItemScoreView,
 )
 from apps.domains.results.views.session_scores_view import SessionScoresView
-from apps.domains.students.models import Student
-from apps.domains.submissions.models import Submission, SubmissionAnswer
+from apps.support.results.tests.omr_subjective_completion_fixtures import (
+    AnswerKey,
+    ClinicLink,
+    Enrollment,
+    Exam,
+    ExamEnrollment,
+    ExamQuestion,
+    Lecture,
+    ProgressPolicy,
+    Session,
+    SessionEnrollment,
+    Sheet,
+    Student,
+    Submission,
+    SubmissionAnswer,
+    dispatch_progress_pipeline,
+)
 
 
 User = get_user_model()
