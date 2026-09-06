@@ -446,7 +446,11 @@ COMPLETE_ALLOWED_STATUSES = {"attended"}
 `pending`, `booked`, `no_show`, `cancelled`, `rejected` 참가자는 완료 처리할 수 없다.
 `uncomplete`는 완료 시각만 취소하고 출석 상태는 유지한다. `checked_in_at`은 실제
 등원 시각, `is_late`는 지각 여부, `checked_out_at`은 실제 하원 시각이다. 하원은
-`attended + checked_in_at`에서만 한 번 허용하며 하원 후 상태 정정은 실패 폐쇄한다.
+`attended + checked_in_at`에서는 기존 요청으로 허용한다. 등원을 기록하지 못한
+`booked` 참가자는 `confirm_without_arrival=true`와 현재 `expected_session_id`,
+`expected_student_id`를 모두 확인한 경우에만 하원 시각을 기록하며 `status`나
+`checked_in_at`을 만들지 않는다. 반복 하원은 기존 결과를 멱등 반환하고, 하원 후 상태
+정정은 실패 폐쇄한다.
 `completed_at`/`completed_by`는 시험·과제 보충 및 자율학습 완료 이력이므로 출석
 정정이나 하원에서 지우거나 하원 시각으로 재사용하지 않는다.
 
@@ -457,19 +461,20 @@ COMPLETE_ALLOWED_STATUSES = {"attended"}
 - `booked → pending` (승인 취소 없음)
 - `booked → rejected` (승인된 예약 거절 없음)
 - `cancelled/rejected → *` (상태 전이 종단)
-- `booked/no_show → checkout` (등원 시각 없음)
-- `checked_out_at != null → 상태 정정/중복 checkout`
+- `booked → checkout`에서 확인 플래그 또는 현재 session/student 확인값 누락
+- `no_show → checkout`
+- `checked_out_at != null → 상태 정정` (중복 checkout은 기존 결과 멱등 반환)
 
 #### UI 허용 액션
 
-| 상태 | Admin | Student |
-|------|-------|---------|
-| pending | 승인(→booked), 거절(→rejected), 취소(→cancelled) | 취소(→cancelled) |
-| booked | 등원/지각 등원(→attended), 재촉, 결석 확인(→no_show), 하원 비활성 | (변경 불가, "확정" 표시) |
-| attended | 하원(`checked_out_at`), 자율학습 완료(`completed_at`)를 별도 처리 | (미노출) |
-| no_show | 등원/지각 등원 정정(→attended), 기존 일정 이동 또는 새 일정 생성 | (미노출) |
-| cancelled | 종단 | (미노출) |
-| rejected | 종단 | (미노출) |
+| 상태 | Admin | Teacher mobile | Student |
+|------|-------|----------------|---------|
+| pending | 승인(→booked), 거절(→rejected), 취소(→cancelled) | 승인(→booked), 거절(→rejected) | 취소(→cancelled) |
+| booked | 등원/지각 등원(→attended), 재촉, 결석 확인(→no_show), 확인 후 미등원 하원 | 등원, 재촉, 결석 확인, 확인 후 미등원 하원 | (변경 불가, "확정" 표시) |
+| attended | 하원(`checked_out_at`), 자율학습 완료/완료 취소(`completed_at`) | 하원, 자율학습 완료/완료 취소 | (미노출) |
+| no_show | 등원/지각 등원 정정(→attended), 기존 일정 이동 또는 새 일정 생성 | 지각 등원 정정, 기존 일정 이동 또는 새 일정 생성 | (미노출) |
+| cancelled | 종단 | 종단 | (미노출) |
+| rejected | 종단 | 종단 | (미노출) |
 
 #### 희망 시간과 메모 소유권
 
