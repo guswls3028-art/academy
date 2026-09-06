@@ -34,6 +34,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Set
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
 from rest_framework.exceptions import ValidationError
@@ -86,6 +87,11 @@ from apps.support.results.session_scores_dependencies import (
 )
 from apps.support.results.progress_read_dependencies import (
     session_score_enrollment_ids,
+)
+from apps.support.attendance.learning_todo_eligibility import (
+    attendance_status_is_learning_todo_eligible,
+    attendance_status_map,
+    enrollment_session_is_learning_todo_eligible,
 )
 
 
@@ -300,6 +306,17 @@ class SessionScoresView(APIView):
         )
 
         enrollment_ids = list(enrollment_qs.values_list("id", flat=True))
+        attendance_status_by_enrollment = attendance_status_map(
+            tenant=tenant,
+            session=session,
+            enrollment_ids=enrollment_ids,
+        )
+        todo_eligibility_by_enrollment = {
+            enrollment_id: attendance_status_is_learning_todo_eligible(
+                attendance_status_by_enrollment.get(enrollment_id)
+            )
+            for enrollment_id in enrollment_ids
+        }
         exam_absence_count_map = current_exam_absence_counts(
             tenant=tenant,
             enrollment_ids=enrollment_ids,
@@ -474,7 +491,11 @@ class SessionScoresView(APIView):
         }
         # 최종 완료 상태가 SSOT다. 과거/특례 등록으로 남은 미해소 ClinicLink가 있어도
         # SessionProgress.completed=True면 현재 클리닉 대상에서 제외한다.
-        clinic_ids: Set[int] = raw_clinic_ids - progress_completed_ids
+        clinic_ids: Set[int] = {
+            enrollment_id
+            for enrollment_id in raw_clinic_ids - progress_completed_ids
+            if todo_eligibility_by_enrollment.get(enrollment_id, True)
+        }
 
         clinic_highlight_map = compute_clinic_highlight_map(
             tenant=tenant,
@@ -732,12 +753,36 @@ class SessionScoresView(APIView):
             for row in hw_clinic_link_qs
         }
 
+        assessment_submission_keys: Set[tuple[int, str, int]] = set()
+        if enrollment_ids and (exam_ids or homework_ids):
+            assessment_scope = Q()
+            if exam_ids:
+                assessment_scope |= Q(
+                    target_type=Submission.TargetType.EXAM,
+                    target_id__in=exam_ids,
+                )
+            if homework_ids:
+                assessment_scope |= Q(
+                    target_type=Submission.TargetType.HOMEWORK,
+                    target_id__in=homework_ids,
+                )
+            assessment_submission_keys = {
+                (int(enrollment_id), str(target_type), int(target_id))
+                for enrollment_id, target_type, target_id in Submission.objects.filter(
+                    assessment_scope,
+                    tenant=tenant,
+                    enrollment_id__in=enrollment_ids,
+                ).values_list("enrollment_id", "target_type", "target_id")
+                if enrollment_id is not None
+            }
+
         # -------------------------------------------------
         # 9) Rows
         # -------------------------------------------------
         rows: List[Dict[str, Any]] = []
 
         for eid in enrollment_ids:
+            todo_eligible = todo_eligibility_by_enrollment.get(eid, True)
             progress_completed = eid in progress_completed_ids
             progress_status = "completed" if progress_completed else "in_progress"
             clinic_required = eid in clinic_ids
@@ -914,6 +959,21 @@ class SessionScoresView(APIView):
                     }
                 )
 
+            if not todo_eligible:
+                exams_payload = [
+                    exam_payload
+                    for exam_payload in exams_payload
+                    if (
+                        int(exam_payload.get("attempt_count") or 0) > 0
+                        or exam_payload["block"].get("score") is not None
+                        or exam_payload["block"].get("meta") is not None
+                        or (eid, "exam", int(exam_payload["exam_id"]))
+                        in assessment_submission_keys
+                        or (eid, "exam", int(exam_payload["exam_id"]))
+                        in correction_map
+                    )
+                ]
+
             homeworks_payload = []
             for hw in homeworks:
                 # 해당 과제에 미등록이면 스킵 (프론트에서 회색 비활성 셀)
@@ -969,6 +1029,21 @@ class SessionScoresView(APIView):
                         "clinic_link_id": hw_clinic_link_map.get((int(hw.id), eid)),
                     }
                 )
+
+            if not todo_eligible:
+                homeworks_payload = [
+                    homework_payload
+                    for homework_payload in homeworks_payload
+                    if (
+                        int(homework_payload.get("attempt_count") or 0) > 0
+                        or homework_payload["block"].get("score") is not None
+                        or homework_payload["block"].get("meta") is not None
+                        or (eid, "homework", int(homework_payload["homework_id"]))
+                        in assessment_submission_keys
+                        or (eid, "homework", int(homework_payload["homework_id"]))
+                        in correction_map
+                    )
+                ]
 
             hw_updated_ats = [
                 hs.updated_at
@@ -1027,6 +1102,8 @@ class SessionScoresView(APIView):
                     "enrollment_id": eid,
                     "student_id": student_id_map.get(eid),
                     "student_name": student_name_map.get(eid, "-"),
+                    "attendance_status": attendance_status_by_enrollment.get(eid),
+                    "assessment_todo_eligible": todo_eligible,
                     "exams": exams_payload,
                     "homeworks": homeworks_payload,
                     "updated_at": updated_at or timezone.now(),
@@ -1075,6 +1152,14 @@ class SessionScoreCorrectionView(APIView):
         ):
             raise ValidationError(
                 {"enrollment_id": "이 차시 성적표에 포함된 학생이 아닙니다."}
+            )
+        if not enrollment_session_is_learning_todo_eligible(
+            tenant_id=int(tenant.id),
+            enrollment_id=enrollment_id,
+            session_id=int(session.id),
+        ):
+            raise ValidationError(
+                {"enrollment_id": "실제 결석 차시의 학습 판정은 변경할 수 없습니다."}
             )
 
         source_type = str(payload["source_type"])

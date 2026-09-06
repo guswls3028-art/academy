@@ -39,6 +39,19 @@ def validate_exam_enrollment_assigned(exam, enrollment_id: int) -> None:
     if exam.exam_type == exam.ExamType.TEMPLATE:
         raise ValidationError({"detail": "템플릿 시험에는 점수를 입력할 수 없습니다."})
 
+    from apps.support.attendance.learning_todo_eligibility import (
+        exam_is_learning_todo_eligible,
+    )
+
+    if not exam_is_learning_todo_eligible(
+        tenant_id=int(exam.tenant_id),
+        enrollment_id=int(enrollment_id),
+        exam_id=int(exam.id),
+    ):
+        raise ValidationError(
+            {"enrollment_id": "실제 결석 차시의 학생에게는 점수를 입력할 수 없습니다."}
+        )
+
     if exam_enrollment_exists(
         exam_id=exam.id,
         enrollment_id=enrollment_id,

@@ -28,6 +28,9 @@ from apps.support.results.student_grade_history import (
 from apps.support.results.admin_student_grades_dependencies import (
     submitted_homework_keys_for_grades,
 )
+from apps.support.attendance.learning_todo_eligibility import (
+    learning_todo_eligible_pairs,
+)
 
 
 def get_student_exam_result_data(request: Any, exam_id: int, *, tenant: Any):
@@ -417,6 +420,13 @@ def build_student_grades_summary(*, tenant: Any, student: Any) -> dict[str, Any]
             enrollment_ids=enrollment_ids,
             homework_ids=list(assigned_homework_ids),
         )
+    eligible_assignment_pairs = learning_todo_eligible_pairs(
+        tenant=tenant,
+        enrollment_session_pairs={
+            (int(assignment.enrollment_id), int(assignment.session_id))
+            for assignment in assigned_homeworks
+        },
+    )
     for assignment in assigned_homeworks:
         homework = assignment.homework
         session = assignment.session
@@ -436,6 +446,15 @@ def build_student_grades_summary(*, tenant: Any, student: Any) -> dict[str, Any]
             assignment.homework_id,
         ))
         teacher_resolved = resolution == "MANUAL_OVERRIDE"
+        if (
+            (int(assignment.enrollment_id), int(assignment.session_id))
+            not in eligible_assignment_pairs
+            and not was_submitted
+            and (assignment.enrollment_id, assignment.homework_id)
+            not in homework_retake_counts
+            and not teacher_resolved
+        ):
+            continue
         session_metadata = _homework_session_metadata(session)
 
         homework_list.append({

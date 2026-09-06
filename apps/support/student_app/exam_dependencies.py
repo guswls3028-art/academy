@@ -29,8 +29,14 @@ def _missing_exam_enrollment(reason: str) -> tuple[None, None]:
 
 
 def student_exam_queryset(student, tenant, *, include_upcoming_days: int = 0):
+    from django.db.models import Exists, OuterRef
+
+    from apps.domains.attendance.models import Attendance
     from apps.domains.enrollment.selectors import active_enrollment_ids_for_student
+    from apps.domains.enrollment.models import SessionEnrollment
     from apps.domains.exams.models import Exam
+    from apps.domains.results.models import ExamAttempt, Result
+    from apps.domains.submissions.models import Submission
 
     now = timezone.now()
     latest_open_at = now
@@ -39,6 +45,52 @@ def student_exam_queryset(student, tenant, *, include_upcoming_days: int = 0):
     enrollment_ids = active_enrollment_ids_for_student(tenant=tenant, student=student)
     if not enrollment_ids:
         return Exam.objects.none()
+    absent_session_ids = Attendance.objects.filter(
+        tenant=tenant,
+        enrollment_id__in=enrollment_ids,
+        status="ABSENT",
+    ).values("session_id")
+    eligible_session = (
+        SessionEnrollment.objects.filter(
+            tenant=tenant,
+            enrollment_id__in=enrollment_ids,
+            enrollment__tenant=tenant,
+            enrollment__status="ACTIVE",
+            enrollment__student__deleted_at__isnull=True,
+            enrollment__lecture_id=F("session__lecture_id"),
+            session__lecture__tenant=tenant,
+            session__exams__id=OuterRef("pk"),
+        )
+        .exclude(session_id__in=absent_session_ids)
+    )
+    historical_result = Result.objects.filter(
+        target_type="exam",
+        target_id=OuterRef("pk"),
+        enrollment_id__in=enrollment_ids,
+        enrollment__tenant=tenant,
+    )
+    historical_attempt = ExamAttempt.objects.filter(
+        exam_id=OuterRef("pk"),
+        enrollment_id__in=enrollment_ids,
+        enrollment__tenant=tenant,
+    )
+    historical_submission = Submission.objects.filter(
+        tenant=tenant,
+        target_type=Submission.TargetType.EXAM,
+        target_id=OuterRef("pk"),
+        enrollment_id__in=enrollment_ids,
+    )
+    absent_linked_attendance = Attendance.objects.filter(
+        tenant=tenant,
+        enrollment_id__in=enrollment_ids,
+        enrollment__tenant=tenant,
+        enrollment__status="ACTIVE",
+        enrollment__student__deleted_at__isnull=True,
+        enrollment__lecture_id=F("session__lecture_id"),
+        session__lecture__tenant=tenant,
+        session__exams__id=OuterRef("pk"),
+        status="ABSENT",
+    )
     return (
         Exam.objects.filter(
             exam_type=Exam.ExamType.REGULAR,
@@ -51,6 +103,20 @@ def student_exam_queryset(student, tenant, *, include_upcoming_days: int = 0):
         .filter(
             Q(open_at__isnull=True) | Q(open_at__lte=latest_open_at),
             Q(close_at__isnull=True) | Q(close_at__gte=now),
+        )
+        .annotate(
+            learning_todo_eligible=Exists(eligible_session),
+            has_historical_result=Exists(historical_result),
+            has_historical_attempt=Exists(historical_attempt),
+            has_historical_submission=Exists(historical_submission),
+            has_absent_linked_attendance=Exists(absent_linked_attendance),
+        )
+        .filter(
+            Q(learning_todo_eligible=True)
+            | Q(has_absent_linked_attendance=False)
+            | Q(has_historical_result=True)
+            | Q(has_historical_attempt=True)
+            | Q(has_historical_submission=True)
         )
         .distinct()
         .order_by("open_at", "id")
@@ -180,7 +246,7 @@ def get_enrollment_for_student_exam(student, exam_id, tenant=None):
         return _missing_exam_enrollment("tenant is required")
     if getattr(student, "tenant_id", None) != tenant.id:
         return _missing_exam_enrollment("student tenant mismatch")
-    exam_enrollment = (
+    exam_enrollments = (
         ExamEnrollment.objects.filter(
             exam_id=int(exam_id),
             enrollment__student=student,
@@ -192,11 +258,24 @@ def get_enrollment_for_student_exam(student, exam_id, tenant=None):
         )
         .select_related("enrollment", "enrollment__tenant")
         .order_by("id")
-        .first()
     )
-    if not exam_enrollment or not exam_enrollment.enrollment:
-        return _missing_exam_enrollment("active exam enrollment not found")
-    return exam_enrollment.enrollment, getattr(exam_enrollment.enrollment, "tenant", None)
+    from apps.support.attendance.learning_todo_eligibility import (
+        exam_is_learning_todo_eligible,
+    )
+
+    for exam_enrollment in exam_enrollments:
+        if not exam_enrollment.enrollment:
+            continue
+        if exam_is_learning_todo_eligible(
+            tenant_id=int(tenant.id),
+            enrollment_id=int(exam_enrollment.enrollment_id),
+            exam_id=int(exam_id),
+        ):
+            return (
+                exam_enrollment.enrollment,
+                getattr(exam_enrollment.enrollment, "tenant", None),
+            )
+    return _missing_exam_enrollment("eligible active exam enrollment not found")
 
 
 def create_online_exam_submission(

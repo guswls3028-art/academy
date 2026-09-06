@@ -59,33 +59,39 @@ def active_session_enrollments_for_session(**kwargs):
 
 
 def session_roster_rows_for_exam_assignment(*, tenant, session_ids: list[int]):
-    from django.db.models import F
-    from apps.domains.enrollment.models import SessionEnrollment
-
-    return list(
-        SessionEnrollment.objects.filter(
-            tenant=tenant,
-            session_id__in=session_ids,
-            enrollment__tenant=tenant,
-            enrollment__lecture_id=F("session__lecture_id"),
-            enrollment__status="ACTIVE",
-            enrollment__student__deleted_at__isnull=True,
-        ).values("session_id", "enrollment_id")
+    from apps.domains.lectures.models import Session
+    from apps.support.attendance.learning_todo_eligibility import (
+        eligible_learning_todo_enrollment_ids,
     )
+
+    rows = []
+    for session in Session.objects.filter(
+        id__in=session_ids,
+        lecture__tenant=tenant,
+    ).select_related("lecture"):
+        rows.extend(
+            {
+                "session_id": int(session.id),
+                "enrollment_id": int(enrollment_id),
+            }
+            for enrollment_id in eligible_learning_todo_enrollment_ids(
+                tenant=tenant,
+                session=session,
+            )
+        )
+    return rows
 
 
 def active_enrollment_ids_for_exam_assignment(*, tenant, session):
-    from apps.domains.enrollment.models import SessionEnrollment
+    from apps.support.attendance.learning_todo_eligibility import (
+        eligible_learning_todo_enrollment_ids,
+    )
 
-    return list(
-        SessionEnrollment.objects.filter(
+    return sorted(
+        eligible_learning_todo_enrollment_ids(
             tenant=tenant,
             session=session,
-            enrollment__tenant=tenant,
-            enrollment__lecture=session.lecture,
-            enrollment__status="ACTIVE",
-            enrollment__student__deleted_at__isnull=True,
-        ).values_list("enrollment_id", flat=True)
+        )
     )
 
 
@@ -179,13 +185,15 @@ def create_regular_homework_from_template(*, tenant, title: str, homework_templa
 
 
 def active_session_enrollment_ids(session) -> list[int]:
-    from apps.domains.enrollment.models import SessionEnrollment
+    from apps.support.attendance.learning_todo_eligibility import (
+        eligible_learning_todo_enrollment_ids,
+    )
 
-    return list(
-        SessionEnrollment.objects.filter(
+    return sorted(
+        eligible_learning_todo_enrollment_ids(
+            tenant=session.lecture.tenant,
             session=session,
-            enrollment__status="ACTIVE",
-        ).values_list("enrollment_id", flat=True)
+        )
     )
 
 
