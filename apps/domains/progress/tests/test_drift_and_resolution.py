@@ -274,8 +274,8 @@ class DriftResolutionTest(TestCase, ClinicTestMixin):
         self.assertFalse(b_row.get("passed"))
         self.assertTrue(sp.exam_meta.get("missing_results"))
 
-    def test_missing_result_does_not_create_auto_clinic_link(self):
-        """미채점/미응시 시험은 세션 완료를 막지만 자동 클리닉 실패로 보지 않는다."""
+    def test_missing_result_creates_actionable_auto_clinic_link(self):
+        """미채점/미응시 시험도 현재 학습 todo이면 검토 가능한 클리닉 대상이다."""
         from apps.domains.results.models import Result
         from apps.domains.progress.services.session_calculator import (
             SessionProgressCalculator,
@@ -310,15 +310,14 @@ class DriftResolutionTest(TestCase, ClinicTestMixin):
         self.assertTrue(sp.exam_meta.get("missing_results"))
         ClinicTriggerService.auto_create_if_failed(sp)
 
-        self.assertFalse(
-            ClinicLink.objects.filter(
-                enrollment=self.enrollment,
-                session=self.lec_session,
-                source_type="exam",
-                source_id=exam_b.id,
-            ).exists(),
-            "Result 없는 시험은 자동 클리닉 대상으로 생성하면 안 됨",
+        missing_link = ClinicLink.objects.get(
+            enrollment=self.enrollment,
+            session=self.lec_session,
+            source_type="exam",
+            source_id=exam_b.id,
         )
+        self.assertEqual(missing_link.meta.get("kind"), "EXAM_MISSING")
+        self.assertIsNone(missing_link.meta.get("score"))
 
     def test_scored_failed_exam_still_creates_auto_clinic_link(self):
         """실제 점수가 있는 불합격 시험은 기존처럼 자동 클리닉 대상이 된다."""
