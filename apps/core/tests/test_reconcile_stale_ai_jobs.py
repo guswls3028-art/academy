@@ -107,7 +107,13 @@ class ReconcileStaleAIJobsTests(TestCase):
             include_processing_source=True,
         )
 
-        with patch("apps.domains.matchup.services.retry_document") as retry_document:
+        with (
+            patch("apps.domains.matchup.services.retry_document") as retry_document,
+            patch(
+                "apps.core.management.commands.reconcile_stale_ai_jobs."
+                "cache_terminal_job_status"
+            ) as cache_terminal_status,
+        ):
             with self.captureOnCommitCallbacks(execute=True):
                 updated = reconcile_candidates(candidates, execute=True)
 
@@ -122,6 +128,7 @@ class ReconcileStaleAIJobsTests(TestCase):
         retried_doc = retry_document.call_args.args[0]
         self.assertEqual(retried_doc.id, doc.id)
         self.assertEqual(retry_document.call_args.kwargs, {"require_failed": True})
+        self.assertEqual(cache_terminal_status.call_args.args[0].status, "FAILED")
 
     def test_dry_run_emits_exact_snapshot_and_execute_requires_it(self):
         expired_at = timezone.now() - timedelta(hours=3)

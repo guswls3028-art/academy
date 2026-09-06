@@ -727,7 +727,8 @@ tenant/status/current job snapshot이 전부 동일할 때만 전이한다. 사�
 `manual_review`로만 출력하며 실행하지 않는다. `--execute`만으로 bulk 정합화할 수 없고,
 명령은 SQS 메시지, 운영 source 파일이나 결과 payload를 삭제하지 않는다. processing
 source의 재시도는 별도 `--include-processing-source`를 명시하고 같은 exact-target
-규칙을 따른다.
+규칙을 따른다. 실제 전이가 commit된 뒤에는 일반 worker와 같은 공용 Redis cache 경계로
+저장된 종단 status/error/result를 게시한다.
 
 집중 검증은 실제 PostgreSQL에서 수행한다.
 

@@ -10,6 +10,7 @@ from django.db import transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+from academy.adapters.db.django.repositories_ai import cache_terminal_job_status
 from apps.domains.ai.models import AIJobModel, AIResultModel
 from apps.domains.matchup.models import MatchupDocument
 
@@ -222,6 +223,18 @@ def reconcile_candidates(candidates: Iterable[ReconcileCandidate], *, execute: b
                         },
                     },
                 )
+            result_payload = None
+            if candidate.action == "mark_done_from_terminal_source":
+                result_payload = AIResultModel.objects.filter(job=job).values_list(
+                    "payload",
+                    flat=True,
+                ).first()
+            transaction.on_commit(
+                lambda job=job, result_payload=result_payload: cache_terminal_job_status(
+                    job,
+                    result_payload=result_payload,
+                )
+            )
             if candidate.action == "retry_processing_source" and str(job.source_id or "").isdigit():
                 doc = MatchupDocument.objects.select_for_update().filter(
                     id=int(str(job.source_id)),

@@ -42,6 +42,24 @@ def _public_job_result(
     )
 
 
+def cache_terminal_job_status(job, *, result_payload: Optional[dict] = None) -> None:
+    """Publish the committed DB terminal state through the shared Redis facade."""
+    try:
+        from apps.domains.ai.redis_status_cache import cache_job_status
+
+        cache_job_status(
+            tenant_id=str(job.tenant_id or ""),
+            job_id=job.job_id,
+            status=job.status,
+            job_type=job.job_type,
+            error_message=job.error_message or None,
+            result=_public_job_result(job.job_type, result_payload),
+            ttl=None,
+        )
+    except Exception as e:
+        logger.warning("Failed to cache terminal AI job in Redis: %s", e)
+
+
 def _scrub_terminal_job_payload(job) -> bool:
     if job.job_type == "excel_parsing":
         from apps.domains.ai.services.excel_job_secrets import scrub_excel_job_payload
@@ -310,7 +328,7 @@ class DjangoAIJobRepository:
                 )
                 stored_result = result.payload
             transaction.on_commit(
-                lambda: self._cache_terminal_status(job, result_payload=stored_result)
+                lambda: cache_terminal_job_status(job, result_payload=stored_result)
             )
             return True
 
@@ -353,7 +371,7 @@ class DjangoAIJobRepository:
                 flat=True,
             ).first()
         transaction.on_commit(
-            lambda: self._cache_terminal_status(job, result_payload=stored_result)
+            lambda: cache_terminal_job_status(job, result_payload=stored_result)
         )
         return True
 
@@ -417,7 +435,7 @@ class DjangoAIJobRepository:
             job.locked_at = None
             job.lease_expires_at = None
             job.completed_at = now
-            transaction.on_commit(lambda: self._cache_terminal_status(job))
+            transaction.on_commit(lambda: cache_terminal_job_status(job))
             return True
 
     def _recover_failed_job(self, job, *, now: datetime) -> bool:
@@ -437,26 +455,8 @@ class DjangoAIJobRepository:
         if updates:
             updates["updated_at"] = now
             AIJobModel.objects.filter(pk=job.pk, status=job.status).update(**updates)
-        transaction.on_commit(lambda: self._cache_terminal_status(job))
+        transaction.on_commit(lambda: cache_terminal_job_status(job))
         return True
-
-    @staticmethod
-    def _cache_terminal_status(job, *, result_payload: Optional[dict] = None) -> None:
-        # Redis는 DB commit 뒤에만 갱신한다. 랜덤 비밀번호는 공개 결과 변환에서
-        # 제거하며, status/error는 DB에 저장된 종단 결과를 그대로 사용한다.
-        try:
-            from apps.domains.ai.redis_status_cache import cache_job_status
-            cache_job_status(
-                tenant_id=str(job.tenant_id or ""),
-                job_id=job.job_id,
-                status=job.status,
-                job_type=job.job_type,
-                error_message=job.error_message or None,
-                result=_public_job_result(job.job_type, result_payload),
-                ttl=None,
-            )
-        except Exception as e:
-            logger.warning("Failed to cache terminal AI job in Redis: %s", e)
 
     def get_job_model_for_status(self, job_id: str, tenant_id: str, job_type: Optional[str] = None):
         """API 상태 조회용: tenant 일치 시 모델 인스턴스 반환 (adapters 내부에서만 .objects. 사용). job_type 지정 시 해당 타입만."""
