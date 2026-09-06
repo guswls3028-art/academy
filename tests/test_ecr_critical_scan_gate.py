@@ -355,7 +355,10 @@ def test_base_image_backports_new_native_library_fixes_without_acceptance() -> N
     for build_tool in ("autoconf", "automake", "libtool"):
         assert f"    {build_tool} \\" in dockerfile
     for package, minimum in (
-        ("zlib1g", "1:1.3.3+really1.3.2.1+academy.git20260904.e3dc0a8-1"),
+        (
+            "zlib1g",
+            "1:1.3.dfsg+really1.3.2.1+academy.git20260904.e3dc0a8-1",
+        ),
         ("libpcre2-8-0", "10.48-2~academy1"),
         ("libxml2", "2.15.4+really2.9.14-2.1+deb13u3+academy1"),
     ):
@@ -371,8 +374,14 @@ def test_base_image_backports_new_native_library_fixes_without_acceptance() -> N
     assert "autoreconf --force --install" in build_script
     assert build_script.count("sha256sum --check") == 1
     assert build_script.count("download \\") == 5
-    assert 'dpkg --compare-versions "${zlib_version}" gt "1:1.3.3"' in verifier
-    assert 'dpkg --compare-versions "${zlib_version}" lt "1:1.3.4"' in verifier
+    assert (
+        'dpkg --compare-versions "${zlib_version}" '
+        'gt "1:1.3.dfsg+really1.3.1-1"'
+    ) in verifier
+    assert (
+        'dpkg --compare-versions "${zlib_version}" '
+        'lt "1:1.3.dfsg+really1.3.3"'
+    ) in verifier
     for runtime_contract in (
         "dpkg -L zlib1g | grep -Ei '(py)?minizip'",
         "zipOpenNewFileInZip4_64",
@@ -390,9 +399,10 @@ def test_zlib_package_remains_scanner_visible_but_excludes_minizip() -> None:
     ).read_text(encoding="utf-8")
 
     assert (
-        "zlib_version='1:1.3.3+really1.3.2.1+academy.git20260904.e3dc0a8-1'"
+        "zlib_version='1:1.3.dfsg+really1.3.2.1+academy.git20260904.e3dc0a8-1'"
         in build_script
     )
+    assert "zlib_version='1:1.3.3+really" not in build_script
     assert "'zlib'" in build_script
     assert "'academy-zlib-core'" not in build_script
     assert '#define ZLIB_VERSION "1.3.2.1-motley"' in build_script

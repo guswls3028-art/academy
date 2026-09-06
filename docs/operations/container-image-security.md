@@ -346,6 +346,26 @@ build와 runtime 검증은 upstream version 선언, `gz_vacate` 수정 줄, Debi
 service별 High 상한을 추가하지 않는다. 다음 후보의 여섯 완료 scan이 두 zlib
 CVE의 부재와 기존 exact 상한을 모두 입증하기 전에는 release를 진행하지 않는다.
 
+후속 run `34029279591`도 모든 service image를 build했지만 ECR이 semver 형태의
+custom version을 upstream MiniZip package처럼 분류하여 같은 Critical finding을
+다시 반환했다. development, preprod, production은 모두 실행되지 않았고 shared
+lock은 반환됐다. 비교 대상으로 같은 ECR scanner가 Debian 기본 version
+`1.3.dfsg+really1.3.1-1`에는 실제 libz core finding인 `CVE-2026-85091`만
+반환하고 MiniZip finding은 반환하지 않은 것을 확인했다. 이 비교 readback은
+run `34013277396`의 `academy-ai-worker-cpu` digest
+`sha256:80e269750cd3676516e66f10d0c613b579e13ddb56f488299c980a1da510bf03`
+완료 scan이며, 전체 31개 finding 중 zlib finding은 해당 High 1개뿐이었다.
+
+따라서 fixed package는 source와 binary identity를 `zlib` / `zlib1g`로 계속
+노출하되 version을 Debian 계열과 같은
+`1:1.3.dfsg+really1.3.2.1+academy.git20260904.e3dc0a8-1`로 기록한다. 이는
+실제 upstream snapshot `1.3.2.1`을 숨기지 않고, 이전 Debian runtime
+`1:1.3.dfsg+really1.3.1-1`보다 뒤에 정렬되며 다음 upstream snapshot보다
+앞에 정렬된다. checksum-pinned source, `gz_vacate` 수정, MiniZip 파일·취약 symbol
+부재, zlib ABI 검증과 기존 acceptance·High 상한은 바꾸지 않는다. 다음 release는
+ECR 완료 scan에서 실제 core finding과 MiniZip 오분류가 모두 없는 것을 확인해야만
+development 이후 단계로 진행한다.
+
 집중 검증:
 
 ```powershell
