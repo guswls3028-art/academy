@@ -136,6 +136,80 @@ class NotificationLog(models.Model):
         ]
 
 
+class AlimtalkChannelBinding(models.Model):
+    """Operator-verified tenant channel using the shared Solapi account."""
+
+    class Status(models.TextChoices):
+        PENDING_TEMPLATES = "pending_templates", "템플릿 검수 중"
+        ACTIVE = "active", "사용 가능"
+        SUSPENDED = "suspended", "사용 중지"
+
+    class TestStatus(models.TextChoices):
+        SENT = "sent", "발송 접수"
+        FAILED = "failed", "발송 실패"
+        AMBIGUOUS = "ambiguous", "결과 확인 필요"
+
+    tenant = models.OneToOneField(
+        "core.Tenant",
+        on_delete=models.CASCADE,
+        related_name="alimtalk_channel_binding",
+    )
+    channel_id = models.CharField(max_length=100, unique=True)
+    status = models.CharField(
+        max_length=24,
+        choices=Status.choices,
+        default=Status.PENDING_TEMPLATES,
+        db_index=True,
+    )
+    verified_at = models.DateTimeField()
+    last_synced_at = models.DateTimeField()
+    test_template_id = models.CharField(max_length=100, blank=True, default="")
+    test_template_fingerprint = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+    )
+    last_test_status = models.CharField(
+        max_length=16,
+        choices=TestStatus.choices,
+        blank=True,
+        default="",
+    )
+    last_tested_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = "messaging"
+        ordering = ["tenant_id"]
+
+
+class AlimtalkTemplateBinding(models.Model):
+    """Exact common-template to tenant-channel template mapping."""
+
+    channel = models.ForeignKey(
+        AlimtalkChannelBinding,
+        on_delete=models.CASCADE,
+        related_name="template_bindings",
+    )
+    source_template_id = models.CharField(max_length=100)
+    channel_template_id = models.CharField(max_length=100)
+    status = models.CharField(max_length=20, blank=True, default="", db_index=True)
+    source_fingerprint = models.CharField(max_length=64)
+    channel_fingerprint = models.CharField(max_length=64)
+    last_synced_at = models.DateTimeField()
+
+    class Meta:
+        app_label = "messaging"
+        ordering = ["source_template_id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["channel", "source_template_id"],
+                name="uniq_alimtalk_source_template_per_channel",
+            ),
+        ]
+
+
 class NotificationPreviewToken(models.Model):
     """
     수동 알림 발송의 preview → confirm 핸드셰이크 토큰.

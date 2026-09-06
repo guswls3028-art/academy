@@ -2,10 +2,11 @@
 """
 메시징 발송 정책 및 채널 resolver — 단일 진입점.
 
-SSOT: 실발송은 공용 오너 알림톡만 사용한다.
+SSOT: 실발송은 공용 Solapi 계정의 검증된 알림톡만 사용한다.
 - SMS/LMS 실발송 금지.
-- tenant별 카카오 채널/PFID 사용 금지.
-- 알림톡 템플릿 fallback 금지. trigger와 1:1로 연결된 공용 승인 템플릿만 사용한다.
+- 과거 tenant PFID/provider/자체 키 사용 금지.
+- 기본은 공용 owner 채널이다. 새 운영자 검증 binding만 worker 마지막 단계에서 사용한다.
+- 알림톡 템플릿 fallback 금지. 공용 승인 정본 또는 동일 지문의 tenant 승인본만 사용한다.
 """
 
 import logging

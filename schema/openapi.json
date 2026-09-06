@@ -5498,6 +5498,40 @@
             "readOnly": true,
             "type": "string"
           },
+          "custom_channel_approved_templates": {
+            "readOnly": true,
+            "type": "integer"
+          },
+          "custom_channel_last_test_status": {
+            "readOnly": true,
+            "type": "string"
+          },
+          "custom_channel_last_tested_at": {
+            "format": "date-time",
+            "nullable": true,
+            "readOnly": true,
+            "type": "string"
+          },
+          "custom_channel_reference": {
+            "readOnly": true,
+            "type": "string"
+          },
+          "custom_channel_registered": {
+            "readOnly": true,
+            "type": "boolean"
+          },
+          "custom_channel_required_templates": {
+            "readOnly": true,
+            "type": "integer"
+          },
+          "custom_channel_status": {
+            "readOnly": true,
+            "type": "string"
+          },
+          "custom_channel_test_available": {
+            "readOnly": true,
+            "type": "boolean"
+          },
           "delivery_policy": {
             "readOnly": true,
             "type": "string"
@@ -5563,6 +5597,14 @@
           "alimtalk_available",
           "can_manage_messaging",
           "channel_source",
+          "custom_channel_approved_templates",
+          "custom_channel_last_test_status",
+          "custom_channel_last_tested_at",
+          "custom_channel_reference",
+          "custom_channel_registered",
+          "custom_channel_required_templates",
+          "custom_channel_status",
+          "custom_channel_test_available",
           "delivery_policy",
           "has_own_credentials",
           "messaging_disabled",
@@ -36838,7 +36880,7 @@
     },
     "/api/v1/messaging/channel-check/": {
       "get": {
-        "description": "GET: 채널 공유 확인 (파트너 등록 여부) — 4단계, 스텁 가능",
+        "description": "GET: effective tenant channel readiness.",
         "operationId": "messaging_channel_check_retrieve",
         "responses": {
           "200": {

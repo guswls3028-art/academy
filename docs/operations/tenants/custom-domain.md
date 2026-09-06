@@ -67,7 +67,7 @@
 | 프런트 로그인·내부 헤더·학생앱·성적표·OG/PWA | **개별 등록**: tenant registry, 테마, 팔레트, 정적 에셋 | build, 1366/390, 역할별 라이트/다크 |
 | Tenant·Program·구독 | **개별 등록**: `provision_tenant`, `contract` 또는 `exempt` | DB audit와 이용 가능 readback |
 | 대표 계정·권한 | **개별 등록**: 개발자 콘솔에서 기존 owner 0명 확인 후 1회 생성 | active owner 1명, 실제 도메인 로그인 |
-| 알림톡 | **기본 활성**: 공용 owner 채널·exact 승인 템플릿만 사용. 대표·관리자가 제품 화면에서 전체 사용을 끌 수 있음 | `messaging_is_active=true`와 승인 봉투 audit; 공급사 credential을 문서에 남기지 않음 |
+| 알림톡 | **기본 활성**: 공용 owner 채널·exact 승인 템플릿 사용. 별도 카카오 채널은 운영자가 provider 실조회와 template fingerprint 검증 후 활성화. 대표·관리자가 제품 화면에서 전체 사용을 끌 수 있음 | `messaging_is_active=true`와 채널/승인 봉투 audit; 공급사 credential을 문서에 남기지 않음 |
 | 결제·청구 | **명시 결정**: 기간 계약 또는 승인된 과금 제외 중 하나만 선택 | 만료·다음 결제일 또는 runtime exempt ID audit |
 | Video Batch·AI·Tools·공용 큐 | **공유형**: 고객별 worker/queue 목록 추가 금지, payload·DB·R2 key의 tenant scope 사용 | 정식 배포 worker/queue gate와 역할별 기능 smoke |
 | 일반 R2 다운로드·문서 변환 | **공유형**: tenant-prefixed key와 서명/CDN 경계 사용, 버킷 복제 금지 | 배포의 XLSX/PPT/R2 real-use smoke |
@@ -376,8 +376,8 @@ Program 생성 직후에는 이용기간이 비어 있어 로그인 화면에 �
 문서에 tenant별 비밀정보를 넣지 않는다.
 
 메시징은 온보딩 뒤 `messaging_is_active=true`를 기본으로 즉시 사용 가능하게 한다. 대표·관리자는 제품의 **알림톡 전체 사용**에서 직접 중지·재개한다. 제품
-메시징은 [messaging-policy.md](../../ssot/messaging-policy.md)의 공용 owner 채널과
-exact 승인 템플릿을 사용하므로 신규 tenant PFID/provider/공급사 키를 만들지
+메시징은 [messaging-policy.md](../../ssot/messaging-policy.md)의 공용 Solapi 계정과
+exact 승인 템플릿을 사용한다. 신규 tenant provider/공급사 키를 만들지
 않는다. 학생가입 자동승인과 클리닉 자동승인은 `false`, 영상 동시 세션·디바이스
 제한은 `0`으로 먼저 봉인하고 고객별 변경은 기본 온보딩 완료 후 별도 승인으로
 적용한다.

@@ -25,6 +25,7 @@ from apps.domains.messaging.policy import (
     resolve_kakao_channel,
 )
 from apps.core.services.ops_audit import record_audit
+from apps.domains.messaging.tenant_channels import get_tenant_channel_status
 
 
 class MessagingInfoView(APIView):
@@ -36,7 +37,7 @@ class MessagingInfoView(APIView):
         serializer = MessagingInfoSerializer(tenant)
         data = dict(serializer.data)
         # 과거 테넌트별 연동 값은 데이터 보존용일 뿐 제품 발송 계약이 아니다.
-        # API에서도 공용 솔라피 정책만 노출해 오래된 클라이언트가 이를 다시
+        # API에는 새 검증 채널 계약만 노출해 오래된 클라이언트가 보존 데이터를
         # 실행 가능한 설정으로 오인하지 않게 한다.
         data.update({
             "kakao_pfid": "",
@@ -47,13 +48,14 @@ class MessagingInfoView(APIView):
             "own_ppurio_api_key": "",
             "own_ppurio_account": "",
             "has_own_credentials": False,
-            "delivery_policy": "common_alimtalk_only",
+            "delivery_policy": "verified_tenant_or_common_alimtalk",
         })
-        # 정책 SSOT 기반: 발송 허용·채널 출처 (API 응답만 사용, 프론트에서 재계산 금지)
+        # 정책 SSOT 기반: 과거 Tenant 필드는 무시하고 새 검증 바인딩만 투영한다.
         channel = resolve_kakao_channel(tenant.id)
-        data["channel_source"] = "common_owner"
+        channel_status = get_tenant_channel_status(tenant.id)
+        data.update(channel_status)
         resolved_pf_id = (channel.get("pf_id") or "").strip()
-        data["resolved_pf_id"] = resolved_pf_id
+        data["resolved_pf_id"] = ""
         messaging_disabled = is_messaging_disabled(tenant.id)
         data["tenant_messaging_enabled"] = bool(tenant.messaging_is_active)
         data["messaging_ops_hold"] = is_messaging_ops_held(tenant.id)
@@ -69,10 +71,14 @@ class MessagingInfoView(APIView):
             for template_id in TEMPLATE_TYPE_TO_SOLAPI_ID.values()
         )
         # 수동 발송이 실제 사용하는 통합 봉투가 하나라도 등록돼야 한다.
-        data["alimtalk_available"] = bool(
+        common_available = bool(
             not messaging_disabled
             and resolved_pf_id
             and has_registered_unified_envelope
+        )
+        data["alimtalk_available"] = bool(
+            common_available
+            and not channel_status.get("custom_channel_routing_blocked", False)
         )
         return data
 
@@ -108,15 +114,30 @@ class MessagingInfoView(APIView):
         return Response(self._response_data(request, tenant))
 
 class ChannelCheckView(APIView):
-    """GET: 채널 공유 확인 (파트너 등록 여부) — 4단계, 스텁 가능"""
+    """GET: effective tenant channel readiness."""
     permission_classes = [IsAuthenticated, TenantResolvedAndStaff]
 
     def get(self, request):
+        channel_status = get_tenant_channel_status(request.tenant.id)
+        if channel_status["custom_channel_registered"]:
+            active = channel_status["custom_channel_status"] == "active"
+            suspended = channel_status["custom_channel_status"] == "suspended"
+            return Response({
+                "shared": active,
+                "message": (
+                    "우리 학원 카카오 채널이 연결되어 있습니다."
+                    if active
+                    else (
+                        "우리 학원 카카오 채널 발송을 중지하고 양식 상태를 확인하고 있습니다."
+                        if suspended
+                        else "우리 학원 카카오 채널의 알림톡 양식을 검수 중입니다."
+                    )
+                ),
+            })
         channel = resolve_kakao_channel(request.tenant.id)
-        resolved_pf_id = (channel.get("pf_id") or "").strip()
-        if not resolved_pf_id:
-            return Response({"shared": False, "message": "공용 PFID 미연동"})
-        return Response({"shared": True, "message": "공용 시스템 채널 연동됨"})
+        if not (channel.get("pf_id") or "").strip():
+            return Response({"shared": False, "message": "공용 알림톡 채널 미연동"})
+        return Response({"shared": True, "message": "공용 알림톡 채널 연동됨"})
 
 
 class TestCredentialsView(APIView):
@@ -204,31 +225,59 @@ class TestCredentialsView(APIView):
                     "message": "공용 알림톡 발신번호가 등록되지 않았습니다.",
                 })
 
-        # 공통: 알림톡 채널 확인
-        channel = resolve_kakao_channel(tenant.id)
-        pf_id = (channel.get("pf_id") or "").strip()
-        if pf_id:
+        # 공통: 새 tenant binding이 있으면 이를 우선 표시하되, legacy 필드는 무시한다.
+        channel_status = get_tenant_channel_status(tenant.id)
+        if channel_status["custom_channel_registered"]:
+            channel_ready = channel_status["custom_channel_status"] == "active"
+            channel_suspended = (
+                channel_status["custom_channel_status"] == "suspended"
+            )
             results["checks"].append({
                 "test": "alimtalk_channel",
-                "ok": True,
-                "message": "공용 알림톡 채널 연동됨",
+                "ok": channel_ready,
+                "message": (
+                    "우리 학원 카카오 채널이 연결되어 있습니다."
+                    if channel_ready
+                    else (
+                        "우리 학원 카카오 채널 발송을 중지하고 양식 상태를 확인하고 있습니다."
+                        if channel_suspended
+                        else "우리 학원 카카오 채널은 확인됐고 알림톡 양식을 검수 중입니다."
+                    )
+                ),
             })
         else:
+            channel = resolve_kakao_channel(tenant.id)
+            pf_id = (channel.get("pf_id") or "").strip()
             results["checks"].append({
                 "test": "alimtalk_channel",
-                "ok": False,
-                "message": "공용 알림톡 채널(PFID)이 미연동입니다.",
+                "ok": bool(pf_id),
+                "message": (
+                    "공용 알림톡 채널 연동됨"
+                    if pf_id
+                    else "공용 알림톡 채널이 미연동입니다."
+                ),
             })
 
         # 승인된 템플릿 수
-        approved_count = MessageTemplate.objects.filter(
-            tenant_id=get_owner_tenant_id(), solapi_status="APPROVED"
-        ).count()
+        approved_count = (
+            channel_status["custom_channel_approved_templates"]
+            if channel_status["custom_channel_registered"]
+            else MessageTemplate.objects.filter(
+                tenant_id=get_owner_tenant_id(), solapi_status="APPROVED"
+            ).count()
+        )
+        required_count = channel_status["custom_channel_required_templates"]
         results["checks"].append({
             "test": "approved_templates",
-            "ok": approved_count > 0,
-            "message": f"검수 승인된 템플릿: {approved_count}개" + (
-                "" if approved_count > 0 else " (알림톡 발송에 필요합니다)"
+            "ok": (
+                approved_count >= required_count
+                if channel_status["custom_channel_registered"]
+                else approved_count > 0
+            ),
+            "message": (
+                f"우리 학원 승인 양식: {approved_count}/{required_count}개"
+                if channel_status["custom_channel_registered"]
+                else f"검수 승인된 공용 양식: {approved_count}개"
             ),
         })
 

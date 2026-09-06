@@ -76,7 +76,7 @@
         -> SQS (academy-v1-messaging-queue)
           -> 메시징 워커
             -> legacy SMS payload 차단
-            -> 공용 알림톡 provider dispatch
+            -> 공용 Solapi provider dispatch (활성 verified tenant 채널은 마지막 단계에서 exact ID 치환)
               -> 공용 Solapi SDK
                 -> 카카오 알림톡
 ```
@@ -89,7 +89,7 @@
     -> 통합 승인 봉투 매핑 (CATEGORY_TO_TEMPLATE_TYPE)
     -> build_manual_replacements()       [alimtalk_content_builders.py]
     -> enqueue_alimtalk()                     [services.py:111]
-      -> (이하 동일, tenant별 PFID/provider fallback 없음)
+      -> (이하 동일, legacy tenant PFID/provider fallback 없음)
 ```
 
 ### 시스템 필수 알림톡 파이프라인 (가입/비번)
@@ -376,20 +376,21 @@ signup 카테고리만 자체 Solapi 템플릿을 유지. 나머지 매핑 카�
 - 알림톡 모드이면 공용 승인 `solapi_template_id` 필수
 - Rate limit: 업무 tenant별 rolling 1시간 500건 + 공유 공급자 계정 KST 일일 900건 기본 안전 한도
 - 최대 200명 일괄 발송 (line 504-508)
-- 발신번호/PFID/provider는 공용 owner 설정만 사용한다.
+- 발신번호/provider/API 키는 공용 Solapi 설정만 사용한다. PFID와 provider template ID는 worker가 검증된 tenant channel binding이 활성일 때만 마지막 단계에서 치환한다.
 
 ---
 
 ## 6. Provider/채널 정책
 
-### 공용 owner provider
+### 공용 provider와 검증된 tenant 채널
 
 - owner tenant는 승인 채널 인프라의 소유자다. owner 학원의 고객용 `messaging_is_active=false`는 다른 업무 tenant로 전파하지 않으며, 공용 채널 경계에서 공유하는 차단은 테스트 tenant와 긴급 운영 hold뿐이다. 업무 tenant 자신의 고객 토글은 계속 발송 전에 fail-closed로 검사한다.
 
 출처: `policy.py`, `queue_service.py`, `sqs_main.py`
 
-- 실발송 provider/PFID는 `OWNER_TENANT_ID` 공용 설정만 사용한다.
-- tenant별 `messaging_provider`, `kakao_pfid`, 자체 Solapi/Ppurio 키는 신규 실발송 경로에서 사용하지 않는다.
+- 실발송 provider/API 키/발신번호는 `OWNER_TENANT_ID` 공용 Solapi 설정만 사용한다.
+- 기본 PFID는 공용 owner 채널이다. 새 `AlimtalkChannelBinding`이 `active`이고 요청된 공용 template ID에 대응하는 `AlimtalkTemplateBinding`이 `APPROVED`이며 양쪽 provider 본문 지문이 같을 때만 해당 tenant PFID/template ID로 치환한다.
+- 과거 tenant `messaging_provider`, `kakao_pfid`, 자체 Solapi/Ppurio 키와 기존 MessageTemplate 승인 표시는 새 binding을 만들거나 활성화하는 근거로 사용하지 않는다.
 - `enqueue_alimtalk()`는 알림톡 payload의 `tenant_id`를 owner tenant로 정규화하고 원 업무 테넌트는 `source_tenant_id`로 남긴다.
 - worker도 raw/legacy SQS payload의 `tenant_id`를 owner tenant로 재정규화한다. 공용 채널의 물리 발송·로그 tenant는 owner를 유지하지만, 단가·잔액 차감·환불은 `source_tenant_id`로 식별한 실제 업무 테넌트에 귀속한다. 모든 canonical payload의 tenant 결합은 producer HMAC과 durable outbox tenant로 검증하며 서로 모순되는 payload는 발송 전에 폐기한다.
 - 신규 canonical payload는 `occurrence_key`를 싣는다. worker는 payload의 tenant/channel/event/target/recipient/occurrence/template로 business key를 다시 계산하며 producer key와 다르면 `invalid_business_idempotency_key`로 폐기한다. 따라서 유효한 signed key만 복사해 수신번호를 변경해도 provider로 진행하지 않는다.
@@ -405,10 +406,12 @@ signup 카테고리만 자체 Solapi 템플릿을 유지. 나머지 매핑 카�
 
 ### 알림톡 채널 결정
 
-출처: `policy.py`
+출처: `policy.py`, `tenant_channels.py`, `sqs_main.py`
 
 - `resolve_kakao_channel()`은 항상 `settings.SOLAPI_KAKAO_PF_ID` 공용 PFID를 반환한다.
-- `channel_source` API 값은 `common_owner`다.
+- worker는 공용 template allowlist와 tenant-binding HMAC을 먼저 검증한 뒤 `resolve_alimtalk_delivery_route()`에서만 활성 tenant channel로 번역한다.
+- `channel_source` API 값은 `common_owner`, `tenant_pending`, `tenant_verified`, `tenant_suspended` 중 하나이며 PFID 원문은 화면에 노출하지 않는다.
+- 검수 중 tenant 채널은 공용 경로를 유지한다. 활성 tenant 채널에서 template mapping이 누락되거나 본문 지문이 달라지면 `tenant_suspended`로 표시하고 공용으로 fallback하지 않고 fail-closed한다.
 
 ### SMS 정책
 
@@ -639,7 +642,7 @@ python manage.py diagnose_messaging_incident `
 
 ---
 
-## 11. 공용 오너 알림톡 only
+## 11. 공용 정본 + 검증 tenant 채널 알림톡 only
 
 ### send_event_notification 템플릿 resolve
 
@@ -647,7 +650,8 @@ python manage.py diagnose_messaging_incident `
 
 1. 현재 테넌트의 AutoSendConfig 조회: enabled/delay/본문 메모만 사용
 2. 검수 템플릿은 명시 unified category 템플릿 또는 오너 테넌트(`OWNER_TENANT_ID`, 기본 1)의 exact trigger 승인 템플릿만 사용
-3. tenant template, 다른 trigger, SMS로 fallback하지 않음. 공용 승인 템플릿이 없으면 fail-closed
+3. tenant 문구, 다른 trigger, SMS로 fallback하지 않음. 공용 승인 정본이 없으면 fail-closed
+4. worker provider 직전 단계에서만 활성 tenant channel의 승인·동일 지문 template ID로 번역
 
 ### send_alimtalk_via_owner
 
@@ -655,7 +659,7 @@ python manage.py diagnose_messaging_incident `
 
 - 모든 테넌트에서 가입/비번 관련 알림톡은 오너 테넌트의 exact trigger 승인 템플릿으로 발송
 - `password_reset_*`, `password_find_otp`가 `registration_approved_*` 템플릿을 재활용하는 fallback 금지
-- SMS fallback 없음. tenant별 PFID/provider 사용 없음. 공용 템플릿이 없으면 발송 실패
+- SMS fallback 없음. 과거 tenant PFID/provider/자체 키 사용 없음. 새 verified binding이 없으면 공용 채널, 활성 binding의 exact mapping이 없으면 발송 실패
 
 ---
 
