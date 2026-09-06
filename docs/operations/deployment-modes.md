@@ -1,7 +1,7 @@
 # 배포 방식 개요
 
 **기준:** 실제 스크립트·워크플로우. 문서는 실행 방식과 일치하도록 유지한다.
-**최종 갱신:** 2026-07-31
+**최종 갱신:** 2026-09-07
 
 ---
 
@@ -38,7 +38,7 @@
 main에 push하면 자동으로 서버 반영까지 완료된다:
 
 1. GitHub Actions `v1-build-and-push-latest.yml` 트리거
-2. lint, expand/contract migration guard와 smoke가 통과한 뒤 base digest를 먼저 빌드/해결한다. guard는 같은 app의 이전 migration까지 역추적해 다른 옵션이 동일한 `CharField.max_length` 증가만 expand-safe로 인정한다. 길이 축소, 옵션 변경, 과거 필드 상태를 증명할 수 없는 `AlterField`는 계속 contract로 실패 폐쇄한다. PR 품질 게이트는 `ACADEMY_MIGRATION_PHASE = "contract"`와 구체적인 `ACADEMY_MIGRATION_REASON`이 있는 변경을 검토할 수 있지만 DB를 변경하지 않는다. 병합 뒤 일반 main push는 같은 contract migration을 계속 실패 폐쇄하며, 선행 expand 배포 완료 또는 구버전 API 호환성이 증명된 정확한 main SHA만 `workflow_dispatch`의 `allow_contract_migrations=true`로 실행할 수 있다. 변경 감지 결과에 따라 필요한 API, Video, Messaging, AI, Tools linux/arm64 이미지는 격리 matrix runner에서 병렬 빌드해 ECR run-unique `:sha-*` 후보로 푸시하고, 단일 fan-in job이 여섯 digest를 정확히 조립한다. 각 worker Dockerfile은 실제 entrypoint import를 build-time에 검증한다. 모든 ECR repo는 scan-on-push이며 재사용 digest도 scan 결과가 없으면 명시적으로 scan을 시작한다. 완료되지 않은 scan과 승인되지 않은 critical은 실패 폐쇄한다. 예외는 [container-image-security.md](container-image-security.md)의 exact·expiring 계약만 허용하며 high은 경고와 remediation 대상으로 남긴다. `:latest`는 이 시점에 움직이지 않는다.
+2. 직전 운영 릴리스와 대기열이 끝난 뒤 `origin/main`에서 그 릴리스가 승격한 성공 manifest를 캡처해 run 전용 artifact로 고정한다. 따라서 push 시점 checkout에 들어 있던 오래된 manifest 때문에 불필요한 전체 이미지 재빌드가 발생하지 않으며, 변경 감지·base 재사용·후보 조립은 모두 같은 캡처본을 사용한다. 캡처본이 없거나 완전 성공 형식이 아니면 선택 빌드로 추정하지 않고 실패 폐쇄한다. 이어 lint, expand/contract migration guard와 smoke가 통과한 뒤 base digest를 먼저 빌드/해결한다. guard는 같은 app의 이전 migration까지 역추적해 다른 옵션이 동일한 `CharField.max_length` 증가만 expand-safe로 인정한다. 길이 축소, 옵션 변경, 과거 필드 상태를 증명할 수 없는 `AlterField`는 계속 contract로 실패 폐쇄한다. PR 품질 게이트는 `ACADEMY_MIGRATION_PHASE = "contract"`와 구체적인 `ACADEMY_MIGRATION_REASON`이 있는 변경을 검토할 수 있지만 DB를 변경하지 않는다. 병합 뒤 일반 main push는 같은 contract migration을 계속 실패 폐쇄하며, 선행 expand 배포 완료 또는 구버전 API 호환성이 증명된 정확한 main SHA만 `workflow_dispatch`의 `allow_contract_migrations=true`로 실행할 수 있다. 변경 감지 결과에 따라 필요한 API, Video, Messaging, AI, Tools linux/arm64 이미지는 격리 matrix runner에서 병렬 빌드해 ECR run-unique `:sha-*` 후보로 푸시하고, 단일 fan-in job이 여섯 digest를 정확히 조립한다. 각 worker Dockerfile은 실제 entrypoint import를 build-time에 검증한다. 모든 ECR repo는 scan-on-push이며 재사용 digest도 scan 결과가 없으면 명시적으로 scan을 시작한다. 완료되지 않은 scan과 승인되지 않은 critical은 실패 폐쇄한다. 예외는 [container-image-security.md](container-image-security.md)의 exact·expiring 계약만 허용하며 high은 경고와 remediation 대상으로 남긴다. `:latest`는 이 시점에 움직이지 않는다.
 3. `verify-api-development` job → API/Tools 변경 여부와 무관하게 모든 release candidate에서 같은 manifest의 API/Tools digest를 상시 격리 development에 blue/green 방식으로 배포한다. 전용 DB migration, 운영 DB·R2 접근 거부, 개발 큐/R2/Redis, `/healthz`, `/health`, 이미지 identity와 합성 XLSX/PPT/R2 실사용 smoke가 모두 통과해야 candidate를 active로 승격한다.
 4. `verify-api-preprod` job → development를 통과한 API digest로 릴리스 고정 env 버전을 만들고 임시 격리 EC2 1대를 기동해 별도 DB에 migration을 적용한다. prod settings, DB 이름·전용 역할, 운영 DB CONNECT 거부, env version·release ID, `/healthz`, DB 포함 `/health`, 실제 CDN chain을 모두 확인한 뒤 종료한다.
 5. preprod 성공 후에만 `run-migrations`가 운영 DB migration을 실행한다.

@@ -554,7 +554,10 @@ def test_selective_build_diffs_from_each_last_verified_runtime_image() -> None:
     detect = _job_block(workflow, "detect-changes")
 
     assert "github.event.before" not in detect
-    assert 'MANIFEST="docs/reports/release-manifest.latest.json"' in detect
+    assert (
+        'MANIFEST="$RUNNER_TEMP/release-baseline/release-manifest.latest.json"'
+        in detect
+    )
     assert "resolve_image_base()" in detect
     assert 'git merge-base --is-ancestor "$resolved" HEAD' in detect
     assert 'CHANGED_RELEASE=$(git diff --name-only "$RELEASE_PREV" HEAD)' in detect
@@ -573,6 +576,31 @@ def test_selective_build_diffs_from_each_last_verified_runtime_image() -> None:
         else:
             assert f'CHANGED="$CHANGED_{flag}"' in detect
     assert 'force_full_build "academy-tools-worker source commit is unavailable"' in detect
+
+
+def test_queued_release_uses_manifest_promoted_after_concurrency_wait() -> None:
+    workflow = DEPLOY_WORKFLOW.read_text(encoding="utf-8")
+    detect = _job_block(workflow, "detect-changes")
+    prepare = _job_block(workflow, "prepare-build")
+    assemble = _job_block(workflow, "build-and-push")
+
+    baseline = "$RUNNER_TEMP/release-baseline/release-manifest.latest.json"
+    assert "Capture current verified release baseline" in detect
+    assert "git fetch --no-tags origin main" in detect
+    assert (
+        'git show origin/main:docs/reports/release-manifest.latest.json '
+        f'> "{baseline}"'
+    ) in detect
+    assert f'MANIFEST="{baseline}"' in detect
+    assert "name: release-baseline" in detect
+    assert detect.index("Capture current verified release baseline") < detect.index(
+        "Detect changes"
+    )
+    for block in (prepare, assemble):
+        assert "Download current verified release baseline" in block
+        assert "name: release-baseline" in block
+        assert "path: ${{ runner.temp }}/release-baseline" in block
+    assert f'PRIOR="{baseline}"' in assemble
 
 
 def test_deploy_freshness_uses_immutable_runtime_evidence_not_latest() -> None:
