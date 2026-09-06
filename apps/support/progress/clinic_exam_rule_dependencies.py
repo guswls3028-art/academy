@@ -7,12 +7,18 @@ from django.db.models import Count
 
 def exam_result_for_rule(*, enrollment_id: int, exam_id: int):
     from apps.domains.results.models import Result
+    from apps.domains.results.services.omr_subjective_completion import (
+        pending_omr_result_ids,
+    )
 
-    return Result.objects.filter(
+    result = Result.objects.filter(
         enrollment_id=enrollment_id,
         target_type="exam",
         target_id=exam_id,
     ).first()
+    if result and int(result.id) in pending_omr_result_ids([result]):
+        return None
+    return result
 
 
 def exam_pass_score(*, exam_id: int) -> float:

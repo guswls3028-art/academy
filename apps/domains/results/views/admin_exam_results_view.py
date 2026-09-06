@@ -20,6 +20,9 @@ from apps.domains.results.services.assessment_correction_status import (
     assessment_correction_payload,
     exam_correction_fingerprint,
 )
+from apps.domains.results.services.omr_subjective_completion import (
+    pending_omr_result_ids,
+)
 
 from apps.support.results.admin_exam_dependencies import (
     get_enrollments_for_tenant_by_id,
@@ -174,6 +177,12 @@ class AdminExamResultsView(ListAPIView):
         )
         queryset = self.get_queryset()
         results = list(queryset)
+        pending_result_ids = pending_omr_result_ids(results)
+        pending_enrollment_ids = {
+            int(result.enrollment_id)
+            for result in results
+            if int(result.id) in pending_result_ids
+        }
         linked_lecture_ids = getattr(self, "linked_lecture_ids", set())
         selected_lecture_id = getattr(self, "selected_lecture_id", None)
         pass_scores_by_lecture = effective_exam_pass_scores(
@@ -371,6 +380,7 @@ class AdminExamResultsView(ListAPIView):
                 (enrollment_id, float(projected.total_score))
                 for enrollment_id, projected in projected_scores.items()
                 if not projected.not_submitted and projected.total_score is not None
+                and enrollment_id not in pending_enrollment_ids
             ),
             key=lambda row: (-row[1], row[0]),
         )
@@ -450,6 +460,7 @@ class AdminExamResultsView(ListAPIView):
             raw_total_score = initial_score.total_score
             raw_max_score = initial_score.max_score
             achievement_data = achievement_map[(enrollment_id, exam_id)]
+            subjective_pending = int(r.id) in pending_result_ids
             visible_total_score = (
                 None
                 if achievement_data["meta_status"] == "NOT_SUBMITTED"
@@ -458,7 +469,9 @@ class AdminExamResultsView(ListAPIView):
             # passed = 1차 합격(석차 판정용). 기존 응답 호환.
             passed = achievement_data["is_pass"]
 
-            clinic_required = enrollment_id in clinic_required_ids
+            clinic_required = (
+                enrollment_id in clinic_required_ids and not subjective_pending
+            )
 
             # 학생 SSOT 표시용 필드 (아바타 + 강의 딱지)
             display = _get_enrollment_display_fields(enrollment_map.get(enrollment_id))
@@ -472,7 +485,9 @@ class AdminExamResultsView(ListAPIView):
                 meta_status=achievement_data["meta_status"],
                 submission_status=submission_status,
                 visible_total_score=visible_total_score,
-                is_provisional=bool(achievement_data["is_provisional"]),
+                is_provisional=bool(
+                    achievement_data["is_provisional"] or subjective_pending
+                ),
             )
             enrollment = enrollment_map.get(enrollment_id)
             lecture_id = getattr(enrollment, "lecture_id", None)
@@ -488,7 +503,7 @@ class AdminExamResultsView(ListAPIView):
                 else None
             )
             correction_status = None
-            if correction_session_id is not None:
+            if correction_session_id is not None and not subjective_pending:
                 correction_status = assessment_correction_payload(
                     source_type=AssessmentCorrection.SourceType.EXAM,
                     score=visible_total_score,
@@ -526,7 +541,12 @@ class AdminExamResultsView(ListAPIView):
                 "final_pass": achievement_data["final_pass"],
                 "achievement": achievement_data["achievement"],
                 "clinic_retake": achievement_data["clinic_retake"],
-                "is_provisional": achievement_data["is_provisional"],
+                "is_provisional": bool(
+                    achievement_data["is_provisional"] or subjective_pending
+                ),
+                "grading_status": (
+                    "subjective_pending" if subjective_pending else None
+                ),
                 "meta_status": achievement_data["meta_status"],
 
                 "submitted_at": initial_score.recorded_at,
@@ -536,7 +556,10 @@ class AdminExamResultsView(ListAPIView):
                 "result_status": result_status,
                 "correction_session_id": correction_session_id,
                 "correction_status": correction_status,
-                "name_highlight_clinic_target": highlight_map.get(enrollment_id, False),
+                "name_highlight_clinic_target": (
+                    highlight_map.get(enrollment_id, False)
+                    and not subjective_pending
+                ),
                 "exam_not_submitted_count": exam_absence_count_map.get(enrollment_id, 0),
 
                 # 석차 정보

@@ -9,6 +9,14 @@ def get_result_attempt_models():
     return Result, ExamAttempt
 
 
+def pending_omr_result_ids(results):
+    from apps.domains.results.services.omr_subjective_completion import (
+        pending_omr_result_ids as resolve_pending,
+    )
+
+    return resolve_pending(results)
+
+
 def get_exam_model():
     from apps.domains.exams.models import Exam
 

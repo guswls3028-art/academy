@@ -49,6 +49,9 @@ from apps.domains.results.utils.result_queries import (
     latest_results_per_enrollment,
 )
 from apps.domains.results.utils.exam_achievement import compute_exam_achievement_bulk
+from apps.domains.results.services.omr_subjective_completion import (
+    pending_omr_result_ids,
+)
 from apps.domains.results.utils.exam_absence import current_exam_absence_counts
 from apps.domains.results.utils.clinic_highlight import compute_clinic_highlight_map
 from apps.domains.results.services.assessment_correction_status import (
@@ -462,20 +465,6 @@ class SessionScoresView(APIView):
         )
         live_exam_ids = set(exam_ids)
         live_homework_ids = set(homework_ids)
-        raw_clinic_ids: Set[int] = {
-            int(row["enrollment_id"])
-            for row in clinic_link_rows
-            if _is_live_session_clinic_link(
-                row,
-                live_exam_ids=live_exam_ids,
-                live_homework_ids=live_homework_ids,
-                homework_assigned_set=hw_assigned_set,
-            )
-        }
-        # 최종 완료 상태가 SSOT다. 과거/특례 등록으로 남은 미해소 ClinicLink가 있어도
-        # SessionProgress.completed=True면 현재 클리닉 대상에서 제외한다.
-        clinic_ids: Set[int] = raw_clinic_ids - progress_completed_ids
-
         clinic_highlight_map = compute_clinic_highlight_map(
             tenant=tenant,
             enrollment_ids=set(enrollment_ids),
@@ -521,7 +510,7 @@ class SessionScoresView(APIView):
             int(exid): {}
             for exid in exam_ids
         }
-        latest_results = (
+        latest_results = list(
             latest_results_for_targets_per_enrollment(
                 target_type="exam",
                 target_ids=exam_ids,
@@ -529,6 +518,33 @@ class SessionScoresView(APIView):
             .filter(enrollment_id__in=enrollment_ids)
             .prefetch_related("items")
         )
+        pending_result_ids = pending_omr_result_ids(latest_results)
+        pending_exam_pairs = {
+            (int(result.enrollment_id), int(result.target_id))
+            for result in latest_results
+            if int(result.id) in pending_result_ids
+        }
+        raw_clinic_ids = {
+            int(row["enrollment_id"])
+            for row in clinic_link_rows
+            if _is_live_session_clinic_link(
+                row,
+                live_exam_ids=live_exam_ids,
+                live_homework_ids=live_homework_ids,
+                homework_assigned_set=hw_assigned_set,
+            )
+            and not (
+                row.get("source_type") == "exam"
+                and (int(row["enrollment_id"]), int(row.get("source_id") or 0))
+                in pending_exam_pairs
+            )
+        }
+        clinic_ids = raw_clinic_ids - progress_completed_ids
+        clinic_highlight_map = {
+            enrollment_id: value
+            for enrollment_id, value in clinic_highlight_map.items()
+            if int(enrollment_id) in clinic_ids
+        }
         for result in latest_results:
             result_map[int(result.target_id)][int(result.enrollment_id)] = result
 
@@ -768,6 +784,7 @@ class SessionScoresView(APIView):
                     updated_at = None
                     source_fingerprint = None
                 else:
+                    subjective_pending = int(r.id) in pending_result_ids
                     attempt_status = (
                         attempt_status_map.get(int(r.attempt_id), "")
                         if r.attempt_id is not None
@@ -848,12 +865,19 @@ class SessionScoresView(APIView):
                         "score": None if is_not_submitted else float(initial_score or 0.0),
                         "max_score": float(initial_max_score or 0.0),
                         "passed": passed,
-                        "clinic_required": clinic_required,
+                        "clinic_required": clinic_required and not subjective_pending,
                         "is_locked": locked,
                         "lock_reason": "GRADING" if locked else None,
                         "objective_score": None if is_not_submitted else objective_val,
-                        "subjective_score": None if is_not_submitted else subjective_val,
+                        "subjective_score": (
+                            None
+                            if is_not_submitted or subjective_pending
+                            else subjective_val
+                        ),
                         "meta": {"status": "NOT_SUBMITTED"} if is_not_submitted else None,
+                        "grading_status": (
+                            "subjective_pending" if subjective_pending else None
+                        ),
                     }
                     updated_at = r.updated_at
                     source_fingerprint = exam_correction_fingerprint(
@@ -877,7 +901,11 @@ class SessionScoresView(APIView):
                 block.update(
                     assessment_correction_payload(
                         source_type=AssessmentCorrection.SourceType.EXAM,
-                        score=block.get("score"),
+                        score=(
+                            None
+                            if block.get("grading_status") == "subjective_pending"
+                            else block.get("score")
+                        ),
                         max_score=block.get("max_score"),
                         source_fingerprint=source_fingerprint,
                         correction=correction_map.get((eid, "exam", exid)),
@@ -909,7 +937,11 @@ class SessionScoresView(APIView):
                             exam_attempt_count_map.get((exid, eid), 0),
                             1 if r is not None else 0,
                         ),
-                        "clinic_link_id": exam_clinic_link_map.get((exid, eid)),
+                        "clinic_link_id": (
+                            None
+                            if (eid, exid) in pending_exam_pairs
+                            else exam_clinic_link_map.get((exid, eid))
+                        ),
                         "attempts": exam_attempts_by_key.get((exid, eid), []),
                     }
                 )

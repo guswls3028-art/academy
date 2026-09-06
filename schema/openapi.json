@@ -294,6 +294,17 @@
             "nullable": true,
             "type": "number"
           },
+          "grading_status": {
+            "nullable": true,
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GradingStatusEnum"
+              },
+              {
+                "$ref": "#/components/schemas/NullEnum"
+              }
+            ]
+          },
           "is_provisional": {
             "default": false,
             "type": "boolean"
@@ -3786,6 +3797,13 @@
           "skipped"
         ],
         "type": "object"
+      },
+      "GradingStatusEnum": {
+        "description": "* `subjective_pending` - subjective_pending",
+        "enum": [
+          "subjective_pending"
+        ],
+        "type": "string"
       },
       "HandoffStatusEnum": {
         "description": "* `account_inactive` - account_inactive\n* `password_setup_required` - password_setup_required\n* `first_login_pending` - first_login_pending\n* `complete` - complete",

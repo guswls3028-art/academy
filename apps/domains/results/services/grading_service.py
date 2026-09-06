@@ -7,6 +7,9 @@ from apps.domains.results.services.exam_grading_service import ExamGradingServic
 from apps.domains.results.services.sync_result_from_submission import (
     sync_result_from_exam_submission,
 )
+from apps.domains.results.services.omr_subjective_completion import (
+    finalize_omr_result_if_ready,
+)
 from apps.support.results.grading_dependencies import (
     dispatch_progress_pipeline,
     get_submission_for_grading,
@@ -30,8 +33,9 @@ def grade_submission(submission_id: int, *, force_regrade: bool = False) -> Exam
         return result
 
     # ✅ 모든 source(ONLINE, OMR_SCAN 등)에서 Result/ResultItem 동기화 (학생 결과 API용)
+    canonical_result = None
     try:
-        sync_result_from_exam_submission(submission_id)
+        canonical_result = sync_result_from_exam_submission(submission_id)
     except Exception:
         import logging
         logging.getLogger(__name__).exception(
@@ -43,7 +47,12 @@ def grade_submission(submission_id: int, *, force_regrade: bool = False) -> Exam
     # step. Publish its compatibility snapshot before progress/analytics read it.
     # OMR rows explicitly marked for manual review remain DRAFT above.
     if submission.source == submission.Source.OMR_SCAN:
-        result.finalize()
+        if canonical_result is None:
+            return result
+        decision = finalize_omr_result_if_ready(result_id=int(canonical_result.id))
+        if not decision.projection_ready:
+            return result
+        result.refresh_from_db()
 
     # ✅ 시험 채점 완료 → progress / clinic 자동 갱신
     dispatch_progress_pipeline(submission_id=int(submission_id))

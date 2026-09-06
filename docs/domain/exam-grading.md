@@ -497,8 +497,21 @@ AI OMR 성공 콜백은 인식 fact를 저장한 뒤 같은 worker 프로세스�
 `Result` 동기화를 닫는다. 이 동기화는 문항별 최신 `ResultItem`과 append-only
 `ResultFact`를 같은 transaction에서 함께 저장하므로 점수 목록과 문항 분석이
 부분 성공으로 갈라지지 않는다. 수동 검토가 필요하지 않은 OMR은 legacy
-`ExamResult`도 `FINAL`로 확정한 다음 진행도와 수업 분석을 갱신하며, 검토 필요
-표시가 있는 OMR만 DRAFT로 유지한다. CPU/GPU AI worker 이미지는 API 전용 DRF를 설치하지
+`ExamResult`도 확정 준비 상태를 검사한다. 현재 점수 구조에 답변형 문항이 없을 때만
+즉시 `FINAL`로 확정하고 진행도와 수업 분석을 갱신한다. 답변형 문항이 있으면
+객관식 OMR 점수는 교직원 입력 화면에만 보존하고, 현재 대표 attempt의 모든 답변형
+`ResultItem` 또는 명시적인 `manual_subjective` 합산 근거가 채워질 때까지
+`ExamResult=DRAFT`, `grading_status=subjective_pending`으로 유지한다. 이 상태는
+학생·학부모 결과, 석차·평균, 합불·진척, 클리닉 생성·해소, 오답 후속, 성적 알림과
+외부 성적 출력에 사용하지 않는다. 시험의 `grading_mode`가 과거 값으로 남아 있어도
+실제 문항 점수 구조를 기준으로 판단한다.
+
+서술형 입력이 끝나면 같은 transaction에서 legacy 결과를 정확히 한 번 `FINAL`로
+전환하고 commit 뒤 진행도 파이프라인을 한 번만 실행한다. 같은 attempt를 재채점할 때는
+수기 답변형 `ResultItem`을 보존하지만, 대표 attempt가 바뀌면 이전 attempt의 수기
+답변형 문항을 새 OMR 제출에 재사용하지 않는다. tenant, enrollment, exam, submission,
+attempt 중 하나라도 현재 결과와 맞지 않거나 수동 검토가 남아 있으면 실패 폐쇄한다.
+검토 필요 표시가 있는 OMR도 DRAFT로 유지한다. CPU/GPU AI worker 이미지는 API 전용 DRF를 설치하지
 않으므로 이 경로의 점수 편집 임대 무효화는 Django ORM만 의존하는
 `score_edit_lease_state`를 사용한다. worker 이미지 빌드와
 `tests/test_worker_entrypoint_imports.py`는 DRF가 없는 환경에서
@@ -765,6 +778,10 @@ python manage.py test `
   apps.domains.results.tests.test_wrong_note_service `
   apps.domains.results.tests.test_security_regression `
   --settings apps.api.config.settings.test
+
+python -m pytest `
+  apps/domains/results/tests/test_mixed_omr_subjective_projection_pg.py `
+  --nomigrations -q
 ```
 
 검증은 PDF/HWP/HWPX 처리 상태, 검수 전 proposal, 승인·번호 변경·제외·tenant 차단,
@@ -776,6 +793,8 @@ python manage.py test `
 객관식·숫자 단답형이 섞인 원래 순서와 `answer_type`, 문항 배점
 합계·stale 배점 거부, 과거 혼합형 경계 복구, 시험 설정 stale version 거부와
 전체 PATCH 응답, 혼합형 OMR 보존, stale result version 거부,
+객관식만 판독된 혼합형의 DRAFT 유지와 학생·석차·클리닉 비공개, 서술형 완료 뒤
+exact-once FINAL 전환, 재채점 수기 점수 보존과 새 attempt의 과거 수기 점수 차단,
 다중 시트 선택, tenant 차단, 양끝을 포함하는 회차 범위, 다중 회차 시험의
 중복 제거, 오답노트 포함과 PDF/HWPX 문제·해설 분리, worker/R2 상태를 포함한다.
 Ymath 전체 원본을 운영 데이터 없이 persistent development에서 재현하는 절차와
