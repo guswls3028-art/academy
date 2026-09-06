@@ -76,6 +76,33 @@ jobs:
         run: |
           echo "short_sha=${GITHUB_SHA:0:8}" >> $GITHUB_OUTPUT
 
+      # A run can wait behind an earlier production mutation for a long time.
+      # Capture the manifest promoted by that earlier run after the workflow-level
+      # concurrency wait, rather than using the stale copy from this push SHA.
+      - name: Capture current verified release baseline
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          BASELINE_DIR="$RUNNER_TEMP/release-baseline"
+          mkdir -p "$BASELINE_DIR"
+          git fetch --no-tags origin main
+          git show origin/main:docs/reports/release-manifest.latest.json > "$RUNNER_TEMP/release-baseline/release-manifest.latest.json"
+          jq -e '
+            .schemaVersion == 1 and
+            .status == "successful" and
+            .complete == true and
+            (.gitSha | type == "string" and test("^[0-9a-f]{40}$"))
+          ' "$RUNNER_TEMP/release-baseline/release-manifest.latest.json" >/dev/null
+
+      - name: Upload current verified release baseline
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-baseline-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-baseline/release-manifest.latest.json
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Detect changes
         id: changes
         run: |
@@ -96,7 +123,7 @@ jobs:
           # its diff base from the last verified image tag, not event.before:
           # a failed workflow followed by a hotfix push must still rebuild all
           # previously unshipped runtime changes.
-          MANIFEST="docs/reports/release-manifest.latest.json"
+          MANIFEST="$RUNNER_TEMP/release-baseline/release-manifest.latest.json"
           force_full_build() {
             echo "$1 — full build"
             echo "build_all=true" >> $GITHUB_OUTPUT
@@ -610,6 +637,13 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Download current verified release baseline
+        if: github.event_name == 'push'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-baseline-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-baseline
+
       - name: Set up QEMU
         if: needs.detect-changes.outputs.build_base == 'true' || needs.detect-changes.outputs.force_full == 'true'
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
@@ -695,11 +729,12 @@ jobs:
               --query 'imageDetails[0].imageDigest' \
               --output text)
           else
-            if [ ! -f docs/reports/release-manifest.latest.json ]; then
+            BASELINE="$RUNNER_TEMP/release-baseline/release-manifest.latest.json"
+            if [ ! -f "$BASELINE" ]; then
               echo "::error::No successful release manifest exists. Run workflow_dispatch once to build all images."
               exit 1
             fi
-            BASE_DIGEST=$(jq -r '.images["academy-base"].digest // empty' docs/reports/release-manifest.latest.json)
+            BASE_DIGEST=$(jq -r '.images["academy-base"].digest // empty' "$BASELINE")
           fi
           if [[ ! "$BASE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "::error::academy-base digest resolution failed"
@@ -847,6 +882,13 @@ jobs:
           fetch-depth: 0
           ssh-key: ${{ secrets.ACADEMY_RELEASE_DEPLOY_KEY }}
 
+      - name: Download current verified release baseline
+        if: github.event_name == 'push'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-baseline-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-baseline
+
       - name: Configure AWS credentials (OIDC only)
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
         with:
@@ -886,7 +928,7 @@ jobs:
           # Remove leading whitespace from heredoc
           sed -i 's/^          //' "$REPORTS_DIR/ci-build.latest.md"
 
-          PRIOR="$REPORTS_DIR/release-manifest.latest.json"
+          PRIOR="$RUNNER_TEMP/release-baseline/release-manifest.latest.json"
           CANDIDATE="$REPORTS_DIR/release-manifest.candidate.json"
           jq -n \
             --arg generatedAt "$BUILD_TIME" \
