@@ -235,7 +235,6 @@ def finalize_omr_result_if_ready(*, result_id: int) -> OmrFinalizationDecision:
 
     result = (
         Result.objects.select_for_update()
-        .select_related("attempt", "enrollment")
         .get(id=int(result_id), target_type="exam")
     )
     if result.attempt_id:
