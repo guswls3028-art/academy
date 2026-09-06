@@ -8,6 +8,7 @@ from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db.models.query import QuerySet
 from django.test import TestCase
+from django.urls import resolve
 from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
 
@@ -22,7 +23,6 @@ from apps.domains.lectures.test_support import (
     create_lecture_fixture,
     create_session_fixture,
 )
-from apps.domains.results.views.session_scores_view import SessionScoreCorrectionView
 from apps.domains.students.test_support import create_student_fixture
 from apps.domains.submissions.models import Submission, SubmissionMedia
 from apps.domains.submissions.services import dispatcher
@@ -771,10 +771,10 @@ class HomeworkSubmissionMediaTests(TestCase):
                 "expected_updated_at": None,
             },
         )
-        graded = SessionScoreCorrectionView.as_view()(
-            grade_request,
-            session_id=self.session.id,
+        grade_match = resolve(
+            f"/api/v1/results/admin/sessions/{self.session.id}/score-correction/"
         )
+        graded = grade_match.func(grade_request, **grade_match.kwargs)
         self.assertEqual(graded.status_code, 200, graded.data)
         AssessmentCorrection = django_apps.get_model("progress", "AssessmentCorrection")
         correction = AssessmentCorrection.objects.get(
