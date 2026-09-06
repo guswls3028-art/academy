@@ -17,13 +17,29 @@ ENV PYTHONDONTWRITEBYTECODE=1
 # 빌드 도구 설치 (Gevent 등 C extension 컴파일용)
 RUN test -n "${APT_REFRESH_TOKEN}" \
     && apt-get update && apt-get install -y --no-install-recommends \
+    autoconf \
+    automake \
+    ca-certificates \
+    curl \
+    dpkg-dev \
     gcc \
     g++ \
     libc6-dev \
+    liblzma-dev \
     libpq-dev \
+    libtool \
+    make \
+    patch \
+    pkg-config \
+    quilt \
+    xz-utils \
+    zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
+
+COPY docker/native-security/build-fixed-libs.sh /usr/local/bin/build-fixed-libs.sh
+RUN sh /usr/local/bin/build-fixed-libs.sh /build/native-security/out
 
 # 의존성 파일 복사 및 설치 (pip 업그레이드와 단일 RUN으로 레이어 최소화)
 COPY requirements/constraints.txt ./requirements/constraints.txt
@@ -41,6 +57,8 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONPATH=/app
 
+COPY --from=builder /build/native-security/out /tmp/academy-native-security
+
 # 런타임 의존성만 설치 (빌드 도구 제외)
 RUN test -n "${APT_REFRESH_TOKEN}" \
     && apt-get update && apt-get install -y --no-install-recommends \
@@ -49,6 +67,17 @@ RUN test -n "${APT_REFRESH_TOKEN}" \
     fonts-nanum \
     openssl \
     util-linux \
+    && dpkg -i /tmp/academy-native-security/*.deb \
+    && ldconfig \
+    && rm -rf /tmp/academy-native-security \
+    && zlib_version="$(dpkg-query -W -f='${Version}' zlib1g)" \
+    && dpkg --compare-versions "$zlib_version" ge "1:1.3.3~academy.git20260904.e3dc0a8-1" \
+    && pcre2_version="$(dpkg-query -W -f='${Version}' libpcre2-8-0)" \
+    && dpkg --compare-versions "$pcre2_version" ge "10.48-2~academy1" \
+    && libxml2_version="$(dpkg-query -W -f='${Version}' libxml2)" \
+    && dpkg --compare-versions "$libxml2_version" ge "2.15.4+really2.9.14-2.1+deb13u3+academy1" \
+    && python -c "import ctypes, zlib; assert zlib.decompress(zlib.compress(b'academy')) == b'academy'; ctypes.CDLL('libxml2.so.2')" \
+    && printf 'academy\n' | grep -P '^academy$' \
     && openssl_version="$(dpkg-query -W -f='${Version}' openssl)" \
     && dpkg --compare-versions "$openssl_version" ge "3.5.7-1~deb13u2" \
     && util_linux_version="$(dpkg-query -W -f='${Version}' util-linux)" \

@@ -293,6 +293,39 @@ Messaging·AI·Tools 여섯 완료 scan에서 새 두 CVE와 기존 Perl identit
 사라지고 High exact identity가 새 상한과 일치해야만 release를 진행한다. 실패한
 run은 development/preprod/production을 변경하지 않았고 shared lock을 반환했다.
 
+2026-09-06 성적 편집 인계 후보 `sha-0134ce8c...-run-34013277396-1`은
+development 진입 전 ECR High 게이트에서 신규 공개된 native-library finding을
+차단했다. 여섯 새 digest의 완료 scan을 직접 재조회한 결과 `CVE-2026-86145`
+(`pcre2` `10.46-1~deb13u1`)와 `CVE-2026-85091` (`zlib`
+`1.3.dfsg+really1.3.1-1`)은 여섯 repository 모두에 있었고,
+`CVE-2026-86140` (`libxml2`
+`2.12.7+dfsg+really2.9.14-2.1+deb13u3`)은 API·Video·AI·Tools 네
+repository에만 있었다. 실패한 run은 development/preprod/production을 모두
+건너뛰고 shared lock을 반환했다.
+
+이 세 finding은 High 상한이나 acceptance를 늘리지 않고
+`docker/native-security/build-fixed-libs.sh`가 공통 base build에서 수정한다.
+모든 원본과 patch는 HTTPS URL과 SHA-256으로 고정한다. zlib은 공개된
+`e3dc0a85...` 수정 커밋을 기존 `zlib1g` ABI로 패키징하고, pcre2는 수정 릴리스
+10.48의 8-bit shared library만 기존 `libpcre2-8-0` ABI로 패키징한다. libxml2는
+새 SONAME으로 직접 교체하지 않는다. trixie `deb13u3` 전체 patch series를 먼저
+적용한 2.9.14 source에 공식 `d1686f91...` bounds-check patch만 backport하여
+`libxml2.so.2`를 유지한다. 세 package는 base runtime의 같은 Debian package
+이름을 원자적으로 upgrade하므로 이후 service `apt` layer가 취약 버전으로
+downgrade하지 않는다.
+
+libxml2 원본은 checksum-pinned GNOME 2.9.14 전체 tarball을 사용하고, Debian이
+`+dfsg` repack에서 제외한 upstream test fixture까지 builder 안에서만 실행한다.
+runtime 패키지에는 test fixture나 build tool을 포함하지 않는다. Base build는 세
+upstream test suite, exact package 최소 버전, Python zlib
+round-trip, libxml2 dynamic load, PCRE2 match를 모두 확인한다. base/security 파일이
+바뀐 PR은 `Native security arm64 image contract`가 production과 같은 arm64 이미지를
+실제로 build하고 같은 ABI 확인을 컨테이너 안에서 반복한다. 어떤 source hash,
+patch, build, ABI load 또는 version check가 달라도 이미지 생성 자체가 실패한다.
+다음 후보는 기존 상한 Base 3, API 16, Video 3, Messaging 3, AI 16, Tools 16을
+그대로 만족하면서 세 CVE가 여섯 완료 scan에 없음을 입증해야만 persistent
+development, isolated preprod, production 순서로 진행한다.
+
 집중 검증:
 
 ```powershell

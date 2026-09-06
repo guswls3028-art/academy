@@ -205,6 +205,7 @@ jobs:
           CHANGED="$CHANGED_BASE"
           BASE=false
           changed_matches "^docker/Dockerfile\.base$" && BASE=true
+          changed_matches "^docker/native-security/" && BASE=true
           changed_matches "^requirements/common\.txt$" && BASE=true
           changed_matches "^libs/" && BASE=true
           echo "build_base=$BASE" >> $GITHUB_OUTPUT

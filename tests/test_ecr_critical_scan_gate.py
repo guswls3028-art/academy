@@ -327,6 +327,49 @@ def test_base_image_requires_security_fixed_util_linux() -> None:
     )
 
 
+def test_base_image_backports_new_native_library_fixes_without_acceptance() -> None:
+    repository = Path(__file__).parents[1]
+    dockerfile = (repository / "docker" / "Dockerfile.base").read_text(
+        encoding="utf-8"
+    )
+    build_script = (
+        repository / "docker" / "native-security" / "build-fixed-libs.sh"
+    ).read_text(encoding="utf-8")
+    baseline = json.loads(
+        (repository / "docs" / "ssot" / "ecr-high-risk-baseline.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert not {
+        "CVE-2026-85091",
+        "CVE-2026-86140",
+        "CVE-2026-86145",
+    } & {entry["cve"] for entry in baseline["acceptedHighFindings"]}
+    assert "COPY docker/native-security/build-fixed-libs.sh" in dockerfile
+    assert "sh /usr/local/bin/build-fixed-libs.sh /build/native-security" in dockerfile
+    assert "dpkg -i /tmp/academy-native-security/*.deb" in dockerfile
+    for build_tool in ("autoconf", "automake", "libtool"):
+        assert f"    {build_tool} \\" in dockerfile
+    for package, minimum in (
+        ("zlib1g", "1:1.3.3~academy.git20260904.e3dc0a8-1"),
+        ("libpcre2-8-0", "10.48-2~academy1"),
+        ("libxml2", "2.15.4+really2.9.14-2.1+deb13u3+academy1"),
+    ):
+        assert f"dpkg-query -W -f='${{Version}}' {package}" in dockerfile
+        assert f'ge "{minimum}"' in dockerfile
+    for cve in ("CVE-2026-85091", "CVE-2026-86140", "CVE-2026-86145"):
+        assert cve in build_script
+    assert (
+        "https://download.gnome.org/sources/libxml2/2.9/libxml2-2.9.14.tar.xz"
+        in build_script
+    )
+    assert "60d74a257d1ccec0475e749cba2f21559e48139efba6ff28224357c7c798dfee" in build_script
+    assert "autoreconf --force --install" in build_script
+    assert build_script.count("sha256sum --check") == 1
+    assert build_script.count("download \\") == 5
+
+
 def test_tesseract_runtimes_pin_security_fixed_libcurl() -> None:
     repository = Path(__file__).parents[1]
     affected = {
