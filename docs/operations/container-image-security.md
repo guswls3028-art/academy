@@ -293,6 +293,34 @@ Messaging·AI·Tools 여섯 완료 scan에서 새 두 CVE와 기존 Perl identit
 사라지고 High exact identity가 새 상한과 일치해야만 release를 진행한다. 실패한
 run은 development/preprod/production을 변경하지 않았고 shared lock을 반환했다.
 
+2026-09-06 성적 편집 인계 후보 `sha-0134ce8c...-run-34013277396-1`은
+development 진입 전 ECR High 게이트에서 신규 공개된 native-library finding을
+차단했다. 여섯 새 digest의 완료 scan을 직접 재조회한 결과 `CVE-2026-86145`
+(`pcre2` `10.46-1~deb13u1`)와 `CVE-2026-85091` (`zlib`
+`1.3.dfsg+really1.3.1-1`)은 여섯 repository 모두에 있었고,
+`CVE-2026-86140` (`libxml2`
+`2.12.7+dfsg+really2.9.14-2.1+deb13u3`)은 API·Video·AI·Tools 네
+repository에만 있었다. exact High 수는 Base 5, API 19, Video 6,
+Messaging 5, AI 19, Tools 19였다. Debian tracker에서 pcre2 trixie는
+`no-dsa`/minor이며 10.48만 unstable에 있고, zlib은 unstable까지 미수정,
+libxml2는 sid 2.15.4에만 수정본이 있어 trixie와 다른 suite를 혼합하지 않는다.
+
+pcre2 finding은 공격자 지정 recursive DFA 정규식과 native
+`pcre2_dfa_match` workspace가 모두 필요하지만 Academy entrypoint는 PCRE2를
+호출하지 않고 제품 정규식은 Python `re`가 소유한다. zlib finding은 non-blocking
+native `gzwrite`가 정지한 뒤 `gzprintf`/`gzvprintf`를 호출해야 하며, 저장소의
+zlib 사용은 Python의 bounded decompression이고 해당 native formatted-write
+API가 없다. libxml2 finding은 DTD content model을 `xmlSnprintfElements`로
+표현하는 검증 경로에 있다. 업로드 XML은 Python `ElementTree`로 읽고 HWPX 경로는
+application-owned tree 생성만 하며 DTD validation을 하지 않는다. Video의 고정
+FFmpeg는 external-library autodetection을 끄고 libx264만 명시해 libxml2 호출
+경로를 포함하지 않는다. 따라서 완료 scan이 증명한 exact
+repository/CVE/package/version만 기존과 같은 2026-09-19 만료로 한시 수용한다.
+실패한 run은 development/preprod/production을 모두 건너뛰고 shared lock을
+반환했다. 다음 후보는 여섯 새 digest의 exact scan 일치부터 persistent
+development, isolated preprod, production 검증까지 전체 게이트를 다시 통과해야
+하며 Debian trixie 수정본이 나오면 해당 acceptance와 상한을 즉시 낮춘다.
+
 집중 검증:
 
 ```powershell

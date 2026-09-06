@@ -1,12 +1,12 @@
 {
   "schemaVersion": 3,
   "maximumHighFindings": {
-    "academy-base": 3,
-    "academy-api": 16,
-    "academy-video-worker": 3,
-    "academy-messaging-worker": 3,
-    "academy-ai-worker-cpu": 16,
-    "academy-tools-worker": 16
+    "academy-base": 5,
+    "academy-api": 19,
+    "academy-video-worker": 6,
+    "academy-messaging-worker": 5,
+    "academy-ai-worker-cpu": 19,
+    "academy-tools-worker": 19
   },
   "acceptedHighFindings": [
     {
@@ -225,6 +225,52 @@
       "expiresOn": "2026-09-19",
       "vendorTracker": "https://security-tracker.debian.org/tracker/CVE-2026-16118",
       "rationale": "The affected xdgmime parser requires an attacker-controlled MIME magic database in a user-writable XDG data directory and a GLib content-type guess call. Academy API, AI, and Tools containers expose no local user session, never load product files as an XDG MIME database, and use Python validators rather than GLib MIME detection. Debian trixie has no stable fix, so this exact identity is accepted only until the stated expiry."
+    },
+    {
+      "cve": "CVE-2026-86145",
+      "packageName": "pcre2",
+      "packageVersion": "10.46-1~deb13u1",
+      "repositories": [
+        "academy-base",
+        "academy-api",
+        "academy-video-worker",
+        "academy-messaging-worker",
+        "academy-ai-worker-cpu",
+        "academy-tools-worker"
+      ],
+      "expiresOn": "2026-09-19",
+      "vendorTracker": "https://security-tracker.debian.org/tracker/CVE-2026-86145",
+      "rationale": "The PCRE2 issue requires an attacker-controlled recursive DFA regular expression together with the native pcre2_dfa_match workspace path. Academy runtime entrypoints do not call PCRE2 or expose native regular-expression compilation; product matching uses Python's re engine. Debian trixie has no fixed package yet and classifies this as no-dsa/minor, so only this exact identity is accepted until expiry."
+    },
+    {
+      "cve": "CVE-2026-85091",
+      "packageName": "zlib",
+      "packageVersion": "1.3.dfsg+really1.3.1-1",
+      "repositories": [
+        "academy-base",
+        "academy-api",
+        "academy-video-worker",
+        "academy-messaging-worker",
+        "academy-ai-worker-cpu",
+        "academy-tools-worker"
+      ],
+      "expiresOn": "2026-09-19",
+      "vendorTracker": "https://security-tracker.debian.org/tracker/CVE-2026-85091",
+      "rationale": "The zlib issue requires non-blocking native gzwrite followed by gzprintf or gzvprintf after a write stall. Academy uses Python zip and bounded zlib decompression paths and does not call the native formatted gzip-write APIs. Debian trixie and unstable have no fixed package yet, so only this exact identity is accepted until expiry."
+    },
+    {
+      "cve": "CVE-2026-86140",
+      "packageName": "libxml2",
+      "packageVersion": "2.12.7+dfsg+really2.9.14-2.1+deb13u3",
+      "repositories": [
+        "academy-api",
+        "academy-video-worker",
+        "academy-ai-worker-cpu",
+        "academy-tools-worker"
+      ],
+      "expiresOn": "2026-09-19",
+      "vendorTracker": "https://security-tracker.debian.org/tracker/CVE-2026-86140",
+      "rationale": "The libxml2 issue is in xmlSnprintfElements while formatting DTD validation content models. Academy upload extraction uses Python ElementTree, HWPX output creates an application-owned tree without DTD validation, and the Video FFmpeg build enables only libx264 after disabling external-library autodetection, with no libxml2 call path. Debian trixie has no fixed package, so only the four observed runtime identities are accepted until expiry."
     }
   ]
 }

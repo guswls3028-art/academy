@@ -190,7 +190,7 @@ def test_high_baseline_is_exact_and_allows_non_increase() -> None:
         )
     )
 
-    assert gate.evaluate_high_budget("academy-base", findings, baselines, known) == 3
+    assert gate.evaluate_high_budget("academy-base", findings, baselines, known) == 5
 
 
 def test_current_high_acceptances_are_exact_and_time_bounded() -> None:
@@ -201,7 +201,7 @@ def test_current_high_acceptances_are_exact_and_time_bounded() -> None:
     libssh2 = [entry for entry in accepted if entry["packageName"] == "libssh2"]
     glib = [entry for entry in accepted if entry["packageName"] == "glib2.0"]
     openssl = [entry for entry in accepted if entry["packageName"] == "openssl"]
-    assert len(accepted) == 16
+    assert len(accepted) == 19
     assert {entry["cve"] for entry in libssh2} == {
         "CVE-2026-58050",
         "CVE-2026-58051",
@@ -257,6 +257,9 @@ def test_current_high_acceptances_are_exact_and_time_bounded() -> None:
         ("CVE-2026-66033", "libssh2", "1.11.1-1+deb13u1"),
         ("CVE-2026-66034", "libssh2", "1.11.1-1+deb13u1"),
         ("CVE-2026-66035", "libssh2", "1.11.1-1+deb13u1"),
+        ("CVE-2026-85091", "zlib", "1.3.dfsg+really1.3.1-1"),
+        ("CVE-2026-86140", "libxml2", "2.12.7+dfsg+really2.9.14-2.1+deb13u3"),
+        ("CVE-2026-86145", "pcre2", "10.46-1~deb13u1"),
     }
 
     baselines, known = gate.load_high_baselines(path, date(2026, 8, 23))
@@ -267,7 +270,7 @@ def test_current_high_acceptances_are_exact_and_time_bounded() -> None:
             if repository == "academy-api"
         )
     )
-    assert gate.evaluate_high_budget("academy-api", api_findings, baselines, known) == 16
+    assert gate.evaluate_high_budget("academy-api", api_findings, baselines, known) == 19
     tools_findings = _scan(
         *(
             _finding(cve, package, version, "HIGH")
@@ -282,8 +285,44 @@ def test_current_high_acceptances_are_exact_and_time_bounded() -> None:
             baselines,
             known,
         )
-        == 16
+        == 19
     )
+
+
+def test_new_native_library_highs_match_completed_image_scans() -> None:
+    path = Path(__file__).parents[1] / "docs" / "ssot" / "ecr-high-risk-baseline.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    accepted = {
+        entry["cve"]: entry
+        for entry in document["acceptedHighFindings"]
+        if entry["cve"]
+        in {"CVE-2026-85091", "CVE-2026-86140", "CVE-2026-86145"}
+    }
+
+    all_repositories = [
+        "academy-base",
+        "academy-api",
+        "academy-video-worker",
+        "academy-messaging-worker",
+        "academy-ai-worker-cpu",
+        "academy-tools-worker",
+    ]
+    assert accepted["CVE-2026-85091"]["repositories"] == all_repositories
+    assert accepted["CVE-2026-86145"]["repositories"] == all_repositories
+    assert accepted["CVE-2026-86140"]["repositories"] == [
+        "academy-api",
+        "academy-video-worker",
+        "academy-ai-worker-cpu",
+        "academy-tools-worker",
+    ]
+    assert document["maximumHighFindings"] == {
+        "academy-base": 5,
+        "academy-api": 19,
+        "academy-video-worker": 6,
+        "academy-messaging-worker": 5,
+        "academy-ai-worker-cpu": 19,
+        "academy-tools-worker": 19,
+    }
 
 
 def test_expired_high_acceptance_blocks_before_scanning() -> None:
@@ -302,8 +341,8 @@ def test_high_acceptance_remains_valid_through_expiry_day() -> None:
         Path(__file__).parents[1] / "docs" / "ssot" / "ecr-high-risk-baseline.json",
         date(2026, 9, 19),
     )
-    assert baselines["academy-api"] == 16
-    assert len([key for key in reviewed if key[0] == "academy-api"]) == 16
+    assert baselines["academy-api"] == 19
+    assert len([key for key in reviewed if key[0] == "academy-api"]) == 19
 
 
 def test_base_image_requires_security_fixed_openssl() -> None:
