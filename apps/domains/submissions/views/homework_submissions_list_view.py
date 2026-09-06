@@ -10,6 +10,7 @@ from rest_framework.permissions import IsAuthenticated
 from apps.core.permissions import TenantResolvedAndStaff
 from apps.domains.submissions.models import Submission
 from apps.domains.submissions.services.homework_media import (
+    homework_media_set_fingerprint_for_submissions,
     serialize_homework_media,
     serialize_legacy_homework_media,
 )
@@ -87,10 +88,16 @@ class HomeworkSubmissionsListView(APIView):
         # ✅ 클리닉 하이라이트 일괄 계산
         submissions_list = list(qs)
         enrollment_ids = set()
+        submissions_by_enrollment: dict[int, list[Submission]] = {}
         for s in submissions_list:
             eid = getattr(s, "enrollment_id", None)
             if eid:
                 enrollment_ids.add(int(eid))
+                submissions_by_enrollment.setdefault(int(eid), []).append(s)
+        media_fingerprint_by_enrollment = {
+            enrollment_id: homework_media_set_fingerprint_for_submissions(submissions)
+            for enrollment_id, submissions in submissions_by_enrollment.items()
+        }
 
         highlight_map = clinic_highlight_map_for_enrollments(
             tenant=tenant,
@@ -168,6 +175,9 @@ class HomeworkSubmissionsListView(APIView):
                     "file_type": compat_file_type,
                     "file_size": primary_file.get("file_size") if primary_file else None,
                     "files": files,
+                    "media_set_fingerprint": media_fingerprint_by_enrollment.get(
+                        int(enrollment_id) if enrollment_id else 0
+                    ),
                     "created_at": s.created_at.isoformat() if hasattr(s, "created_at") and s.created_at else None,
                     "profile_photo_url": _get_photo_url(student),
                     "name_highlight_clinic_target": highlight_map.get(int(enrollment_id), False) if enrollment_id else False,

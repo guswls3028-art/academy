@@ -172,13 +172,29 @@ X를 나중에 다시 맞힌 뒤에도 남기려면 O·복습으로 바꾼다. �
   동일 키를 덮어쓰고 상태를 복구하게 한다. 실패 상태 기록도 best-effort로 시도하고
   API는 성공으로 응답하지 않는다. 따라서 DB 장애 중 이름 없는 orphan을 새로 만들지
   않으며 감사 행과 object identity의 연결이 유지된다.
+- 학생 업로드·삭제와 교사의 일반 점수 저장·직접 확인 완료는 tenant 안의 canonical
+  `HomeworkAssignment` 행을 먼저 잠근다. 공통 잠금 순서는
+  `HomeworkAssignment` → `HomeworkScore`/`AssessmentCorrection` 또는
+  `Submission`/`SubmissionMedia`다. 학생 쓰기는 assignment 잠금 뒤 현재
+  완료/통과 상태를 다시 확인한다. 교사 완료가 먼저 커밋됐으면 같은
+  `client_file_id` 재시도를 포함한 upload/delete를 object 저장이나 행 변경 전에
+  `409 HOMEWORK_MEDIA_REVIEWED`로 거부한다. 학생 변경이 먼저 잠금을 얻었으면 교사는
+  그 transaction이 끝날 때까지 기다린 뒤 확정된 media set만 검수 근거로 기록한다.
+- 업로드 transaction은 R2 원본 저장과 최종 `uploaded` 상태 확정까지 assignment
+  잠금을 유지한다. object 저장 실패는 transaction 안에서 해당 deterministic 행을
+  `failed`로 만든 뒤 transaction을 커밋하고 `503`을 반환하므로 같은
+  `client_file_id`와 object key로 재시도할 수 있다. 다른 파일의 앞선 성공은
+  rollback하지 않고 object를 추측 삭제하지 않는다.
+- 교직원 제출 목록은 학생별 현재 활성 media set의 timestamp 비의존 SHA-256인
+  `media_set_fingerprint`를 반환한다. 직접 확인 완료는 같은 assignment 잠금 안에서
+  다시 계산한 값을 `AssessmentCorrection.source_fingerprint`에 저장한다. 활성 legacy
+  object와 제거되지 않은 child의 identity, 내용 fingerprint, 순서, 종류·MIME·용량,
+  저장 상태를 포함하고 soft-remove된 파일은 제외한다.
 - 학생 삭제는 행과 object를 즉시 없애지 않고 `removed_at`, `removed_by`,
-  `removed` 상태를 기록한다. 점수 또는 완료된 교정 기록 뒤에도 보충 증거 파일은
-  계속 추가할 수 있지만, 이미 검수 근거가 된 파일 삭제는
-  `409 HOMEWORK_MEDIA_REVIEWED`로 막는다. soft-delete object는 감사·복구 근거로
-  보존하며, 향후 정리도 tenant·행·보존기간을 확정한 별도 exact-target 작업에서만
-  수행한다. 이번 expand migration은 child table만 만들며 기존 행, constraint,
-  object를 바꾸거나 지우지 않는다.
+  `removed` 상태를 기록한다. soft-delete object는 감사·복구 근거로 보존하며, 향후
+  정리도 tenant·행·보존기간을 확정한 별도 exact-target 작업에서만 수행한다. 이번
+  expand migration은 child table만 만들며 기존 행, constraint, object를 바꾸거나
+  지우지 않는다.
 - 기존 `homework_image`·`homework_video` 단건 `Submission.file_key`는 그대로
   보존한다. 새 목록에서는 `legacy-{submission_id}`인 파일 하나로 투영하고, soft
   remove는 기존 행의 `meta`에 감사 시각을 기록한다. 구 단건 제출 생성 API도
@@ -198,6 +214,12 @@ X를 나중에 다시 맞힌 뒤에도 남기려면 O·복습으로 바꾼다. �
   완료/통과로 잠근다. 미입력, `NOT_SUBMITTED`, 미완료/불합격, 이전 통과 뒤 최신
   재시도가 불합격인 과제는 과거 검수 이력과 무관하게 학생이 파일을 추가·삭제해
   보완할 수 있다. 점수 행이 있으면 최신 시도 결과가 직접 확인보다 우선한다.
+
+PostgreSQL barrier 회귀는
+`apps/domains/results/tests/test_assessment_correction_concurrency_pg.py`에서 교사 선행
+거부와 학생 upload/delete 선행 직렬화를 검증한다. 학생 upload → reload → 교직원
+목록/fingerprint 확인 → 직접 완료 → 같은 파일 retry 및 delete 거부 journey는
+`apps/domains/submissions/tests/test_homework_media_submission.py`가 검증한다.
 
 | Method | Path | 역할 |
 |--------|------|------|
