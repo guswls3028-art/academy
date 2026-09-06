@@ -45,12 +45,18 @@ def test_selected_base_build_refreshes_apt_packages() -> None:
 
 def test_native_security_changes_build_and_run_the_arm64_base_in_pr() -> None:
     workflow = _read(QUALITY_WORKFLOW)
+    verifier = _read(
+        REPO_ROOT / "docker" / "native-security" / "verify-fixed-libs.sh"
+    )
 
     assert 'docker/Dockerfile.base docker/native-security/' in workflow
     assert "name: Native security arm64 image contract" in workflow
     assert "platforms: linux/arm64" in workflow
     assert "load: true" in workflow
-    assert "academy-base:native-security-check sh -ec" in workflow
+    assert "verify-fixed-libs.sh:/tmp/verify-fixed-libs.sh:ro" in workflow
+    assert "academy-base:native-security-check sh /tmp/verify-fixed-libs.sh" in workflow
+    for package in ("zlib1g", "libpcre2-8-0", "libxml2"):
+        assert f"dpkg-query -W -f='${{Version}}' {package}" in verifier
     assert "docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8" in workflow
     assert "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c" in workflow
     assert "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a" in workflow
