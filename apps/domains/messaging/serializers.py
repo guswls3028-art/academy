@@ -172,6 +172,10 @@ class MessageTemplateSerializer(serializers.ModelSerializer):
 
 class SendMessageRequestSerializer(serializers.Serializer):
     """알림톡 발송 요청: 학생/학부모 수신자 + 직접 입력 본문 또는 템플릿 ID."""
+    client_request_id = serializers.UUIDField(
+        required=False,
+        help_text="한 발송 동작의 학생/학부모 요청을 묶는 PII-free 요청 식별자",
+    )
     student_ids = serializers.ListField(
         child=serializers.IntegerField(min_value=1),
         max_length=200,

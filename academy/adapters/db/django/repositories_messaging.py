@@ -59,6 +59,8 @@ def create_notification_log(
     recipient_fingerprint: str = "",
     origin_type: str = "",
     origin_id: str = "",
+    batch_id: str | None = None,
+    sender_staff_id: int | None = None,
 ) -> bool:
     """
     NotificationLog 1건 생성. Worker에서 직접 ORM 접근 대신 이 함수만 사용.
@@ -110,6 +112,8 @@ def create_notification_log(
         ),
         origin_type=origin_type[:64] if origin_type else "",
         origin_id=origin_id[:128] if origin_id else "",
+        batch_id=batch_id or None,
+        sender_staff_id=sender_staff_id,
     )
     return True
 
@@ -165,6 +169,8 @@ def claim_notification_slot(
     recipient_fingerprint: str = "",
     origin_type: str = "",
     origin_id: str = "",
+    batch_id: str | None = None,
+    sender_staff_id: int | None = None,
     stale_after_seconds: int = 300,
 ) -> tuple[bool, int | None]:
     """
@@ -210,6 +216,8 @@ def claim_notification_slot(
                 ),
                 origin_type=origin_type[:64] if origin_type else "",
                 origin_id=origin_id[:128] if origin_id else "",
+                batch_id=batch_id or None,
+                sender_staff_id=sender_staff_id,
             )
         return True, log.id
     except IntegrityError:
@@ -246,6 +254,8 @@ def claim_notification_slot(
                     ),
                     origin_type=origin_type[:64] if origin_type else "",
                     origin_id=origin_id[:128] if origin_id else "",
+                    batch_id=batch_id or None,
+                    sender_staff_id=sender_staff_id,
                 )
                 if updated == 1:
                     return True, existing.id
@@ -286,6 +296,8 @@ def claim_notification_slot(
                 ),
                 origin_type=origin_type[:64] if origin_type else "",
                 origin_id=origin_id[:128] if origin_id else "",
+                batch_id=batch_id or None,
+                sender_staff_id=sender_staff_id,
             )
             if updated == 1:
                 return True, existing.id

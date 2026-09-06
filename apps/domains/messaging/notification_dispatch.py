@@ -505,6 +505,13 @@ def execute_notification_batch(
     notification_type = payload.get("notification_type", "")
     send_to = payload.get("send_to", "parent")
     target_type = "parent" if send_to == "parent" else "student"
+    request_id = str(payload.get("request_id") or batch_id)
+    request_identity = {
+        "request_id": request_id,
+        "batch_id": str(batch_id),
+        "origin_type": "manual_send",
+        "origin_id": request_id,
+    }
     provider_identity = {
         key: payload[key]
         for key in (
@@ -528,7 +535,7 @@ def execute_notification_batch(
             batch_id, raw_message_mode, _can_alimtalk,
         )
         return {
-            "batch_id": batch_id,
+            **request_identity,
             "sent_count": 0,
             "pending_count": 0,
             "accepted_count": 0,
@@ -581,7 +588,13 @@ def execute_notification_batch(
                         "target_type": target_type,
                         "target_id": r.get("student_id"),
                         "target_name": r.get("student_name", ""),
-                        "occurrence_key": f"batch_{batch_id}",
+                        "request_id": request_id,
+                        "batch_id": str(batch_id),
+                        "sender_staff_id": staff_id,
+                        "trace_identity_version": "v1",
+                        "origin_type": "manual_send",
+                        "origin_id": request_id,
+                        "occurrence_key": f"request:{request_id}:batch:{batch_id}",
                         **delivery_identity,
                     },
                 }
@@ -631,13 +644,18 @@ def execute_notification_batch(
     )
 
     result = {
-        "batch_id": batch_id,
+        **request_identity,
         "sent_count": sent,
         "pending_count": pending,
         "accepted_count": sent + pending,
         "failed_count": failed,
         "blocked_count": blocked,
     }
+    if result["accepted_count"] == 0:
+        result.update(
+            error="발송 가능한 수신자가 없거나 발송 요청이 접수되지 않았습니다.",
+            code="message_not_accepted",
+        )
     if not process:
         result["_outbox_ids"] = outbox_ids
     return result

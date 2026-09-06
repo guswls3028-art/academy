@@ -32,6 +32,29 @@
   적용한다. 클리닉 운영 화면은 `clinic_participant:{id}:` 접두사로 한 참가자의
   처리 이력을 폴링한다. 응답의 `origin_id`는 전화번호가 아닌 domain 식별자다.
 
+## 직접 발송 요청의 정확한 추적
+
+수동 발송 UI는 사용자가 한 번 **발송하기**를 누를 때 UUID `client_request_id`를
+하나 만든다. 학생과 보호자를 함께 선택해 두 API 요청이 생겨도 같은 request ID를
+사용하고, 서버는 각 API 접수마다 별도 UUID `batch_id`를 발급한다. outbox, SQS,
+worker log는 `request_id`, `batch_id`, `origin_type=manual_send`,
+`origin_id=request_id`를 그대로 보존한다. 신규 trace payload는 worker가 UUID,
+origin과 `occurrence_key=request:{request_id}:batch:{batch_id}`의 exact 일치를 다시
+검증하며 drift가 있으면 공급자를 호출하지 않는다.
+
+목록 API는 다음 exact filter와 같은 이름의 projection을 제공한다.
+
+- `request_id=<UUID>`: `origin_type=manual_send`와 exact `origin_id`가 함께 맞는 로그만
+  반환한다. 참관 사본 등 다른 provenance는 같은 correlation 값이 있어도 섞지 않는다.
+- `batch_id=<UUID>`: 한 번의 학생 또는 보호자 API 접수에서 생성된 로그만 반환한다.
+- `origin_type`, `origin_id`: 허용 문자 검증 뒤 현재 tenant에서 exact 일치시킨다.
+
+형식이 잘못된 exact filter는 빈 목록으로 숨기지 않고 `400`을 반환한다. 직접 발송
+응답의 `accepted_count=0`은 성공 응답이 아니며, 유효 번호가 하나도 없으면
+`422 no_valid_phone`, 큐·예약 접수가 전부 실패하면 `503 message_not_accepted`다. 화면은
+즉시 발송 접수 뒤 `request_id` 필터가 붙은 발송 내역으로 이동해 같은 요청만 다시
+불러온다.
+
 ## 상태와 시각 의미
 
 `NotificationLog.status`의 의미를 보존한다.
@@ -65,6 +88,11 @@
 - `provider_message_id`: `owner`, `admin`에게만 제공하는 정확한 증거
 - `failure_code`, `failure_reason`: 개인정보가 제거된 실패 안내
 
+`success=true`와 `status=sent`의 목록 projection은 `provider_delivery_status=
+provider_accepted`다. provider ID의 노출 여부나 boolean만으로 `delivered`를 만들지
+않는다. `delivered`와 최종 `failed`는 저장된 provider ID로 상세의 read-only 최종
+상태 확인을 수행한 응답에서만 나타난다.
+
 `message_body`가 비어 있으면 원문을 추정하거나 템플릿에서 재구성하지 않는다.
 
 ## 클리닉 실패 재시도
@@ -86,4 +114,4 @@ C:\academy\backend\.venv\Scripts\python.exe manage.py test tests.test_clinic_tim
 ```
 
 테스트는 테넌트 격리, 역할별 본문·공급자 증거, 민감 본문 비복원, 실패 원문
-비노출을 고정한다.
+비노출과 request/batch/origin exact 필터·projection을 고정한다.

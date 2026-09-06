@@ -361,7 +361,7 @@ def _retry_delay(attempt_count: int) -> timedelta:
     return timedelta(seconds=seconds)
 
 
-def _terminal_payload_error(payload: object) -> str:
+def _terminal_payload_error(payload: object, *, trigger: str = "") -> str:
     if not isinstance(payload, dict):
         return "invalid_payload_not_object"
     if not payload.get("tenant_id"):
@@ -370,6 +370,11 @@ def _terminal_payload_error(payload: object) -> str:
         return "invalid_payload_missing_recipient"
     if not str(payload.get("text") or "").strip():
         return "invalid_payload_missing_text"
+    from apps.domains.messaging.observers import observer_copy_block_reason
+
+    observer_block = observer_copy_block_reason(trigger=trigger, payload=payload)
+    if observer_block:
+        return observer_block
     mode = str(payload.get("message_mode") or "alimtalk").strip().lower()
     from apps.domains.messaging.policy import get_message_mode_block_reason
 
@@ -553,7 +558,10 @@ def _claim_due_notifications(
                 ])
                 terminal_count += 1
                 continue
-            terminal_error = _terminal_payload_error(notification.payload)
+            terminal_error = _terminal_payload_error(
+                notification.payload,
+                trigger=notification.trigger,
+            )
             if not terminal_error:
                 terminal_error = _terminal_policy_error(
                     business_tenant_id=notification.tenant_id,
@@ -768,7 +776,10 @@ def process_due_notifications(
     # 외부 SQS 호출을 DB transaction/row lock 바깥에서 수행한다. dispatching
     # 상태가 프로세스 crash를 기록하며, stale claim은 같은 occurrence_key로만 재시도한다.
     for claim in claims:
-        terminal_error = _terminal_payload_error(claim.payload)
+        terminal_error = _terminal_payload_error(
+            claim.payload,
+            trigger=claim.trigger,
+        )
         try:
             if terminal_error:
                 raise ValueError(terminal_error)

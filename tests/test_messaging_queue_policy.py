@@ -21,6 +21,7 @@ from apps.worker.messaging_worker.sqs_main import (
     _normalize_worker_tenants,
     _video_encoding_block_reason,
     _worker_delivery_identity_error,
+    _worker_request_trace_error,
     _worker_tenant_binding_error,
 )
 from apps.domains.messaging.security import (
@@ -337,6 +338,37 @@ def test_canonical_payload_binds_recipient_and_keeps_privacy_safe_trace() -> Non
 
     tampered = {**message, "to": "01099998888"}
     assert _worker_tenant_binding_error(tampered) == "invalid_business_idempotency_key"
+
+
+def test_manual_request_trace_is_exact_and_occurrence_key_authenticated() -> None:
+    fake_client = _FakeQueueClient()
+    request_id = "00000000-0000-4000-8000-000000000011"
+    batch_id = "00000000-0000-4000-8000-000000000012"
+    occurrence_key = f"request:{request_id}:batch:{batch_id}"
+    with patch("apps.domains.messaging.sqs_queue.get_queue_client", return_value=fake_client):
+        queue = MessagingSQSQueue(wake_messaging_workers=False)
+        assert queue.enqueue(
+            tenant_id=1,
+            to="01012345678",
+            text="trace",
+            message_mode="alimtalk",
+            event_type="manual_send",
+            target_type="student",
+            target_id=10,
+            request_id=request_id,
+            batch_id=batch_id,
+            sender_staff_id=7,
+            trace_identity_version="v1",
+            origin_type="manual_send",
+            origin_id=request_id,
+            occurrence_key=occurrence_key,
+        )
+
+    message = fake_client.messages[0]
+    assert _worker_request_trace_error(message) == ""
+    assert _worker_tenant_binding_error(message) == ""
+    tampered = {**message, "batch_id": "00000000-0000-4000-8000-000000000013"}
+    assert _worker_request_trace_error(tampered) == "invalid_request_occurrence_key"
 
 
 def test_worker_normalizes_raw_tenant_payload_to_common_owner() -> None:

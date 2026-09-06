@@ -123,6 +123,10 @@ class MessagingSQSQueue:
         actor_id: Optional[int | str] = None,
         origin_type: Optional[str] = None,
         origin_id: Optional[str] = None,
+        request_id: Optional[str] = None,
+        batch_id: Optional[str] = None,
+        sender_staff_id: Optional[int] = None,
+        trace_identity_version: Optional[str] = None,
     ) -> bool:
         """
         발송 작업을 SQS에 추가
@@ -219,6 +223,14 @@ class MessagingSQSQueue:
             message["origin_type"] = resolved_origin_type
         if resolved_origin_id:
             message["origin_id"] = resolved_origin_id
+        if request_id:
+            message["request_id"] = str(request_id)[:64]
+        if batch_id:
+            message["batch_id"] = str(batch_id)[:64]
+        if sender_staff_id is not None:
+            message["sender_staff_id"] = int(sender_staff_id)
+        if trace_identity_version:
+            message["trace_identity_version"] = str(trace_identity_version)[:16]
         message["recipient_fingerprint"] = build_recipient_fingerprint(message["to"])
         et = (event_type or "").strip()
         if et:

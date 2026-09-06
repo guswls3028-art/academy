@@ -88,6 +88,7 @@
   -> POST /messaging/send/preflight/      [서명된 1회용 identity, 5분]
   -> SendMessageView.post()             [views/send_views.py]
     -> manual_event exact provider contract + preflight identity 검증/소비
+    -> client_request_id 보존 + API 접수별 batch_id 발급
     -> build_manual_replacements()       [alimtalk_content_builders.py]
     -> enqueue_alimtalk()                     [services.py:111]
       -> (이하 동일, tenant별 PFID/provider fallback 없음)
@@ -446,6 +447,10 @@ legacy 설정 필드는 남아 있을 수 있으나 신규 실발송 경로에�
 | `template_id` | str (optional) | Solapi 알림톡 템플릿 ID |
 | `event_type` | str (optional) | 비즈니스 이벤트 유형 (30자 제한, 멱등성 키용) |
 | `business_idempotency_key` | str | SHA-256 해시 (중복 발송 방지) |
+| `request_id` / `batch_id` | UUID str (수동 신규 payload) | 사용자 발송 동작과 개별 API 접수의 exact 상관관계 |
+| `origin_type` / `origin_id` | str | 수동 발송은 `manual_send` / `request_id` |
+| `sender_staff_id` | int (수동 신규 payload) | 요청한 직원 사용자 ID |
+| `trace_identity_version` | "v1" (수동 신규 payload) | request/batch/origin/occurrence worker 재검증 계약 |
 | `tenant_binding_signature_version` | "v1" | 서명 material 스키마 버전 |
 | `tenant_binding_signature` | str | 전용 shared key로 `tenant_id`·`source_tenant_id`·멱등성 키를 인증한 HMAC-SHA256 |
 
@@ -484,14 +489,14 @@ SHA-256(canonical) -> 64자 hex
 
 - `ScheduledNotification`과 `NotificationLog`는 같은 `business_idempotency_key`로 outbox→worker claim을 연결한다. 별도 중복 trace ID는 만들지 않는다.
 - `recipient_fingerprint`는 정규화 수신번호를 전용 `MESSAGING_TENANT_BINDING_KEY`로 HMAC-SHA256한 64자 값이다. 원문 번호를 terminal payload나 진단 출력에 남기지 않고도 정확한 번호 입력으로 관련 행을 찾는다.
-- `origin_type`/`origin_id`는 producer 종류와 job/batch/domain ID다. Excel 신규 학생은 `excel_import`와 AIJob job ID를 pending 계정 안내에 보존했다가 첫 ACTIVE 수강 outbox와 worker log로 전달한다.
+- `origin_type`/`origin_id`는 producer 종류와 job/request/domain ID다. 수동 발송은 한 사용자 동작의 `request_id`를 origin ID로 쓰고 각 학생/보호자 API 접수에 별도 `batch_id`를 둔다. Excel 신규 학생은 `excel_import`와 AIJob job ID를 pending 계정 안내에 보존했다가 첫 ACTIVE 수강 outbox와 worker log로 전달한다.
 - HMAC primary key 순환 중 진단은 `MESSAGING_TENANT_BINDING_FALLBACK_KEYS`로 만든 후보도 조회한다. fallback 제거 뒤에는 제거된 키로 만든 과거 지문을 새 번호 입력만으로 재계산할 수 없으므로 incident 보존 기간과 key rotation drain을 맞춘다.
 
 ### DB dispatch(outbox) 상태와 SQS 재시도
 
 - 수동·시스템·영상·매치업·커뮤니티의 즉시 발송과 예약/지연 발송은 모두 `ScheduledNotification` 행을 먼저 만든다. `enqueue_alimtalk()`는 outbox drainer 전용 경계이며 product producer가 직접 호출하지 않는다.
 - 상태는 `pending → dispatching → sent` 순서다. 여기서 `sent`/`sent_at`은 **SQS 접수 완료**이며 공급사 최종 발송 성공이 아니다.
-- `dispatch_key`는 행마다 고유한 UUID이고 payload의 `occurrence_key=dispatch:<uuid>`로 고정된다. 폴러/프로세스가 재시작되어 같은 행을 다시 enqueue해도 business key는 바뀌지 않는다.
+- `dispatch_key`는 행마다 고유한 UUID다. 일반 payload는 `occurrence_key=dispatch:<uuid>`를 사용하고, 신규 수동 발송 trace는 producer의 `occurrence_key=request:<request_id>:batch:<batch_id>`를 보존한다. 어느 경우든 폴러/프로세스가 재시작되어 같은 행을 다시 enqueue해도 business key는 바뀌지 않는다.
 - SQS enqueue가 실패하면 영구 실패로 닫지 않는다. 30초부터 지수 백오프하며 최대 8회 시도 후 `failed`가 된다. 입력 누락, SMS 차단, `MessagingPolicyError`는 즉시 terminal `failed`다.
 - `dispatching`이 5분 이상이면 죽은 폴러 claim으로 보고 회수한다. 외부 SQS 호출은 DB transaction과 row lock 밖에서 실행한다.
 - `operations/status`는 `retry_waiting`, `dispatching`, `stale_dispatching`을 별도로 노출한다.
@@ -521,6 +526,9 @@ SHA-256(canonical) -> 64자 hex
   모든 메시지가 `statusCode=4000`일 때만 `delivered`다. 다른 terminal 코드는 `failed`, 조회 실패는
   `unavailable`이며 저장된 접수 근거를 전달 완료로 오인하지 않는다. 정확한 group ID는
   기존 역할별 마스킹 정책을 유지한다.
+- 직접 발송 응답은 유효 수신번호가 0이면 `422`, 전체 큐·예약 접수가 0이면 `503`을
+  반환한다. 2xx의 `accepted_count`는 durable outbox/SQS 예약 접수 수이며 최종 전달
+  수가 아니다. 응답의 request/batch/origin identity로 정확한 로그를 조회한다.
 - 중복 발송 방지를 우선해 `sending` 이후에는 워커 재시작, 같은 SQS 재전달, 다른 SQS MessageId의 중복 전달 모두 공급사를 다시 호출하지 않는다. 같은 SQS 메시지가 재전달되면 provider 응답 저장 실패/worker 중단으로 간주해 `sending→ambiguous`를 원자 반영하고 기존 차감액을 유지한다.
 - 대가는 at-most-once 모호 구간이다. 현재 `sending` DB 기록부터 실제 발송 endpoint 호출 전까지 Solapi는 보통 짧은 client 준비 구간이고, Ppurio는 token preflight timeout 최대 10초를 포함한다. 호출 후 응답 모호 구간은 Ppurio request timeout 최대 15초다. 이 구간 crash/timeout은 `ambiguous`이며 자동 재발송하지 않는다.
 - 크레딧 예약은 `NotificationLog.amount_deducted`와 tenant 잔액을 한 transaction에서 기록하고, 재선점/롤백도 멱등 처리한다. `ambiguous`는 실제 접수 가능성이 있어 자동 환불하지 않는다.

@@ -4,6 +4,7 @@
 """
 
 import re
+import uuid
 
 from rest_framework import status
 from rest_framework.views import APIView
@@ -115,6 +116,17 @@ class SendMessageView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        request_id = str(data.get("client_request_id") or uuid.uuid4())
+        batch_id = str(uuid.uuid4())
+        origin_type = "manual_send"
+        origin_id = request_id
+        request_identity = {
+            "request_id": request_id,
+            "batch_id": batch_id,
+            "origin_type": origin_type,
+            "origin_id": origin_id,
+        }
+
         block_category = (data.get("block_category") or "").strip()
         extra_vars_per_student, personalization_issue = validate_grade_personalization(
             block_category=block_category,
@@ -133,6 +145,20 @@ class SendMessageView(APIView):
         expected_dispatches = sum(
             1 for recipient in recipients if recipient.phone and len(recipient.phone) >= 10
         )
+        if expected_dispatches == 0:
+            return Response(
+                {
+                    "detail": "선택한 대상에 발송 가능한 전화번호가 없습니다.",
+                    "code": "no_valid_phone",
+                    "accepted_count": 0,
+                    "enqueued": 0,
+                    "scheduled": 0,
+                    "enqueue_failed": 0,
+                    "skipped_no_phone": len(recipients),
+                    **request_identity,
+                },
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
         recent_count = get_hourly_notification_usage(tenant)
         if (
             not scheduled_send_at
@@ -355,6 +381,13 @@ class SendMessageView(APIView):
                         "template_id": template_id_solapi,
                         "alimtalk_replacements": alimtalk_replacements,
                         "event_type": f"manual_{data.get('manual_event')}",
+                        "request_id": request_id,
+                        "batch_id": batch_id,
+                        "sender_staff_id": request.user.pk,
+                        "trace_identity_version": "v1",
+                        "occurrence_key": f"request:{request_id}:batch:{batch_id}",
+                        "origin_type": origin_type,
+                        "origin_id": origin_id,
                         "target_type": "student" if send_to != "parent" else "parent",
                         "target_id": recipient.student_id,
                         "target_name": name,
@@ -379,10 +412,22 @@ class SendMessageView(APIView):
             detail += f" (큐 등록 실패 {enqueue_failed}건)"
         if skipped_no_phone:
             detail += f" (전화번호 없음 {skipped_no_phone}건)"
-        return Response({
+        response_payload = {
             "detail": detail + ".",
+            "accepted_count": accepted,
             "enqueued": enqueued,
             "scheduled": scheduled,
             "enqueue_failed": enqueue_failed,
             "skipped_no_phone": skipped_no_phone,
-        }, status=status.HTTP_200_OK)
+            **request_identity,
+        }
+        if accepted == 0:
+            response_payload.update(
+                detail="알림톡 발송 요청이 큐 또는 예약 목록에 접수되지 않았습니다.",
+                code="message_not_accepted",
+            )
+            return Response(
+                response_payload,
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        return Response(response_payload, status=status.HTTP_200_OK)

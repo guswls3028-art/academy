@@ -314,7 +314,10 @@ class AttendanceNotificationConfirmView(APIView):
         batch_result = result["batch_result"]
 
         return Response({
+            "request_id": batch_result["request_id"],
             "batch_id": batch_result["batch_id"],
+            "origin_type": batch_result["origin_type"],
+            "origin_id": batch_result["origin_id"],
             "sent_count": batch_result["sent_count"],
             "pending_count": batch_result.get("pending_count", 0),
             "accepted_count": batch_result.get("accepted_count", 0),
@@ -557,7 +560,10 @@ class ManualNotificationConfirmView(APIView):
         batch_result = result["batch_result"]
 
         return Response({
+            "request_id": batch_result["request_id"],
             "batch_id": batch_result["batch_id"],
+            "origin_type": batch_result["origin_type"],
+            "origin_id": batch_result["origin_id"],
             "sent_count": batch_result["sent_count"],
             "pending_count": batch_result.get("pending_count", 0),
             "accepted_count": batch_result.get("accepted_count", 0),

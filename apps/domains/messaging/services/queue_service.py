@@ -54,6 +54,10 @@ def enqueue_alimtalk(
     actor_id: Optional[int | str] = None,
     origin_type: Optional[str] = None,
     origin_id: Optional[str] = None,
+    request_id: Optional[str] = None,
+    batch_id: Optional[str] = None,
+    sender_staff_id: Optional[int] = None,
+    trace_identity_version: Optional[str] = None,
     trusted_business_tenant_id: Optional[int] = None,
 ) -> bool:
     """
@@ -187,6 +191,10 @@ def enqueue_alimtalk(
         actor_id=actor_id,
         origin_type=origin_type,
         origin_id=origin_id,
+        request_id=request_id,
+        batch_id=batch_id,
+        sender_staff_id=sender_staff_id,
+        trace_identity_version=trace_identity_version,
     )
 
 
