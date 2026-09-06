@@ -217,6 +217,10 @@ class ScoreDraftView(APIView):
             request.data.get("acknowledge_stale", False),
             field_name="acknowledge_stale",
         )
+        take_over_same_user = parse_bool(
+            request.data.get("take_over_same_user", False),
+            field_name="take_over_same_user",
+        )
         client_id = score_edit_client_id(request)
         with transaction.atomic():
             _, scope_ids = _lock_session(session_id=int(session_id), tenant=tenant)
@@ -227,6 +231,7 @@ class ScoreDraftView(APIView):
                     tenant_id=tenant.id,
                 )
             )
+            handoff_drafts = []
             for existing in drafts:
                 if existing.updated_at < active_since:
                     continue
@@ -265,8 +270,20 @@ class ScoreDraftView(APIView):
                         )
                     )
                 )
-                if score_edit_changes_conflict(existing_changes, changes) or presence_conflicts:
-                    return _locked_response()
+                has_conflict = (
+                    score_edit_changes_conflict(existing_changes, changes)
+                    or presence_conflicts
+                )
+                if not has_conflict:
+                    continue
+                if (
+                    take_over_same_user
+                    and changes
+                    and int(existing.editor_user_id) == int(request.user.id)
+                ):
+                    handoff_drafts.append(existing)
+                    continue
+                return _locked_response()
 
             draft = next(
                 (
@@ -309,6 +326,18 @@ class ScoreDraftView(APIView):
             if draft is not None and score_edit_payload_is_invalidated(draft.payload):
                 if not acknowledge_stale:
                     return _stale_response()
+            for previous in handoff_drafts:
+                previous_client_id, previous_changes = score_edit_payload_parts(
+                    previous.payload
+                )
+                previous.payload = score_edit_lease_payload(
+                    client_id=previous_client_id or _draft_client_id(previous),
+                    changes=previous_changes,
+                    active_cell=score_edit_payload_active_cell(previous.payload),
+                    invalidated=True,
+                    invalidated_reason="SAME_ACCOUNT_HANDOFF",
+                )
+                previous.save(update_fields=["payload", "updated_at"])
             payload = score_edit_lease_payload(
                 client_id=client_id,
                 changes=changes,

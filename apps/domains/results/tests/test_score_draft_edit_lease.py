@@ -85,6 +85,7 @@ class ScoreDraftEditLeaseTests(TestCase):
         session=None,
         acknowledge_stale=False,
         active_cell=None,
+        take_over_same_user=False,
     ):
         return ScoreDraftView.as_view()(
             self._request(
@@ -95,6 +96,7 @@ class ScoreDraftEditLeaseTests(TestCase):
                     "changes": changes or [],
                     "acknowledge_stale": acknowledge_stale,
                     "active_cell": active_cell,
+                    "take_over_same_user": take_over_same_user,
                 },
             ),
             session_id=(session or self.session).id,
@@ -221,9 +223,15 @@ class ScoreDraftEditLeaseTests(TestCase):
             "tab-invalid-commit",
             release_lease="sometimes",
         )
+        handoff_response = self._put(
+            self.admin_a,
+            "tab-invalid-handoff",
+            take_over_same_user="sometimes",
+        )
 
         self.assertEqual(put_response.status_code, 400)
         self.assertEqual(commit_response.status_code, 400)
+        self.assertEqual(handoff_response.status_code, 400)
 
     def test_disjoint_homework_cells_coexist_but_same_cell_conflicts(self):
         first = {
@@ -296,6 +304,84 @@ class ScoreDraftEditLeaseTests(TestCase):
             200,
         )
         response = self._put(self.admin_b, "tab-b", [exam_change_b])
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data["code"], "SCORE_EDIT_LOCKED")
+
+    def test_same_account_mobile_score_handoff_preserves_and_fences_old_draft(self):
+        desktop_change = {
+            "type": "examTotal",
+            "examId": 11,
+            "enrollmentId": 21,
+            "score": 70,
+        }
+        mobile_change = {
+            "type": "examTotal",
+            "examId": 11,
+            "enrollmentId": 22,
+            "score": 80,
+        }
+        self.assertEqual(
+            self._put(self.admin_a, "desktop", [desktop_change]).status_code,
+            200,
+        )
+
+        handoff = self._put(
+            self.admin_a,
+            "iphone",
+            [mobile_change],
+            take_over_same_user=True,
+        )
+
+        self.assertEqual(handoff.status_code, 200)
+        desktop_draft = ScoreEditDraft.objects.get(
+            session=self.session,
+            editor_user=self.admin_a,
+            client_id="desktop",
+        )
+        self.assertTrue(desktop_draft.payload["invalidated"])
+        self.assertEqual(
+            desktop_draft.payload["invalidated_reason"],
+            "SAME_ACCOUNT_HANDOFF",
+        )
+        self.assertEqual(desktop_draft.payload["changes"], [desktop_change])
+
+        mobile_request = self._request("patch", self.admin_a, "iphone")
+        with transaction.atomic():
+            self.assertEqual(
+                require_score_edit_lease(
+                    mobile_request,
+                    session_id=self.session.id,
+                ).id,
+                self.session.id,
+            )
+
+        desktop_request = self._request("patch", self.admin_a, "desktop")
+        with self.assertRaises(ScoreEditLeaseStale):
+            with transaction.atomic():
+                require_score_edit_lease(
+                    desktop_request,
+                    session_id=self.session.id,
+                )
+
+    def test_other_account_cannot_take_over_score_draft(self):
+        change = {
+            "type": "examTotal",
+            "examId": 11,
+            "enrollmentId": 21,
+            "score": 70,
+        }
+        self.assertEqual(
+            self._put(self.admin_a, "desktop", [change]).status_code,
+            200,
+        )
+
+        response = self._put(
+            self.admin_b,
+            "iphone",
+            [{**change, "enrollmentId": 22}],
+            take_over_same_user=True,
+        )
+
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.data["code"], "SCORE_EDIT_LOCKED")
 

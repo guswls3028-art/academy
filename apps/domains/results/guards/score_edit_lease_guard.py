@@ -76,14 +76,22 @@ def require_score_edit_lease(request, *, session_id: int, exam_id: int | None = 
         .select_for_update()
         .order_by("session_id", "id")
     )
-    draft = None
+    draft = next(
+        (
+            candidate
+            for candidate in drafts
+            if int(candidate.session_id) == int(session_id)
+            and _same_editor(
+                candidate,
+                user_id=request.user.id,
+                client_id=client_id,
+            )
+        ),
+        None,
+    )
+    if draft is not None and score_edit_payload_is_invalidated(draft.payload):
+        raise ScoreEditLeaseStale()
     for candidate in drafts:
-        if int(candidate.session_id) == int(session_id) and _same_editor(
-            candidate,
-            user_id=request.user.id,
-            client_id=client_id,
-        ):
-            draft = candidate
         if score_edit_payload_is_invalidated(candidate.payload):
             continue
         _, candidate_changes = score_edit_payload_parts(candidate.payload)
@@ -98,8 +106,6 @@ def require_score_edit_lease(request, *, session_id: int, exam_id: int | None = 
             raise ScoreEditLeaseConflict()
     if draft is None:
         raise ScoreEditLeaseConflict()
-    if score_edit_payload_is_invalidated(draft.payload):
-        raise ScoreEditLeaseStale()
     if not _same_editor(draft, user_id=request.user.id, client_id=client_id):
         raise ScoreEditLeaseConflict()
     return session
@@ -132,7 +138,21 @@ def require_homework_score_edit_lease(
         .select_for_update()
         .order_by("session_id", "id")
     )
-    draft = None
+    draft = next(
+        (
+            candidate
+            for candidate in drafts
+            if int(candidate.session_id) == int(session_id)
+            and _same_editor(
+                candidate,
+                user_id=request.user.id,
+                client_id=client_id,
+            )
+        ),
+        None,
+    )
+    if draft is not None and score_edit_payload_is_invalidated(draft.payload):
+        raise ScoreEditLeaseStale()
     for candidate in drafts:
         _, candidate_changes = score_edit_payload_parts(candidate.payload)
         same_editor = _same_editor(
@@ -140,8 +160,6 @@ def require_homework_score_edit_lease(
             user_id=request.user.id,
             client_id=client_id,
         )
-        if int(candidate.session_id) == int(session_id) and same_editor:
-            draft = candidate
         if score_edit_payload_is_invalidated(candidate.payload):
             continue
         if same_editor or not candidate_changes:
@@ -163,8 +181,6 @@ def require_homework_score_edit_lease(
 
     if draft is None:
         raise ScoreEditLeaseConflict()
-    if score_edit_payload_is_invalidated(draft.payload):
-        raise ScoreEditLeaseStale()
     if not _same_editor(draft, user_id=request.user.id, client_id=client_id):
         raise ScoreEditLeaseConflict()
     return session
