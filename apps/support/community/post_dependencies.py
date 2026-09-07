@@ -8,7 +8,7 @@ from typing import Any, Callable
 def get_request_student(request: Any) -> Any | None:
     from apps.domains.student_app.permissions import get_request_student as _get_request_student
 
-    return _get_request_student(request)
+    return _get_request_student(request, require_explicit_parent_child=False)
 
 
 def visible_scope_node_ids_for_students(*, tenant: Any, student_ids: list[int]) -> set[int]:
