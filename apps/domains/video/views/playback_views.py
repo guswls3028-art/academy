@@ -1,5 +1,6 @@
 
 import uuid
+from datetime import timezone as datetime_timezone
 
 from django.conf import settings
 from django.utils import timezone
@@ -9,9 +10,16 @@ from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
+from drf_spectacular.utils import extend_schema
 
 from apps.core.permissions import IsStudent
-from apps.support.student_app.video_media import issue_playback_access_grant
+from apps.support.student_app.video_media import (
+    bounded_direct_media_expiry,
+    bounded_inactive_media_expiry,
+    bounded_ordinary_media_expiry,
+    issue_playback_access_grant,
+    pick_video_urls,
+)
 from academy.application.use_cases.student_video_access_context import (
     StudentVideoAccessError,
     resolve_student_video_access_context,
@@ -30,10 +38,11 @@ from ..serializers import (
     PlaybackHeartbeatRequestSerializer,
     PlaybackEndRequestSerializer,
     PlaybackResponseSerializer,
+    PlaybackRenewResponseSerializer,
     PlaybackEventBatchRequestSerializer,
     PlaybackEventBatchResponseSerializer,
 )
-from ..drm import verify_playback_token
+from ..drm import create_playback_token, verify_playback_token
 from ..services.playback_session import (
     heartbeat_session,
     end_session,
@@ -299,9 +308,12 @@ class PlaybackStartView(VideoPlaybackMixin, APIView):
         perm = self._load_permission(video=video, enrollment=enrollment)
         policy = self._effective_policy(video=video, enrollment=enrollment, perm=perm)
 
+        media_expires_at = expires_at
+        if enrollment.status != "INACTIVE":
+            media_expires_at = bounded_ordinary_media_expiry(video)
         play_url = self._public_play_url(
             video=video,
-            expires_at=expires_at,
+            expires_at=media_expires_at,
             user_id=request.user.id,
         )
 
@@ -319,8 +331,12 @@ class PlaybackStartView(VideoPlaybackMixin, APIView):
         )
 
         # Set signed cookies only if we have expires_at
-        if expires_at:
-            self._set_signed_cookies(resp, video_id=video.id, expires_at=expires_at)
+        if media_expires_at:
+            self._set_signed_cookies(
+                resp,
+                video_id=video.id,
+                expires_at=media_expires_at,
+            )
         return resp
 
 
@@ -345,7 +361,6 @@ class PlaybackRefreshView(APIView):
         if not _is_policy_token_valid(payload):
             return _deny("policy_changed", code=403)
 
-        # FREE_REVIEW: Skip DB operations (session_id=null, no DB)
         monitoring_enabled = payload.get("monitoring_enabled")
         if monitoring_enabled is None:
             monitoring_enabled = bool(payload.get("session_id"))
@@ -359,13 +374,271 @@ class PlaybackRefreshView(APIView):
             if _db_session_is_inactive(st):
                 return Response({"detail": "session_inactive"}, status=409)
 
-        if not is_session_active(
-            student_id=student_id,
-            session_id=str(payload["session_id"]),
-        ):
+        if not is_session_active(student_id=student_id, session_id=sid):
             return Response({"detail": "session_inactive"}, status=409)
 
         return Response({"ok": True})
+
+
+class PlaybackRenewView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        request=PlaybackRefreshRequestSerializer,
+        responses={200: PlaybackRenewResponseSerializer},
+    )
+    def post(self, request):
+        serializer = PlaybackRefreshRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        ok, payload, err = verify_playback_token(serializer.validated_data["token"])
+        if not ok:
+            return _deny(err, code=403)
+        binding_error = _playback_token_request_error(payload, request)
+        if binding_error:
+            return _deny(binding_error, code=403)
+
+        try:
+            video = video_repo.video_get_by_id_with_relations(int(payload.get("video_id")))
+        except (TypeError, ValueError, Video.DoesNotExist):
+            return _deny("policy_changed", code=403)
+        direct_token = (
+            payload.get("aud") == "student-video-direct"
+            and payload.get("access_source") == "DIRECT_VIDEO_ENTITLEMENT"
+        )
+        explicit_enrollment_id = None
+        if not direct_token:
+            try:
+                explicit_enrollment_id = int(payload.get("enrollment_id"))
+            except (TypeError, ValueError):
+                return _deny("policy_changed", code=403)
+        try:
+            access_context = resolve_student_video_access_context(
+                request,
+                video,
+                explicit_enrollment_id=explicit_enrollment_id,
+                allow_public_enrollment_write=False,
+            )
+        except StudentVideoAccessError:
+            return _deny("policy_changed", code=403)
+        if direct_token:
+            if (
+                access_context.direct_entitlement is None
+                or int(access_context.direct_entitlement.id)
+                != int(payload.get("direct_entitlement_id") or 0)
+            ):
+                return _deny("policy_changed", code=403)
+        elif (
+            access_context.enrollment is None
+            or int(access_context.enrollment.id) != explicit_enrollment_id
+        ):
+            return _deny("policy_changed", code=403)
+
+        if not _is_policy_token_valid(payload):
+            return _deny("policy_changed", code=403)
+
+        ttl_seconds = max(1, int(getattr(settings, "VIDEO_PLAYBACK_TTL_SECONDS", 600)))
+        renewed_play_url = None
+
+        with transaction.atomic():
+            if direct_token:
+                from apps.domains.video.services.direct_entitlements import (
+                    DirectVideoEntitlementError,
+                    lock_and_revalidate_direct_video_access,
+                )
+
+                try:
+                    locked_direct = lock_and_revalidate_direct_video_access(
+                        tenant=request.tenant,
+                        student_id=int(payload.get("student_id")),
+                        video_id=int(payload.get("video_id")),
+                        entitlement_id=int(payload.get("direct_entitlement_id")),
+                    )
+                except (TypeError, ValueError, DirectVideoEntitlementError):
+                    return _deny("policy_changed", code=403)
+                current_video = locked_direct.video
+                if int(payload.get("pv") or 0) != _policy_version_of(current_video):
+                    return _deny("policy_changed", code=403)
+                now = timezone.now()
+                now_timestamp = int(now.timestamp())
+                expires_at = bounded_direct_media_expiry(
+                    locked_direct.entitlement,
+                    now=now,
+                )
+                access_mode = AccessMode.FREE_REVIEW
+                monitoring_enabled = False
+                session_id = None
+                renewed_play_url, _ = pick_video_urls(
+                    current_video,
+                    request,
+                    expires_at=expires_at,
+                )
+                if not renewed_play_url:
+                    return _deny("playback_url_unavailable", code=503)
+            else:
+                from academy.application.use_cases.student_video_access_context import (
+                    lecture_allows_student_learning,
+                )
+                from apps.domains.video.services.access_resolver import (
+                    get_effective_access_mode,
+                )
+                from apps.domains.video.services.inactive_entitlements import (
+                    InactiveVideoEntitlementError,
+                    lock_and_revalidate_inactive_video_write_access,
+                )
+
+                tenant_id = int(request.tenant.id)
+                expected_policy_version = int(payload.get("pv") or 0)
+                if access_context.enrollment.status == "INACTIVE":
+                    try:
+                        locked_inactive = lock_and_revalidate_inactive_video_write_access(
+                            tenant_id=tenant_id,
+                            enrollment_id=explicit_enrollment_id,
+                            video_id=int(payload.get("video_id")),
+                            expected_policy_version=expected_policy_version,
+                        )
+                    except (TypeError, ValueError, InactiveVideoEntitlementError):
+                        return _deny("policy_changed", code=403)
+                    enrollment = locked_inactive.enrollment
+                    current_video = locked_inactive.video
+                    entitlement = locked_inactive.entitlement
+                else:
+                    lecture_id = getattr(getattr(video, "session", None), "lecture_id", None)
+                    session_pk = getattr(video, "session_id", None)
+                    lecture, locked_session, enrollment, current_video = (
+                        video_repo.lock_active_playback_renewal_scope(
+                            tenant_id=tenant_id,
+                            lecture_id=lecture_id,
+                            session_id=session_pk,
+                            enrollment_id=explicit_enrollment_id,
+                            student_id=int(payload.get("student_id") or 0),
+                            video_id=int(payload.get("video_id")),
+                        )
+                    )
+                    if not lecture_allows_student_learning(lecture):
+                        return _deny("policy_changed", code=403)
+                    if enrollment is None or locked_session is None or current_video is None:
+                        return _deny("policy_changed", code=403)
+                    if (
+                        current_video.visibility != Video.Visibility.PUBLIC
+                        and not video_repo.session_enrollment_exists(
+                            locked_session,
+                            enrollment,
+                        )
+                    ):
+                        return _deny("policy_changed", code=403)
+
+                access_mode = get_effective_access_mode(
+                    video=current_video,
+                    enrollment=enrollment,
+                )
+                if (
+                    access_mode == AccessMode.BLOCKED
+                    or payload.get("access_mode") != access_mode.value
+                    or expected_policy_version != _policy_version_of(current_video)
+                ):
+                    return _deny("policy_changed", code=403)
+
+                monitoring_enabled = access_mode == AccessMode.PROCTORED_CLASS
+                session_id = str(payload.get("session_id") or "") or None
+                playback_session = None
+                if monitoring_enabled:
+                    if session_id is None:
+                        return Response({"detail": "session_inactive"}, status=409)
+                    playback_session = (
+                        VideoPlaybackSession.objects.select_for_update(of=("self",))
+                        .filter(
+                            session_id=session_id,
+                            video=current_video,
+                            enrollment=enrollment,
+                            status=VideoPlaybackSession.Status.ACTIVE,
+                            is_revoked=False,
+                        )
+                        .first()
+                    )
+                    now = timezone.now()
+                    if (
+                        playback_session is None
+                        or (
+                            playback_session.expires_at is not None
+                            and playback_session.expires_at <= now
+                        )
+                    ):
+                        return Response({"detail": "session_inactive"}, status=409)
+                elif session_id is not None:
+                    return _deny("policy_changed", code=403)
+                else:
+                    now = timezone.now()
+
+                now_timestamp = int(now.timestamp())
+                expires_at = now_timestamp + ttl_seconds
+                if enrollment.status == "INACTIVE":
+                    expires_at = bounded_inactive_media_expiry(entitlement, now=now)
+                    renewed_play_url, _ = pick_video_urls(
+                        current_video,
+                        request,
+                        expires_at=expires_at,
+                    )
+
+                if enrollment.status == "INACTIVE" and not renewed_play_url:
+                    return _deny("playback_url_unavailable", code=503)
+
+            if expires_at <= now_timestamp:
+                return _deny("access_expired", code=403)
+            token_payload = {
+                key: value
+                for key, value in payload.items()
+                if key not in {"iat", "exp"}
+            }
+            token_payload.update(
+                {
+                    "video_id": current_video.id,
+                    "user_id": request.user.id,
+                    "student_id": int(payload.get("student_id")),
+                    "tenant_id": request.tenant.id,
+                    "access_mode": access_mode.value,
+                    "monitoring_enabled": monitoring_enabled,
+                    "session_id": session_id,
+                    "pv": _policy_version_of(current_video),
+                    "rid": _req_id(),
+                }
+            )
+            try:
+                renewed_token = create_playback_token(
+                    payload=token_payload,
+                    expires_at=expires_at,
+                )
+            except ValueError:
+                return _deny("access_expired", code=403)
+
+            if not direct_token and playback_session is not None:
+                playback_session.expires_at = timezone.datetime.fromtimestamp(
+                    expires_at,
+                    tz=datetime_timezone.utc,
+                )
+                playback_session.last_seen = now
+                playback_session.save(update_fields=["expires_at", "last_seen", "updated_at"])
+                from academy.adapters.cache.redis_playback_session_buffer import (
+                    buffer_heartbeat_session_ttl,
+                )
+
+                buffer_heartbeat_session_ttl(
+                    session_id=session_id,
+                    ttl_seconds=max(1, expires_at - now_timestamp),
+                )
+
+        response_payload = {
+            "ok": True,
+            "playback_token": renewed_token,
+            "playback_session_id": session_id,
+            "playback_expires_at": expires_at,
+            "access_mode": access_mode.value,
+            "monitoring_enabled": monitoring_enabled,
+            "policy_version": _policy_version_of(current_video),
+        }
+        if renewed_play_url:
+            response_payload["play_url"] = renewed_play_url
+        return Response(PlaybackRenewResponseSerializer(response_payload).data)
 
 
 # ==========================================================

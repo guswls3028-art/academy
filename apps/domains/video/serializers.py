@@ -521,6 +521,19 @@ class PlaybackResponseSerializer(serializers.Serializer):
     play_url = serializers.CharField()
 
 
+class PlaybackRenewResponseSerializer(serializers.Serializer):
+    ok = serializers.BooleanField()
+    playback_token = serializers.CharField()
+    playback_session_id = serializers.CharField(allow_null=True)
+    playback_expires_at = serializers.IntegerField()
+    access_mode = serializers.ChoiceField(
+        choices=["FREE_REVIEW", "PROCTORED_CLASS"],
+    )
+    monitoring_enabled = serializers.BooleanField()
+    policy_version = serializers.IntegerField(min_value=1)
+    play_url = serializers.CharField(allow_null=True, required=False)
+
+
 # ========================================================
 # Events
 # ========================================================

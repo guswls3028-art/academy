@@ -61,8 +61,14 @@ only after the ordinary product deletion guard proves that no enrollment,
 attendance, progress, clinic, video, or other user history remains. If a child
 exam exists, the exam itself must be in the same strict residue target set;
 otherwise cleanup fails before external-storage or database mutation. Matched
-exam results, submissions, and clinic links are removed before the lecture
-guard is retried. An otherwise orphaned score-edit draft is the sole non-exam
+exam results, submissions, clinic links, and their tenant/exam-scoped OMR upload
+batches and items are removed before the lecture guard is retried. The dry-run
+and confirmation token include the exact submission, batch, and item IDs. The
+execute path refuses a batch item that points outside that exact exam submission
+set. Original and aligned OMR scan objects must use the owning
+`tenants/<tenant>/ai/submissions/<submission>/` prefix, must not be shared by a
+different submission, and are deleted with absence readback before their DB
+rows. An otherwise orphaned score-edit draft is the sole non-exam
 blocker the cleanup may remove before retrying that guard. Soft-deleted students
 use the official
 permanent lifecycle service so their tenant membership and orphaned account

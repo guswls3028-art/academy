@@ -292,10 +292,7 @@ def issue_playback_access_grant(
 
         ttl = int(getattr(settings, "VIDEO_PLAYBACK_TTL_SECONDS", 600))
         access_now = _playback_access_now()
-        expires_at = bounded_ordinary_media_expiry(
-            current_video,
-            now=access_now,
-        )
+        expires_at = int(access_now.timestamp()) + ttl
         inactive_expires_at = None
         if locked_enrollment.status == "INACTIVE":
             from apps.domains.video.services.inactive_entitlements import (

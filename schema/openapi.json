@@ -9627,6 +9627,59 @@
         ],
         "type": "object"
       },
+      "PlaybackRefreshRequestRequest": {
+        "properties": {
+          "token": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "type": "object"
+      },
+      "PlaybackRenewResponse": {
+        "properties": {
+          "access_mode": {
+            "$ref": "#/components/schemas/StudentVideoEffectiveAccessMode"
+          },
+          "monitoring_enabled": {
+            "type": "boolean"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "play_url": {
+            "nullable": true,
+            "type": "string"
+          },
+          "playback_expires_at": {
+            "type": "integer"
+          },
+          "playback_session_id": {
+            "nullable": true,
+            "type": "string"
+          },
+          "playback_token": {
+            "type": "string"
+          },
+          "policy_version": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "access_mode",
+          "monitoring_enabled",
+          "ok",
+          "playback_expires_at",
+          "playback_session_id",
+          "playback_token",
+          "policy_version"
+        ],
+        "type": "object"
+      },
       "PositionEnum": {
         "description": "* `DIRECTOR` - 실장\n* `INSTRUCTOR` - 강사\n* `ASSISTANT` - 조교\n* `STAFF` - 직원",
         "enum": [
@@ -34702,6 +34755,54 @@
         "responses": {
           "200": {
             "description": "No response body"
+          }
+        },
+        "security": [
+          {
+            "jwtAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "tags": [
+          "media"
+        ]
+      }
+    },
+    "/api/v1/media/playback/renew/": {
+      "post": {
+        "operationId": "media_playback_renew_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlaybackRefreshRequestRequest"
+              }
+            },
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/PlaybackRefreshRequestRequest"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/PlaybackRefreshRequestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlaybackRenewResponse"
+                }
+              }
+            },
+            "description": ""
           }
         },
         "security": [

@@ -103,7 +103,7 @@ class ActivePlaybackCredentialTests(TestCase):
 
     @override_settings(VIDEO_PLAYBACK_TTL_SECONDS=600)
     @patch("apps.domains.video.services.playback_session.init_session_redis")
-    def test_long_video_keeps_media_credential_beyond_session_heartbeat_ttl(
+    def test_long_video_keeps_session_credentials_at_heartbeat_ttl(
         self,
         _init_session_redis,
     ):
@@ -121,10 +121,9 @@ class ActivePlaybackCredentialTests(TestCase):
 
         self.assertIsNone(grant.error)
         self.assertEqual(grant.access_mode, AccessMode.PROCTORED_CLASS.value)
-        self.assertGreaterEqual(
-            int(grant.expires_at or 0) - int(issued_at.timestamp()),
-            self.video.duration + 598,
-        )
+        credential_ttl = int(grant.expires_at or 0) - int(issued_at.timestamp())
+        self.assertGreaterEqual(credential_ttl, 598)
+        self.assertLessEqual(credential_ttl, 602)
         token_ok, token_payload, token_error = verify_playback_token(grant.token or "")
         self.assertTrue(token_ok, token_error)
         self.assertEqual(token_payload["exp"], grant.expires_at)

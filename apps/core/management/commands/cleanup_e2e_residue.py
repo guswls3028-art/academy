@@ -28,6 +28,7 @@ import hashlib
 import re
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
+from django.db.models import Q
 
 # 명백한 E2E 지문 — 자연어와 겹치지 않는 식별자 패턴만 허용
 RESIDUE_PATTERNS = [
@@ -121,7 +122,14 @@ def build_confirmation_token(*, tenant_id: int, target_groups: dict[str, list]) 
     """Bind an execute attempt to the exact dry-run target set."""
     target_parts = [f"tenant:{tenant_id}"]
     for label in sorted(target_groups):
-        ids = sorted(int(item.id) for item in target_groups[label])
+        ids = [item.id for item in target_groups[label]]
+        ids.sort(
+            key=lambda item_id: (
+                (0, int(item_id))
+                if str(item_id).isdigit()
+                else (1, str(item_id))
+            )
+        )
         target_parts.append(f"{label}:{','.join(str(item_id) for item_id in ids)}")
     return hashlib.sha256("|".join(target_parts).encode("utf-8")).hexdigest()
 
@@ -177,7 +185,11 @@ class Command(BaseCommand):
         from apps.domains.fees.models import FeeTemplate, InvoiceItem
         from apps.domains.progress.models import ClinicLink
         from apps.domains.results.models import Result
-        from apps.domains.submissions.models import Submission
+        from apps.domains.submissions.models import (
+            OmrUploadBatch,
+            OmrUploadBatchItem,
+            Submission,
+        )
         from apps.core.models import Tenant
 
         try:
@@ -232,6 +244,23 @@ class Command(BaseCommand):
             e for e in Exam.objects.filter(tenant_id=tenant_id)
             if matches_residue(e.title or "")
         ]
+        exam_ids = [exam.id for exam in exams]
+        exam_submissions = list(
+            Submission.objects.filter(
+                tenant_id=tenant_id,
+                target_type=Submission.TargetType.EXAM,
+                target_id__in=exam_ids,
+            )
+        )
+        omr_batches = list(
+            OmrUploadBatch.objects.filter(
+                tenant_id=tenant_id,
+                exam_id__in=exam_ids,
+            )
+        )
+        omr_batch_items = list(
+            OmrUploadBatchItem.objects.filter(batch__in=omr_batches)
+        )
 
         # 6. 과제 — title. 동일 패턴.
         homeworks = [
@@ -323,6 +352,34 @@ class Command(BaseCommand):
             ),
         )
         self._print_group("시험 (Exam)", exams, limit, lambda e: f"id={e.id} type={e.exam_type} title={e.title!r}")
+        self._print_group(
+            "시험 제출 (Submission)",
+            exam_submissions,
+            limit,
+            lambda submission: (
+                f"id={submission.id} exam_id={submission.target_id} "
+                f"source={submission.source} status={submission.status}"
+            ),
+        )
+        self._print_group(
+            "OMR 업로드 배치 (OmrUploadBatch)",
+            omr_batches,
+            limit,
+            lambda batch: (
+                f"id={batch.id} exam_id={batch.exam_id} "
+                f"session_id={batch.session_id} lecture_id={batch.lecture_id}"
+            ),
+        )
+        self._print_group(
+            "OMR 업로드 항목 (OmrUploadBatchItem)",
+            omr_batch_items,
+            limit,
+            lambda item: (
+                f"id={item.id} batch_id={item.batch_id} exam_id={item.exam_id} "
+                f"submission_id={item.submission_id} "
+                f"duplicate_of_submission_id={item.duplicate_of_submission_id}"
+            ),
+        )
         self._print_group("과제 (Homework)", homeworks, limit, lambda h: f"id={h.id} title={h.title!r}")
         self._print_group(
             "강의 (Lecture)",
@@ -358,11 +415,14 @@ class Command(BaseCommand):
             "homeworks": homeworks,
             "lectures": lectures,
             "matchups": matchups,
+            "omr_batch_items": omr_batch_items,
+            "omr_batches": omr_batches,
             "posts": posts,
             "recursive_templates": recursive_templates,
             "sessions": sessions,
             "staffs": staffs,
             "students": students,
+            "submissions": exam_submissions,
             "templates": templates,
         }
         exact_token = build_confirmation_token(
@@ -391,10 +451,14 @@ class Command(BaseCommand):
             )
 
         self._validate_execute_targets(
+            tenant_id=tenant_id,
             exams=exams,
+            exam_submissions=exam_submissions,
             students=students,
             lectures=lectures,
             matchups=matchups,
+            omr_batches=omr_batches,
+            omr_batch_items=omr_batch_items,
             sessions=sessions,
             staffs=staffs,
             templates=[*templates, *recursive_templates],
@@ -403,12 +467,14 @@ class Command(BaseCommand):
             tenant_id=tenant_id,
             posts=posts,
             matchups=matchups,
+            submissions=exam_submissions,
         )
 
         # 외부 저장소 삭제가 모두 검증된 뒤 DB를 한 트랜잭션으로 정리한다.
         with transaction.atomic():
             from apps.domains.students.services.lifecycle import permanently_delete_students
 
+            omr_batch_del = sum(batch.delete()[0] for batch in omr_batches)
             student_result = permanently_delete_students(
                 tenant=tenant,
                 student_ids=[student.id for student in students],
@@ -418,7 +484,6 @@ class Command(BaseCommand):
             m_del = sum(m.inventory_file.delete()[0] for m in matchups)
             t_del = sum(t.delete()[0] for t in [*templates, *recursive_templates])
             staff_del = sum(staff.delete()[0] for staff in staffs)
-            exam_ids = [exam.id for exam in exams]
             result_del = (
                 Result.objects.filter(target_type="exam", target_id__in=exam_ids).delete()[0]
                 if exam_ids else 0
@@ -466,6 +531,7 @@ class Command(BaseCommand):
             f"  - 템플릿 cascade rows: {t_del}\n"
             f"  - 직원 cascade rows: {staff_del}\n"
             f"  - 시험 결과 cascade rows: {result_del}\n"
+            f"  - OMR 업로드 배치 cascade rows: {omr_batch_del}\n"
             f"  - 시험 제출 cascade rows: {submission_del}\n"
             f"  - 시험 클리닉 링크 cascade rows: {clinic_link_del}\n"
             f"  - 시험 cascade rows: {e_del}\n"
@@ -480,14 +546,20 @@ class Command(BaseCommand):
     @staticmethod
     def _validate_execute_targets(
         *,
+        tenant_id,
         exams,
+        exam_submissions,
         students,
         lectures,
         matchups,
+        omr_batches,
+        omr_batch_items,
         sessions,
         staffs,
         templates,
     ) -> None:
+        from apps.domains.submissions.models import OmrUploadBatchItem
+
         active_student_ids = [student.id for student in students if student.deleted_at is None]
         if active_student_ids:
             raise CommandError(
@@ -554,6 +626,50 @@ class Command(BaseCommand):
             )
 
         target_exam_ids = {exam.id for exam in exams}
+        target_submission_ids = {submission.id for submission in exam_submissions}
+        target_batch_ids = {batch.id for batch in omr_batches}
+        target_batch_item_ids = {item.id for item in omr_batch_items}
+        invalid_batch_ids = (
+            [
+                batch.id
+                for batch in omr_batches
+                if batch.tenant_id != tenant_id
+                or batch.exam_id not in target_exam_ids
+            ]
+            if exams
+            else []
+        )
+        invalid_batch_item_ids = [
+            item.id
+            for item in omr_batch_items
+            if item.batch_id not in target_batch_ids
+            or item.tenant_id != item.batch.tenant_id
+            or item.exam_id != item.batch.exam_id
+            or (
+                item.submission_id is not None
+                and item.submission_id not in target_submission_ids
+            )
+            or (
+                item.duplicate_of_submission_id is not None
+                and item.duplicate_of_submission_id not in target_submission_ids
+            )
+        ]
+        external_batch_item_ids = list(
+            OmrUploadBatchItem.objects.filter(
+                Q(submission_id__in=target_submission_ids)
+                | Q(duplicate_of_submission_id__in=target_submission_ids)
+            )
+            .exclude(id__in=target_batch_item_ids)
+            .values_list("id", flat=True)
+        )
+        if invalid_batch_ids or invalid_batch_item_ids or external_batch_item_ids:
+            raise CommandError(
+                "E2E 시험의 OMR 배치 그래프가 exact target 밖을 참조해 정리를 "
+                "거부합니다: "
+                f"batch_ids={invalid_batch_ids} "
+                f"item_ids={invalid_batch_item_ids} "
+                f"external_item_ids={external_batch_item_ids}"
+            )
         non_target_exam_ids = sorted({
             exam_id
             for lecture in lectures
@@ -646,13 +762,39 @@ class Command(BaseCommand):
         return lecture_deleted, session_deleted, score_draft_deleted
 
     @staticmethod
-    def _delete_external_storage(*, tenant_id: int, posts, matchups) -> int:
+    def _delete_external_storage(*, tenant_id: int, posts, matchups, submissions) -> int:
         from apps.domains.community.models import PostAttachment
         from apps.domains.matchup.models import ProblemSegmentationProposal
+        from apps.domains.submissions.models import Submission
         from apps.infrastructure.storage.r2 import (
             delete_object_r2_storage,
             head_object_r2_storage,
         )
+        from apps.support.omr.scan_images import select_omr_scan_image
+
+        def omr_scan_keys(submission) -> list[str]:
+            selection = select_omr_scan_image(
+                submission_meta=submission.meta,
+                original_file_key=submission.file_key,
+                tenant_id=None,
+            )
+            ai_result = (
+                submission.meta.get("ai_result")
+                if isinstance(submission.meta, dict)
+                else None
+            )
+            result = (
+                ai_result.get("result")
+                if isinstance(ai_result, dict)
+                else None
+            )
+            result = result if isinstance(result, dict) else {}
+            return list(dict.fromkeys(filter(None, [
+                selection["original_scan_image_key"],
+                selection["scan_image_key"],
+                str(result.get("aligned_image_key") or "").strip(),
+                str(result.get("aligned_scan_image_key") or "").strip(),
+            ])))
 
         keys: list[str] = list(
             PostAttachment.objects.filter(post__in=posts)
@@ -682,6 +824,20 @@ class Command(BaseCommand):
                 .values_list("image_key", flat=True)
             )
 
+        submission_keys: dict[int, list[str]] = {}
+        for submission in submissions:
+            if submission.source != Submission.Source.OMR_SCAN:
+                continue
+            owned_keys = omr_scan_keys(submission)
+            expected_prefix = f"tenants/{tenant_id}/ai/submissions/{submission.id}/"
+            if any(not key.startswith(expected_prefix) for key in owned_keys):
+                raise CommandError(
+                    "OMR 제출의 소유 prefix 밖 파일이 포함되어 저장소 정리를 "
+                    f"중단합니다: submission_id={submission.id}"
+                )
+            submission_keys[submission.id] = owned_keys
+            keys.extend(owned_keys)
+
         unique_keys = list(dict.fromkeys(keys))
         wrong_tenant_keys = [
             key for key in unique_keys
@@ -691,6 +847,28 @@ class Command(BaseCommand):
             raise CommandError(
                 "테넌트 prefix 밖의 R2 key가 포함되어 저장소 정리를 중단합니다. "
                 f"count={len(wrong_tenant_keys)}"
+            )
+
+        target_submission_ids = set(submission_keys)
+        shared_submission_ids = []
+        target_key_set = {
+            key for owned_keys in submission_keys.values() for key in owned_keys
+        }
+        for submission in (
+            Submission.objects.filter(
+                tenant_id=tenant_id,
+                source=Submission.Source.OMR_SCAN,
+            )
+            .exclude(id__in=target_submission_ids)
+            .only("id", "tenant_id", "file_key", "meta")
+        ):
+            referenced_keys = set(omr_scan_keys(submission))
+            if referenced_keys & target_key_set:
+                shared_submission_ids.append(submission.id)
+        if shared_submission_ids:
+            raise CommandError(
+                "다른 OMR 제출이 같은 파일을 참조해 저장소 정리를 중단합니다: "
+                f"submission_ids={shared_submission_ids}"
             )
 
         for key in unique_keys:

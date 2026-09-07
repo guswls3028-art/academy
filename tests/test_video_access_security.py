@@ -1,5 +1,6 @@
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -34,6 +35,7 @@ from apps.domains.video.views.playback_views import (
     PlaybackEventBatchView,
     PlaybackHeartbeatView,
     PlaybackRefreshView,
+    PlaybackRenewView,
     PlaybackStartView,
 )
 
@@ -195,11 +197,56 @@ class PlaybackStartStudentEnrollmentAccessTests(TestCase):
         self.lecture.is_active = False
         self.lecture.save(update_fields=["is_active", "updated_at"])
 
-        for view in (PlaybackRefreshView.as_view(), PlaybackHeartbeatView.as_view()):
+        for view in (
+            PlaybackRefreshView.as_view(),
+            PlaybackRenewView.as_view(),
+            PlaybackHeartbeatView.as_view(),
+        ):
             with self.subTest(view=view):
                 response = self._followup(view, started.data["token"])
                 self.assertEqual(response.status_code, 403, response.data)
                 self.assertEqual(response.data["detail"], "policy_changed")
+
+    def test_renew_rotates_token_without_replacing_the_monitored_session(self):
+        Attendance.objects.create(
+            tenant=self.tenant,
+            session=self.session,
+            enrollment=self.enrollment_a,
+            status="ONLINE",
+        )
+        started = self._post(student=self.student_a, enrollment=self.enrollment_a)
+        self.assertEqual(started.status_code, 201, started.data)
+        original_session_id = started.data["session_id"]
+        original_token = started.data["token"]
+        self.assertIsNotNone(original_session_id)
+        self.assertEqual(VideoPlaybackSession.objects.count(), 1)
+        playback_session = VideoPlaybackSession.objects.get(session_id=original_session_id)
+        playback_session.expires_at = timezone.now() + timedelta(seconds=5)
+        playback_session.save(update_fields=["expires_at", "updated_at"])
+        forced_expiry = playback_session.expires_at
+
+        refreshed = self._followup(PlaybackRenewView.as_view(), original_token)
+
+        self.assertEqual(refreshed.status_code, 200, refreshed.data)
+        self.assertEqual(refreshed.data["playback_session_id"], original_session_id)
+        self.assertEqual(refreshed.data["policy_version"], self.video.policy_version)
+        self.assertEqual(refreshed.data["access_mode"], AccessMode.PROCTORED_CLASS)
+        self.assertTrue(refreshed.data["monitoring_enabled"])
+        self.assertGreater(refreshed.data["playback_expires_at"], int(timezone.now().timestamp()))
+        self.assertTrue(refreshed.data["playback_token"])
+        self.assertEqual(VideoPlaybackSession.objects.count(), 1)
+        playback_session.refresh_from_db()
+        self.assertEqual(playback_session.status, VideoPlaybackSession.Status.ACTIVE)
+        self.assertGreater(playback_session.expires_at, forced_expiry)
+        self.assertEqual(
+            int(playback_session.expires_at.timestamp()),
+            refreshed.data["playback_expires_at"],
+        )
+
+        valid, payload, error = verify_playback_token(refreshed.data["playback_token"])
+        self.assertTrue(valid, error)
+        self.assertEqual(payload["session_id"], original_session_id)
+        self.assertEqual(payload["enrollment_id"], self.enrollment_a.id)
 
     def test_lecture_deactivation_revokes_active_proctored_sessions(self):
         Attendance.objects.create(
