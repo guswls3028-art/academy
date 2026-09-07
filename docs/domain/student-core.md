@@ -581,13 +581,24 @@ bootstrap rechecks the
 lecture, enrollment, video, and effective mode under row locks before recording
 activity or view count. Every mode receives a bounded current-access token;
 only `PROCTORED_CLASS` creates a monitored playback session. For ordinary
-active playback, the token and signed HLS URL share an expiry equal to the
-encoded video duration plus `VIDEO_PLAYBACK_TTL_SECONDS`. The monitored
-session lease remains `VIDEO_PLAYBACK_TTL_SECONDS` and heartbeat extends that
-lease independently. Keeping the media credential and the session lease
-separate prevents the player bootstrap from being replaced every 10 minutes
-during a long class while preserving liveness checks and 30-second access
-revalidation.
+active playback, the current-access token and monitored session lease remain
+bounded to `VIDEO_PLAYBACK_TTL_SECONDS`; the signed HLS URL is separately
+bounded to the encoded video duration plus that grace period. Heartbeat extends
+the monitored lease, while token renewal rotates the short current-access
+credential. Keeping the media URL, token, and session lease separate prevents
+the player source from being replaced every 10 minutes while preserving
+revocation checks and 30-second access revalidation.
+
+Before a current-access token expires, the client renews it through
+`POST /api/v1/media/playback/renew/`. Renewal revalidates the exact current
+tenant, user, student, enrollment or direct entitlement, lecture, session,
+video, access mode, and policy version. It returns a new token and expiry while
+preserving the existing monitored `VideoPlaybackSession`; it does not create a
+new playback session or increment view/activity counters. Ordinary active
+enrollment media keeps its existing duration-bounded HLS URL. Direct and
+inactive-entitlement media receive a newly signed URL bounded by the renewed
+short expiry. A revoked, expired, cross-scope, ended-lecture, changed-policy, or
+inactive monitored session fails closed instead of being recreated by refresh.
 
 For inactive entitlements only, the playback token, HLS URL, and thumbnail URL
 expire at the earliest of the current access TTL (600 seconds by default) and
@@ -603,11 +614,12 @@ Therefore revoke immediately blocks new access checks, playback grants, and
 token validation, while an already issued CDN URL can remain usable until its
 bounded expiry (at most the access TTL). This contract does not claim immediate
 revocation of an already issued CDN signature. For active, system/public, and
-other ordinary playback, the playback token and HLS signature last at most the
-encoded video duration plus `VIDEO_PLAYBACK_TTL_SECONDS`; legacy READY rows
-without duration retain the historical 24-hour ceiling. This bounds
-already-issued ordinary media after a lecture close without extending the
-monitored session lease.
+other ordinary playback, the HLS signature lasts at most the encoded video
+duration plus `VIDEO_PLAYBACK_TTL_SECONDS`; the playback token remains
+short-lived and renewable. Legacy READY rows without duration retain the
+historical 24-hour media ceiling. This bounds already-issued ordinary media
+after a lecture close without extending the monitored session lease or token
+lifetime.
 Signed URL query parameters and playback tokens are bearer credentials and are
 never logged; playback logs retain only video id, safe status/path metadata,
 and expiry timestamps.

@@ -42,6 +42,7 @@ from apps.domains.video.services.inactive_entitlements import (
 from apps.domains.video.services.access_resolver import get_effective_access_mode
 from apps.domains.video.views.playback_views import (
     PlaybackHeartbeatView,
+    PlaybackRenewView,
     PlaybackStartView,
     _is_policy_token_valid,
 )
@@ -964,6 +965,28 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
             self.assertLessEqual(bounded_expiry, entitlement_expiry)
             self.assertLessEqual(bounded_expiry, now_timestamp + 600)
 
+        renew_request = self.factory.post(
+            "/api/v1/media/playback/renew/",
+            {"token": playback.data["playback_token"]},
+            format="json",
+        )
+        renew_request.tenant = self.tenant
+        force_authenticate(renew_request, user=self.user)
+        renewal = PlaybackRenewView.as_view()(renew_request)
+        self.assertEqual(renewal.status_code, 200, renewal.data)
+        self.assertIsNone(renewal.data["playback_session_id"])
+        self.assertTrue(renewal.data["play_url"])
+        renewed_ok, renewed_payload, renewed_error = verify_playback_token(
+            renewal.data["playback_token"]
+        )
+        self.assertTrue(renewed_ok, renewed_error)
+        renewed_url_expiry = int(
+            parse_qs(urlparse(renewal.data["play_url"]).query)["exp"][0]
+        )
+        self.assertEqual(renewed_url_expiry, int(renewed_payload["exp"]))
+        self.assertLessEqual(renewed_url_expiry, entitlement_expiry)
+        self.assertLessEqual(renewed_url_expiry, int(timezone.now().timestamp()) + 600)
+
         revoke_request = self.factory.post(
             f"/api/v1/media/inactive-video-entitlements/{entitlement.id}/revoke/",
             {"reason": "Stop new exact media grants"},
@@ -979,6 +1002,15 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
 
         self.assertEqual(revoke.status_code, 200, revoke.data)
         self.assertEqual(denied.status_code, 403, denied.data)
+        stale_renew_request = self.factory.post(
+            "/api/v1/media/playback/renew/",
+            {"token": playback.data["playback_token"]},
+            format="json",
+        )
+        stale_renew_request.tenant = self.tenant
+        force_authenticate(stale_renew_request, user=self.user)
+        stale_renewal = PlaybackRenewView.as_view()(stale_renew_request)
+        self.assertEqual(stale_renewal.status_code, 403, stale_renewal.data)
         self.video.refresh_from_db()
         self.assertEqual(self.video.policy_version, policy_version)
         self.assertFalse(_is_policy_token_valid(token_payload))
@@ -2181,7 +2213,11 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
         self.assertEqual(response.data["policy"]["playback_rate"]["max"], 2.0)
         self.assertFalse(response.data["policy"]["watermark"]["enabled"])
 
-    @override_settings(CDN_HLS_BASE_URL="https://cdn.example.test", CDN_HLS_SIGNING_SECRET="")
+    @override_settings(
+        CDN_HLS_BASE_URL="https://cdn.example.test",
+        CDN_HLS_SIGNING_SECRET="test-production-video-signing-secret",
+        VIDEO_PLAYBACK_TTL_SECONDS=600,
+    )
     def test_proctored_playback_issues_session_with_aware_expiry(self):
         Attendance.objects.create(
             tenant=self.tenant,
@@ -2190,6 +2226,7 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
             status="ONLINE",
         )
 
+        now = int(timezone.now().timestamp())
         response = self._get_playback(enrollment_id=self.target_enrollment.id)
 
         self.assertEqual(response.status_code, 200, response.data)
@@ -2202,10 +2239,26 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
         self.assertEqual(response.data["policy"]["seek"]["remaining_seconds"], 20)
         self.assertIsNotNone(response.data["playback_session_id"])
         self.assertIsNotNone(response.data["playback_token"])
+        token_ok, token_payload, token_error = verify_playback_token(
+            response.data["playback_token"]
+        )
+        self.assertTrue(token_ok, token_error)
+        self.assertEqual(
+            int(token_payload["exp"]),
+            int(response.data["playback_expires_at"]),
+        )
+        self.assertGreaterEqual(int(token_payload["exp"]), now + 598)
+        self.assertLessEqual(int(token_payload["exp"]), now + 602)
+        media_expiry = int(
+            parse_qs(urlparse(response.data["play_url"]).query)["exp"][0]
+        )
+        self.assertGreaterEqual(media_expiry, now + self.video.duration + 598)
+        self.assertLessEqual(media_expiry, now + self.video.duration + 602)
         session = VideoPlaybackSession.objects.get(session_id=response.data["playback_session_id"])
         self.assertEqual(session.video_id, self.video.id)
         self.assertEqual(session.enrollment_id, self.target_enrollment.id)
         self.assertIsNotNone(session.expires_at.tzinfo)
+        self.assertEqual(int(session.expires_at.timestamp()), int(token_payload["exp"]))
 
     @override_settings(CDN_HLS_BASE_URL="https://cdn.example.test", CDN_HLS_SIGNING_SECRET="")
     def test_proctored_playback_honors_teacher_free_seek_setting(self):

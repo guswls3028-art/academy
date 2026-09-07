@@ -26,6 +26,7 @@ from apps.domains.student_app.media.views import (
 )
 from apps.domains.students.test_support import create_student_fixture
 from apps.domains.video.models import (
+    AccessMode,
     DirectVideoEntitlement,
     Video,
     VideoAccess,
@@ -46,6 +47,7 @@ from apps.domains.video.views.direct_entitlement_views import (
 from apps.domains.video.views.playback_views import (
     PlaybackEventBatchView,
     PlaybackHeartbeatView,
+    PlaybackRenewView,
     PlaybackRefreshView,
 )
 
@@ -476,6 +478,29 @@ class DirectVideoEntitlementTests(TestCase):
             )
         )
         self.assertEqual(refresh.status_code, 200, refresh.data)
+        renewal = PlaybackRenewView.as_view()(
+            self._request(
+                "post",
+                "/api/v1/media/playback/renew/",
+                user=self.student_user,
+                data={"token": token},
+            )
+        )
+        self.assertEqual(renewal.status_code, 200, renewal.data)
+        self.assertIsNone(renewal.data["playback_session_id"])
+        self.assertEqual(renewal.data["access_mode"], AccessMode.FREE_REVIEW)
+        self.assertFalse(renewal.data["monitoring_enabled"])
+        self.assertTrue(renewal.data["play_url"])
+        renewed_ok, renewed_payload, renewed_error = verify_playback_token(
+            renewal.data["playback_token"]
+        )
+        self.assertTrue(renewed_ok, renewed_error)
+        self.assertEqual(renewed_payload["direct_entitlement_id"], entitlement.id)
+        self.assertEqual(renewed_payload["student_id"], self.student.id)
+        self.assertLessEqual(
+            int(renewed_payload["exp"]),
+            int(timezone.now().timestamp()) + 600,
+        )
         heartbeat = PlaybackHeartbeatView.as_view()(
             self._request(
                 "post",
@@ -521,15 +546,19 @@ class DirectVideoEntitlementTests(TestCase):
                 payload=tampered_payload,
                 ttl_seconds=300,
             )
-            denied = PlaybackRefreshView.as_view()(
-                self._request(
-                    "post",
-                    "/api/v1/media/playback/refresh/",
-                    user=self.student_user,
-                    data={"token": tampered},
+            for view, path in (
+                (PlaybackRefreshView, "/api/v1/media/playback/refresh/"),
+                (PlaybackRenewView, "/api/v1/media/playback/renew/"),
+            ):
+                denied = view.as_view()(
+                    self._request(
+                        "post",
+                        path,
+                        user=self.student_user,
+                        data={"token": tampered},
+                    )
                 )
-            )
-            self.assertEqual(denied.status_code, 403, replacement)
+                self.assertEqual(denied.status_code, 403, (view, replacement))
 
         enrollment = create_enrollment_fixture(
             tenant=self.tenant,
@@ -546,6 +575,15 @@ class DirectVideoEntitlementTests(TestCase):
             )
         )
         self.assertEqual(denied_by_enrollment.status_code, 403)
+        denied_renewal_by_enrollment = PlaybackRenewView.as_view()(
+            self._request(
+                "post",
+                "/api/v1/media/playback/renew/",
+                user=self.student_user,
+                data={"token": token},
+            )
+        )
+        self.assertEqual(denied_renewal_by_enrollment.status_code, 403)
         enrollment.status = "INACTIVE"
         enrollment.save(update_fields=["status", "updated_at"])
         still_denied = PlaybackRefreshView.as_view()(

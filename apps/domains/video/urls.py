@@ -18,6 +18,7 @@ from .views.achievement_views import VideoAchievementView
 from .views.playback_views import (
     PlaybackStartView,
     PlaybackRefreshView,
+    PlaybackRenewView,
     PlaybackHeartbeatView,
     PlaybackEndView,
     PlaybackEventBatchView,
@@ -89,6 +90,7 @@ urlpatterns += [
 urlpatterns += [
     path("playback/start/", PlaybackStartView.as_view()),
     path("playback/refresh/", PlaybackRefreshView.as_view()),
+    path("playback/renew/", PlaybackRenewView.as_view()),
     path("playback/heartbeat/", PlaybackHeartbeatView.as_view()),
     path("playback/end/", PlaybackEndView.as_view()),
     path("playback/events/", PlaybackEventBatchView.as_view()),
