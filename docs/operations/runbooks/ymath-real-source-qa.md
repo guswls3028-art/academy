@@ -90,6 +90,27 @@ python manage.py setup_ymath_realuse_scenario `
 생성된 교사와 학생은 각각 활성 `admin`, `student` 테넌트 멤버십을 가져야 하며,
 출력된 학생 로그인 아이디로 격리 API에 로그인할 수 있어야 한다.
 
+장시간 감시형 영상 재생·토큰 갱신을 검증할 때만 학생 수를 정확히 2명으로 지정하고
+`--synthetic-long-video`를 추가한다.
+
+```powershell
+$env:YMATH_REALUSE_SCENARIO_PASSWORD = '<ephemeral-secret>'
+python manage.py setup_ymath_realuse_scenario `
+  --tenant-code qa-ymath-realuse-fe-<run-id> `
+  --student-count 2 `
+  --session-count 1 `
+  --synthetic-long-video
+```
+
+이 옵션은 production DB/R2에서 기존 명령과 동일하게 거부되며 기본은 꺼져 있다.
+생성물은 READY metadata 1건(900초, 고정 path
+`qa-fixtures/video-long/master.m3u8`)과 두 학생 수강의 `PROCTORED_CLASS` override다.
+R2 객체는 만들지 않는다. 따라서 공식 frontend runner가 backend 응답의 정확한 signed
+path를 loopback 합성 HLS server로 fail-closed 매핑한 경우에만 재생 검증에 사용한다.
+Setup JSON의 `synthetic_long_video`와 `video_state`, 종료 JSON의 모든
+`video_residue=0`을 함께 보존해야 한다. 운영 영상 또는 실제 학생 데이터를 대신
+연결하거나 metadata 생성만으로 장시간 재생 성공을 판정하면 안 된다.
+
 화면 검수는 검수할 frontend exact checkout을 로컬 `5174`에서 실행하고
 `VITE_DEV_PROXY_TARGET=http://127.0.0.1:18000`으로 SSM tunnel에 연결한다. 교사
 로그인 후 desktop과 390px에서 대상 DOM·상호작용·새로고침·overflow·콘솔/API 오류를
