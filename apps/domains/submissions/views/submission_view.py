@@ -800,19 +800,24 @@ class SubmissionViewSet(ModelViewSet):
 
         synced_score = None
         synced_max_score = None
+        synced_result_id = None
         projection_ready = True
         grading_status = None
         if submission.target_type == Submission.TargetType.EXAM and submission.enrollment_id:
-            synced_score, synced_max_score = get_synced_exam_score(
+            synced_result_id, synced_score, synced_max_score = get_synced_exam_score(
                 tenant=tenant,
                 target_id=int(submission.target_id),
                 enrollment_id=int(submission.enrollment_id),
             )
-            finalization = finalize_omr_result_projection(
-                result_id=int(decision.result_id)
-            )
-            projection_ready = finalization.projection_ready
-            grading_status = finalization.pending_reason
+            if synced_result_id is None:
+                projection_ready = False
+                grading_status = "result_missing"
+            else:
+                finalization = finalize_omr_result_projection(
+                    result_id=synced_result_id
+                )
+                projection_ready = finalization.projection_ready
+                grading_status = finalization.pending_reason
 
         return Response(
             {
@@ -989,7 +994,7 @@ class SubmissionViewSet(ModelViewSet):
         synced_score = None
         synced_max_score = None
         if submission.enrollment_id:
-            synced_score, synced_max_score = get_synced_exam_score(
+            _synced_result_id, synced_score, synced_max_score = get_synced_exam_score(
                 tenant=tenant,
                 target_id=int(submission.target_id),
                 enrollment_id=int(submission.enrollment_id),

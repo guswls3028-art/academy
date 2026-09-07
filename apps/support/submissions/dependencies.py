@@ -751,7 +751,12 @@ def dispatch_ai_result_to_submissions_domain(
     )
 
 
-def get_synced_exam_score(*, tenant, target_id: int, enrollment_id: int) -> tuple[float | None, float | None]:
+def get_synced_exam_score(
+    *,
+    tenant,
+    target_id: int,
+    enrollment_id: int,
+) -> tuple[int | None, float | None, float | None]:
     try:
         from apps.domains.results.models import Result
 
@@ -762,15 +767,19 @@ def get_synced_exam_score(*, tenant, target_id: int, enrollment_id: int) -> tupl
                 enrollment_id=int(enrollment_id),
                 enrollment__tenant=tenant,
             )
-            .only("total_score", "max_score")
+            .only("id", "total_score", "max_score")
             .order_by("-id")
             .first()
         )
         if result:
-            return float(result.total_score or 0.0), float(result.max_score or 0.0)
+            return (
+                int(result.id),
+                float(result.total_score or 0.0),
+                float(result.max_score or 0.0),
+            )
     except Exception:
-        return None, None
-    return None, None
+        return None, None, None
+    return None, None, None
 
 
 def finalize_omr_result_projection(*, result_id: int):

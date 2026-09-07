@@ -256,6 +256,19 @@ class MixedOmrSubjectiveProjectionPostgresTests(TestCase):
         dispatch.assert_not_called()
 
     def test_omr_review_save_reports_objective_regrade_without_final_projection(self):
+        unrelated_submission = Submission.objects.create(
+            tenant=self.tenant,
+            user=self.staff,
+            enrollment=self.enrollment,
+            target_type=Submission.TargetType.EXAM,
+            target_id=self.exam.id,
+            source=Submission.Source.ONLINE,
+            status=Submission.Status.DONE,
+        )
+        ExamResult.objects.create(
+            submission=unrelated_submission,
+            exam=self.exam,
+        )
         self._grade_objective_only()
         client = APIClient()
         client.force_authenticate(user=self.staff)
