@@ -39,6 +39,12 @@ def request_is_parent(request: Any) -> bool:
     return is_request_parent(request)
 
 
+def request_student(request: Any):
+    from apps.domains.student_app.permissions import get_request_student
+
+    return get_request_student(request)
+
+
 def grade_submission_objective(submission_id: int, *, force_regrade: bool = False):
     from apps.domains.results.services.grading_service import grade_submission
 

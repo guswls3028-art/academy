@@ -453,6 +453,20 @@ active lecture. Historical grades and video progress use the separate readonly
 history selector and may include ended lectures; they must not return a playable
 session or media URL.
 
+### Parent-selected learning submissions
+
+A parent may submit an online exam or homework media only for the active linked
+student named by `X-Student-Id`. The server never guesses a child when that header
+is absent and never falls back after an invalid, unlinked, deleted, or cross-tenant
+student ID. Enrollment, active lecture, and exact exam/homework assignment checks
+still run before any submission row or object-store write.
+
+The resulting `Submission.user` is the selected student's User so grades, pending
+work, teacher review, and reload projections remain identical to a student-authored
+submission. When the authenticated actor is the parent, the submission metadata
+records `submitted_by_user_id`. Parent permissions remain read-only for profile,
+reported-score source, inventory, question, and counseling mutations.
+
 ## 7. Minimum Change Gate
 
 When a change touches any of these surfaces, run the smallest focused set that

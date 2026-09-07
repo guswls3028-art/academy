@@ -22,6 +22,7 @@ from apps.domains.lectures.test_support import (
     create_lecture_fixture,
     create_session_fixture,
 )
+from apps.domains.parents.models import Parent
 from apps.domains.students.test_support import create_student_fixture
 from apps.domains.submissions.models import Submission, SubmissionMedia
 from apps.domains.submissions.services import dispatcher
@@ -129,20 +130,64 @@ class HomeworkSubmissionMediaTests(TestCase):
             enrollment=self.enrollment,
         )
 
-    def _request(self, method: str, path: str, *, user=None, data=None):
+    def _link_parent(self):
+        self.parent_user = User.objects.create_user(
+            username="homework-media-parent",
+            password="pw1234",
+            tenant=self.tenant,
+            name="학부모",
+        )
+        TenantMembership.ensure_active(
+            tenant=self.tenant,
+            user=self.parent_user,
+            role="parent",
+        )
+        self.parent = Parent.objects.create(
+            tenant=self.tenant,
+            user=self.parent_user,
+            name="학부모",
+            phone="01033334444",
+        )
+        self.student.parent = self.parent
+        self.student.save(update_fields=["parent", "updated_at"])
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        user=None,
+        data=None,
+        student_id=None,
+        tenant=None,
+    ):
+        headers = (
+            {"HTTP_X_STUDENT_ID": str(student_id)}
+            if student_id is not None
+            else {}
+        )
         if method == "get":
-            request = self.factory.get(path, data=data)
+            request = self.factory.get(path, data=data, **headers)
         elif method == "post":
-            request = self.factory.post(path, data=data, format="multipart")
+            request = self.factory.post(path, data=data, format="multipart", **headers)
         elif method == "delete":
-            request = self.factory.delete(path, data=data, format="json")
+            request = self.factory.delete(path, data=data, format="json", **headers)
         else:
             raise AssertionError(f"unsupported method: {method}")
-        request.tenant = self.tenant
+        request.tenant = tenant or self.tenant
         force_authenticate(request, user=user or self.student_user)
         return request
 
-    def _post(self, *, file, client_file_id=None, batch_id=None, position=0):
+    def _post(
+        self,
+        *,
+        file,
+        client_file_id=None,
+        batch_id=None,
+        position=0,
+        user=None,
+        student_id=None,
+    ):
         path = f"/api/v1/submissions/submissions/homework/{self.homework.id}/media/"
         request = self._request(
             "post",
@@ -154,11 +199,175 @@ class HomeworkSubmissionMediaTests(TestCase):
                 "position": position,
                 "file": file,
             },
+            user=user,
+            student_id=student_id,
         )
         return HomeworkSubmissionMediaCollectionView.as_view()(
             request,
             homework_id=self.homework.id,
         )
+
+    @patch("apps.domains.submissions.services.homework_media.upload_fileobj_to_r2")
+    def test_parent_selected_child_upload_persists_as_child_and_reloads_in_projection(
+        self,
+        upload_fileobj_to_r2,
+    ):
+        self._link_parent()
+        created = self._post(
+            file=_jpeg("parent-proof.jpg"),
+            user=self.parent_user,
+            student_id=self.student.id,
+        )
+
+        self.assertEqual(created.status_code, 201, created.data)
+        submission = Submission.objects.get(media_files__id=int(created.data["id"]))
+        self.assertEqual(submission.user_id, self.student_user.id)
+        self.assertEqual(submission.enrollment_id, self.enrollment.id)
+        self.assertEqual(submission.meta["submitted_by_user_id"], self.parent_user.id)
+        self.assertEqual(
+            submitted_homework_keys_for_grades(
+                tenant=self.tenant,
+                enrollment_ids=[self.enrollment.id],
+                homework_ids=[self.homework.id],
+            ),
+            {(self.enrollment.id, self.homework.id)},
+        )
+
+        request = self._request(
+            "get",
+            f"/api/v1/submissions/submissions/homework/{self.homework.id}/media/",
+            user=self.parent_user,
+            student_id=self.student.id,
+            data={"enrollment_id": self.enrollment.id},
+        )
+        reloaded = HomeworkSubmissionMediaCollectionView.as_view()(
+            request,
+            homework_id=self.homework.id,
+        )
+
+        self.assertEqual(reloaded.status_code, 200, reloaded.data)
+        self.assertEqual(
+            [item["original_filename"] for item in reloaded.data["files"]],
+            ["parent-proof.jpg"],
+        )
+        upload_fileobj_to_r2.assert_called_once()
+
+    @patch("apps.domains.submissions.services.homework_media.upload_fileobj_to_r2")
+    def test_parent_cannot_upload_without_explicit_selected_child(
+        self,
+        upload_fileobj_to_r2,
+    ):
+        self._link_parent()
+        response = self._post(file=_jpeg("ambiguous.jpg"), user=self.parent_user)
+
+        self.assertEqual(response.status_code, 403, response.data)
+        self.assertEqual(Submission.objects.count(), 0)
+        self.assertEqual(SubmissionMedia.objects.count(), 0)
+        upload_fileobj_to_r2.assert_not_called()
+
+    @patch("apps.domains.submissions.services.homework_media.upload_fileobj_to_r2")
+    def test_parent_cannot_upload_for_unlinked_same_tenant_student(
+        self,
+        upload_fileobj_to_r2,
+    ):
+        self._link_parent()
+        unlinked_user = User.objects.create_user(
+            username="homework-media-unlinked",
+            password="pw1234",
+            tenant=self.tenant,
+        )
+        TenantMembership.ensure_active(
+            tenant=self.tenant,
+            user=unlinked_user,
+            role="student",
+        )
+        unlinked_student = create_student_fixture(
+            tenant=self.tenant,
+            user=unlinked_user,
+            ps_number="HWM-UNLINKED",
+            omr_code="11235813",
+            name="미연결 학생",
+            phone="01055557777",
+            parent_phone="01088889999",
+        )
+        unlinked_enrollment = create_enrollment_fixture(
+            tenant=self.tenant,
+            student=unlinked_student,
+            lecture=self.lecture,
+            status="ACTIVE",
+        )
+        create_homework_assignment_fixture(
+            tenant=self.tenant,
+            homework=self.homework,
+            session=self.session,
+            enrollment=unlinked_enrollment,
+        )
+        path = f"/api/v1/submissions/submissions/homework/{self.homework.id}/media/"
+        request = self._request(
+            "post",
+            path,
+            user=self.parent_user,
+            student_id=unlinked_student.id,
+            data={
+                "enrollment_id": unlinked_enrollment.id,
+                "client_file_id": str(uuid.uuid4()),
+                "upload_batch_id": str(uuid.uuid4()),
+                "position": 0,
+                "file": _jpeg("unlinked.jpg"),
+            },
+        )
+
+        response = HomeworkSubmissionMediaCollectionView.as_view()(
+            request,
+            homework_id=self.homework.id,
+        )
+
+        self.assertEqual(response.status_code, 403, response.data)
+        self.assertEqual(Submission.objects.count(), 0)
+        self.assertEqual(SubmissionMedia.objects.count(), 0)
+        upload_fileobj_to_r2.assert_not_called()
+
+    @patch("apps.domains.submissions.services.homework_media.upload_fileobj_to_r2")
+    def test_parent_cannot_upload_for_cross_tenant_student(
+        self,
+        upload_fileobj_to_r2,
+    ):
+        self._link_parent()
+        other_tenant = Tenant.objects.create(
+            code="homework-media-other-tenant",
+            name="Other Homework Media",
+            is_active=True,
+        )
+        other_user = User.objects.create_user(
+            username="homework-media-cross-tenant",
+            password="pw1234",
+            tenant=other_tenant,
+        )
+        TenantMembership.ensure_active(
+            tenant=other_tenant,
+            user=other_user,
+            role="student",
+        )
+        other_student = create_student_fixture(
+            tenant=other_tenant,
+            user=other_user,
+            ps_number="HWM-CROSS-TENANT",
+            omr_code="16180339",
+            name="다른 학원 학생",
+            phone="01022223333",
+            parent_phone="01044445555",
+        )
+
+        response = self._post(
+            file=_jpeg("cross-tenant.jpg"),
+            user=self.parent_user,
+            student_id=other_student.id,
+        )
+
+        self.assertEqual(response.status_code, 403, response.data)
+        self.assertEqual(Submission.objects.count(), 0)
+        self.assertEqual(SubmissionMedia.objects.count(), 0)
+        upload_fileobj_to_r2.assert_not_called()
 
     @patch("apps.domains.submissions.services.homework_media.upload_fileobj_to_r2")
     def test_multiple_images_and_video_persist_with_identity_and_order(

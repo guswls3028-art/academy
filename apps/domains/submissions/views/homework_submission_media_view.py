@@ -24,7 +24,7 @@ from apps.infrastructure.storage.r2 import generate_presigned_get_url
 from apps.support.submissions.dependencies import (
     enrollment_belongs_to_tenant,
     homework_submission_is_teacher_reviewed,
-    request_is_parent,
+    request_student,
     student_owns_enrollment,
     target_enrollment_assignment_exists,
 )
@@ -44,10 +44,7 @@ def _require_student_homework_access(request, *, homework_id: int, enrollment_id
     tenant = getattr(request, "tenant", None)
     if not tenant:
         raise PermissionDenied("학원 정보를 확인할 수 없습니다.")
-    is_parent = request_is_parent(request)
-    student = getattr(request.user, "student_profile", None)
-    if is_parent:
-        raise PermissionDenied("학부모 계정은 과제 파일을 변경할 수 없습니다.")
+    student = request_student(request)
     if not student:
         raise PermissionDenied("학생 계정으로 이용해 주세요.")
     if not enrollment_belongs_to_tenant(enrollment_id=enrollment_id, tenant=tenant):
@@ -65,7 +62,7 @@ def _require_student_homework_access(request, *, homework_id: int, enrollment_id
         tenant,
     ):
         raise PermissionDenied("현재 제출할 수 있는 과제가 아닙니다.")
-    return tenant
+    return tenant, student
 
 
 def _student_submission_parents(*, tenant, user, enrollment_id: int, homework_id: int):
@@ -96,7 +93,7 @@ class HomeworkSubmissionMediaCollectionView(APIView):
             request.query_params.get("enrollment_id"),
             field_name="enrollment_id",
         )
-        tenant = _require_student_homework_access(
+        tenant, student = _require_student_homework_access(
             request,
             homework_id=int(homework_id),
             enrollment_id=enrollment_id,
@@ -104,7 +101,7 @@ class HomeworkSubmissionMediaCollectionView(APIView):
         files: list[dict] = []
         for parent in _student_submission_parents(
             tenant=tenant,
-            user=request.user,
+            user=student.user,
             enrollment_id=enrollment_id,
             homework_id=int(homework_id),
         ):
@@ -129,7 +126,7 @@ class HomeworkSubmissionMediaCollectionView(APIView):
             request.data.get("enrollment_id"),
             field_name="enrollment_id",
         )
-        tenant = _require_student_homework_access(
+        tenant, student = _require_student_homework_access(
             request,
             homework_id=int(homework_id),
             enrollment_id=enrollment_id,
@@ -151,7 +148,8 @@ class HomeworkSubmissionMediaCollectionView(APIView):
             raise ValidationError({"file": "파일을 선택해 주세요."})
         media, deduplicated = store_homework_media(
             tenant=tenant,
-            user=request.user,
+            user=student.user,
+            submitted_by_user=request.user,
             enrollment_id=enrollment_id,
             homework_id=int(homework_id),
             upload_file=upload_file,
@@ -187,7 +185,7 @@ class HomeworkSubmissionMediaDetailView(APIView):
             request.data.get("enrollment_id"),
             field_name="enrollment_id",
         )
-        tenant = _require_student_homework_access(
+        tenant, student = _require_student_homework_access(
             request,
             homework_id=int(homework_id),
             enrollment_id=enrollment_id,
@@ -212,7 +210,7 @@ class HomeworkSubmissionMediaDetailView(APIView):
             )
             parent = _owned_submission(
                 tenant=tenant,
-                user=request.user,
+                user=student.user,
                 enrollment_id=enrollment_id,
                 homework_id=int(homework_id),
                 submission_id=submission_id,
@@ -234,7 +232,7 @@ class HomeworkSubmissionMediaDetailView(APIView):
                 id=parsed_media_id,
                 tenant=tenant,
                 submission__tenant=tenant,
-                submission__user=request.user,
+                submission__user=student.user,
                 submission__enrollment_id=enrollment_id,
                 submission__target_type=Submission.TargetType.HOMEWORK,
                 submission__target_id=int(homework_id),
@@ -307,15 +305,14 @@ class HomeworkSubmissionMediaPreviewView(APIView):
             return Response(status=status.HTTP_404_NOT_FOUND)
         submission, object_key, media_payload = target
         is_staff = is_effective_staff(request.user, tenant)
-        is_owner = submission.user_id == request.user.id and getattr(request.user, "student_profile", None) is not None
         if not is_staff:
-            if not is_owner:
-                raise PermissionDenied("이 과제 파일을 볼 수 없습니다.")
-            _require_student_homework_access(
+            _, student = _require_student_homework_access(
                 request,
                 homework_id=int(homework_id),
                 enrollment_id=int(submission.enrollment_id or 0),
             )
+            if submission.user_id != student.user_id:
+                raise PermissionDenied("이 과제 파일을 볼 수 없습니다.")
         if not media_payload.get("legacy") and media_payload.get("status") != SubmissionMedia.Status.UPLOADED:
             return Response(
                 {"code": "HOMEWORK_MEDIA_NOT_READY", "detail": "업로드가 끝난 파일만 미리 볼 수 있습니다."},
