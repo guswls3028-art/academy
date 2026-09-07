@@ -649,6 +649,8 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
         self.assertIn('OpsAuditLog.objects.create(', source)
         self.assertIn('assert_cleanup_owner(tenant, existing.pk, capability, records)', source)
         self.assertLess(source.index('assert_cleanup_owner(tenant, existing.pk, capability, records)'),
+                        source.index('legacy_cleanup_ephemeral_evidence(existing)'))
+        self.assertLess(source.index('assert_cleanup_owner(tenant, existing.pk, capability, records)'),
                         source.index('destroy=True'))
 
     def test_fixed_documents_bound_remote_session_lifetime_and_operation(self):
@@ -660,6 +662,266 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
         command = json.loads((directory / "frontend_development_qa.json").read_text())["properties"]["linux"]["commands"]
         self.assertIn("signal.alarm(180)", command)
         self.assertIn("timeout --kill-after=5s 210s docker exec", command)
+
+    def test_fixed_document_negotiates_exact_legacy_and_native_residue_surfaces(self):
+        session = json.loads((ROOT / "scripts/v1/templates/ssm/frontend_development_qa.json").read_text())
+        shell_script = shlex.split(session["properties"]["linux"]["commands"], posix=True)[2]
+        source = shell_script.split("<<'ACADEMY_QA_PY'\n", 1)[1].rsplit("ACADEMY_QA_PY", 1)[0]
+        tree = ast.parse(source)
+        selected = [
+            node for node in tree.body
+            if (
+                isinstance(node, ast.Assign)
+                and any(
+                    isinstance(target, ast.Name)
+                    and target.id in {"LEGACY_RESIDUE_RELEASE", "LEGACY_RESIDUE_DIGEST"}
+                    for target in node.targets
+                )
+            )
+            or (isinstance(node, ast.FunctionDef) and node.name == "select_residue_mode")
+        ]
+        namespace = {}
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "fixed-residue-mode", "exec"), namespace)
+        select_mode = namespace["select_residue_mode"]
+        native = SimpleNamespace(
+            _cleanup_ephemeral_evidence=lambda _tenant: None,
+            _owned_database_residue=lambda _tenant: None,
+            _non_database_residue=lambda **_kwargs: None,
+        )
+        self.assertEqual(select_mode(native, "future-release", "sha256:" + "f" * 64), "native")
+        legacy = SimpleNamespace()
+        self.assertEqual(
+            select_mode(
+                legacy,
+                "sha-db54b32e6e33538b320aedbc13fd6011090e961a-run-33825614585-1",
+                "sha256:7cd21c84866b296129d68f6fb2d7b420ab29a2bc33b42e44845a719cdaaa525b",
+            ),
+            "legacy",
+        )
+        with self.assertRaises(RuntimeError):
+            select_mode(legacy, "sha-" + "a" * 40 + "-run-1-1", "sha256:" + "b" * 64)
+        with self.assertRaises(RuntimeError):
+            select_mode(
+                SimpleNamespace(_owned_database_residue=lambda _tenant: None),
+                namespace["LEGACY_RESIDUE_RELEASE"],
+                namespace["LEGACY_RESIDUE_DIGEST"],
+            )
+
+    def test_exact_legacy_cleanup_uses_full_residue_adapter_before_destroy(self):
+        session = json.loads((ROOT / "scripts/v1/templates/ssm/frontend_development_qa.json").read_text())
+        shell_script = shlex.split(session["properties"]["linux"]["commands"], posix=True)[2]
+        source = shell_script.split("<<'ACADEMY_QA_PY'\n", 1)[1].rsplit("ACADEMY_QA_PY", 1)[0]
+        tree = ast.parse(source)
+        selected = [
+            node for node in tree.body
+            if isinstance(node, (ast.Assign, ast.FunctionDef))
+        ]
+        namespace = {
+            "hashlib": hashlib,
+            "hmac": hmac,
+            "re": re,
+            "io": io,
+            "json": json,
+            "os": os,
+            "django": SimpleNamespace(setup=Mock()),
+        }
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "fixed-legacy-cleanup", "exec"), namespace)
+        tenant_code = "qa-ymath-realuse-fe-456-1-fedcba654321"
+        capability = "a" * 64
+        tenant = SimpleNamespace(pk=72, id=72, code=tenant_code)
+        exact_tenant = Mock(return_value=tenant)
+        remaining = Mock(return_value={"tenants": 1, "users": 2})
+        command = SimpleNamespace(
+            _exact_tenant_or_fail_on_case_variant=exact_tenant,
+            _remaining_for_code=remaining,
+            _lock_tenant_code=Mock(),
+        )
+        cursor = MagicMock()
+        audit = Mock()
+        destroy = Mock(side_effect=lambda *args, **kwargs: kwargs["stdout"].write(json.dumps({
+            "status": "YMATH_REALUSE_SCENARIO_DESTROYED",
+            "tenant_code": tenant_code,
+            "remaining": {"tenants": 0, "users": 0},
+        })))
+        cleanup_database = Mock(return_value={
+            "remaining": {"activity_audits": 0, "outstanding_tokens": 0},
+        })
+        cleanup_non_database = Mock(return_value={"listeners": 0, "processes": 0, "r2_objects": 0})
+        namespace["legacy_cleanup_ephemeral_evidence"] = cleanup_database
+        namespace["legacy_non_database_residue"] = cleanup_non_database
+        bucket_keys = ("R2_AI_BUCKET", "R2_STORAGE_BUCKET", "R2_ADMIN_BUCKET", "R2_VIDEO_BUCKET", "R2_EXCEL_BUCKET")
+        settings = SimpleNamespace(
+            VIDEO_BATCH_JOB_QUEUE="", VIDEO_BATCH_JOB_DEFINITION="",
+            TOOLS_SQS_QUEUE_NAME="academy-v1-development-tools-queue",
+            MESSAGING_SQS_QUEUE_NAME="academy-v1-development-messaging-queue",
+            DATABASES={"default": {"NAME": "academy_api_development", "USER": "academy_api_development_app"}},
+            **{key: "academy-development-artifacts" for key in bucket_keys})
+        modules = {
+            "django.conf": SimpleNamespace(settings=settings),
+            "django.core.management": SimpleNamespace(call_command=destroy),
+            "django.db": SimpleNamespace(transaction=SimpleNamespace(atomic=nullcontext),
+                                         connection=SimpleNamespace(cursor=lambda: cursor)),
+            "apps.core.models": SimpleNamespace(OpsAuditLog=SimpleNamespace(objects=audit)),
+            "apps.core.management.commands.setup_ymath_realuse_scenario":
+                SimpleNamespace(Command=lambda: command, assert_isolated_runtime=Mock()),
+        }
+        audit.filter.return_value.values_list.return_value = [
+            namespace["ownership_payload"](tenant_code, 72, capability)
+        ]
+        release = namespace["LEGACY_RESIDUE_RELEASE"]
+        digest = namespace["LEGACY_RESIDUE_DIGEST"]
+        env = {
+            "QA_ACTION": "Cleanup", "QA_TENANT": tenant_code, "QA_CAPABILITY": capability,
+            "QA_RELEASE": release, "QA_DIGEST": digest,
+            "QA_IMAGE": "809466760795.dkr.ecr.ap-northeast-2.amazonaws.com/academy-api@" + digest,
+            "DJANGO_SETTINGS_MODULE": "apps.api.config.settings.development",
+            "ACADEMY_RUNTIME_ENV": "development", "ACADEMY_DEVELOPMENT_RELEASE_ID": release,
+            "SOLAPI_MOCK": "true", "TOSS_AUTO_BILLING_ENABLED": "false",
+            **{key: "academy-v1-development-ai-queue" for key in
+               ("AI_SQS_QUEUE_NAME_LITE", "AI_SQS_QUEUE_NAME_BASIC", "AI_SQS_QUEUE_NAME_PREMIUM")},
+        }
+        with patch.dict(sys.modules, modules), patch.dict(os.environ, env, clear=True):
+            result = namespace["run"]()
+        self.assertEqual(result["residue"], {
+            "activity_audits": 0,
+            "listeners": 0,
+            "outstanding_tokens": 0,
+            "processes": 0,
+            "r2_objects": 0,
+        })
+        cleanup_database.assert_called_once_with(tenant)
+        cleanup_non_database.assert_called_once_with(tenant_id=72, tenant_code=tenant_code)
+        destroy.assert_called_once()
+
+    def test_exact_legacy_inspect_reports_full_zero_residue_without_mutation(self):
+        session = json.loads((ROOT / "scripts/v1/templates/ssm/frontend_development_qa.json").read_text())
+        shell_script = shlex.split(session["properties"]["linux"]["commands"], posix=True)[2]
+        source = shell_script.split("<<'ACADEMY_QA_PY'\n", 1)[1].rsplit("ACADEMY_QA_PY", 1)[0]
+        tree = ast.parse(source)
+        namespace = {
+            "hashlib": hashlib, "hmac": hmac, "re": re, "io": io, "json": json,
+            "os": os, "django": SimpleNamespace(setup=Mock()),
+        }
+        exec(compile(ast.Module(
+            body=[node for node in tree.body if isinstance(node, (ast.Assign, ast.FunctionDef))],
+            type_ignores=[],
+        ), "fixed-legacy-inspect", "exec"), namespace)
+        tenant_code = "qa-ymath-realuse-fe-456-1-fedcba654321"
+        command = SimpleNamespace(
+            _exact_tenant_or_fail_on_case_variant=Mock(),
+            _remaining_for_code=Mock(return_value={"tenants": 0, "users": 0}),
+            _lock_tenant_code=Mock(),
+        )
+        non_database = Mock(return_value={"listeners": 0, "processes": 0, "r2_objects": 0})
+        namespace["legacy_non_database_residue"] = non_database
+        bucket_keys = ("R2_AI_BUCKET", "R2_STORAGE_BUCKET", "R2_ADMIN_BUCKET", "R2_VIDEO_BUCKET", "R2_EXCEL_BUCKET")
+        settings = SimpleNamespace(
+            VIDEO_BATCH_JOB_QUEUE="", VIDEO_BATCH_JOB_DEFINITION="",
+            TOOLS_SQS_QUEUE_NAME="academy-v1-development-tools-queue",
+            MESSAGING_SQS_QUEUE_NAME="academy-v1-development-messaging-queue",
+            DATABASES={"default": {"NAME": "academy_api_development", "USER": "academy_api_development_app"}},
+            **{key: "academy-development-artifacts" for key in bucket_keys})
+        modules = {
+            "django.conf": SimpleNamespace(settings=settings),
+            "django.core.management": SimpleNamespace(call_command=Mock()),
+            "django.db": SimpleNamespace(transaction=SimpleNamespace(atomic=nullcontext), connection=Mock()),
+            "apps.core.models": SimpleNamespace(OpsAuditLog=Mock()),
+            "apps.core.management.commands.setup_ymath_realuse_scenario":
+                SimpleNamespace(Command=lambda: command, assert_isolated_runtime=Mock()),
+        }
+        release = namespace["LEGACY_RESIDUE_RELEASE"]
+        digest = namespace["LEGACY_RESIDUE_DIGEST"]
+        env = {
+            "QA_ACTION": "Inspect", "QA_TENANT": tenant_code, "QA_CAPABILITY": "a" * 64,
+            "QA_RELEASE": release, "QA_DIGEST": digest,
+            "QA_IMAGE": "809466760795.dkr.ecr.ap-northeast-2.amazonaws.com/academy-api@" + digest,
+            "DJANGO_SETTINGS_MODULE": "apps.api.config.settings.development",
+            "ACADEMY_RUNTIME_ENV": "development", "ACADEMY_DEVELOPMENT_RELEASE_ID": release,
+            "SOLAPI_MOCK": "true", "TOSS_AUTO_BILLING_ENABLED": "false",
+            **{key: "academy-v1-development-ai-queue" for key in
+               ("AI_SQS_QUEUE_NAME_LITE", "AI_SQS_QUEUE_NAME_BASIC", "AI_SQS_QUEUE_NAME_PREMIUM")},
+        }
+        with patch.dict(sys.modules, modules), patch.dict(os.environ, env, clear=True):
+            result = namespace["run"]()
+        self.assertEqual(result["status"], "DEVELOPMENT_QA_IDENTITY_PASS")
+        self.assertEqual(result["remaining"], {"tenants": 0, "users": 0})
+        self.assertEqual(result["residue"], {
+            "activity_audits": 0, "listeners": 0, "outstanding_tokens": 0,
+            "processes": 0, "r2_objects": 0,
+        })
+        non_database.assert_called_once_with(tenant_id=None, tenant_code=tenant_code)
+        command._exact_tenant_or_fail_on_case_variant.assert_not_called()
+
+    def test_legacy_database_cleanup_deletes_only_exact_ids_after_setup_seal(self):
+        session = json.loads((ROOT / "scripts/v1/templates/ssm/frontend_development_qa.json").read_text())
+        shell_script = shlex.split(session["properties"]["linux"]["commands"], posix=True)[2]
+        source = shell_script.split("<<'ACADEMY_QA_PY'\n", 1)[1].rsplit("ACADEMY_QA_PY", 1)[0]
+        tree = ast.parse(source)
+        selected = [
+            node for node in tree.body
+            if (
+                isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name) and target.id == "LEGACY_ACTIVITY_AUDIT_ACTIONS"
+                        for target in node.targets)
+            )
+            or (isinstance(node, ast.FunctionDef) and node.name in {
+                "legacy_owned_activity_rows", "legacy_cleanup_ephemeral_evidence",
+            })
+        ]
+        namespace = {}
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "fixed-legacy-database-cleanup", "exec"), namespace)
+        tenant = SimpleNamespace(
+            id=72,
+            code="qa-ymath-realuse-fe-456-1-fedcba654321",
+            users=SimpleNamespace(values_list=Mock(return_value=[7, 8])),
+        )
+        activity_rows = Mock()
+        owned_activity_rows = Mock()
+        activity_rows.filter.return_value = owned_activity_rows
+        owned_activity_rows.values_list.return_value = [101]
+        setup_rows = Mock()
+        setup_rows.order_by.return_value.values_list.return_value.first.return_value = object()
+        deleted_activity_rows = Mock()
+        deleted_activity_rows.count.return_value = 0
+        token_rows = Mock()
+        token_rows.values_list.return_value = [201]
+        deleted_token_rows = Mock()
+        deleted_token_rows.count.return_value = 0
+        audit_objects = Mock()
+        token_objects = Mock()
+
+        def audit_filter(**kwargs):
+            if "action__in" in kwargs:
+                return activity_rows
+            if kwargs.get("action") == "development.qa.setup":
+                return setup_rows
+            if kwargs == {"id__in": [101]}:
+                return deleted_activity_rows
+            raise AssertionError(f"unexpected audit filter: {kwargs}")
+
+        def token_filter(**kwargs):
+            if kwargs == {"user_id__in": [7, 8]}:
+                return token_rows
+            if kwargs == {"id__in": [201]}:
+                return deleted_token_rows
+            raise AssertionError(f"unexpected token filter: {kwargs}")
+
+        audit_objects.filter.side_effect = audit_filter
+        token_objects.filter.side_effect = token_filter
+        modules = {
+            "apps.core.models": SimpleNamespace(OpsAuditLog=SimpleNamespace(objects=audit_objects)),
+            "django.utils": SimpleNamespace(timezone=SimpleNamespace(now=Mock(return_value=object()))),
+            "rest_framework_simplejwt.token_blacklist.models":
+                SimpleNamespace(OutstandingToken=SimpleNamespace(objects=token_objects)),
+        }
+        with patch.dict(sys.modules, modules):
+            result = namespace["legacy_cleanup_ephemeral_evidence"](tenant)
+        self.assertEqual(result, {"remaining": {"activity_audits": 0, "outstanding_tokens": 0}})
+        deleted_activity_rows.delete.assert_called_once_with()
+        deleted_token_rows.delete.assert_called_once_with()
+        activity_rows.filter.assert_called_once()
+        self.assertEqual(audit_objects.filter.call_args_list[-1].kwargs, {"id__in": [101]})
+        self.assertEqual(token_objects.filter.call_args_list[-1].kwargs, {"id__in": [201]})
 
     def test_actual_fixed_cleanup_control_flow_never_destroys_foreign_or_unowned_tenant(self):
         session = json.loads((ROOT / "scripts/v1/templates/ssm/frontend_development_qa.json").read_text())
@@ -817,7 +1079,7 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
                          "187f6ac218435d3b3f938d903153c5785db3529ace89f4e79ea9b6e1bde8ddb6")
         for path, expected in (
             ("iam/trust_frontend_development_qa.json", "aa2c1a60b63ad287c2e8caba7257beaafe5d602df66659c3093f917ad670713a"),
-            ("ssm/frontend_development_qa.json", "35867ef06dd6933993a1e716b6d7deb9e2242010e0f22ba93a59888c1889b340"),
+            ("ssm/frontend_development_qa.json", "412e7b9d80b8319746c73d98fc2d22bacda27b29048339216a2138aa3240b88c"),
             ("ssm/frontend_development_api_port.json", "974b6bf4e518533ee0ecd14c5e82b0a5f0538813e41253940cd46a6cb5e8d173"),
         ):
             with self.subTest(path=path):

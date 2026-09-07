@@ -186,6 +186,28 @@ Inspect/Setup/Cleanup 출력은 tenant/user 수와 별도로 `outstanding_tokens
 tunnel/process와 AWS Session tuple은 frontend 계약이 별도로 종료·증명한다. 이 변경은
 스키마나 기존 데이터 migration을 만들지 않는다.
 
+고정 문서는 먼저 실행 중인 scenario command의 residue capability를 읽는다.
+`_cleanup_ephemeral_evidence`, `_owned_database_residue`,
+`_non_database_residue`가 모두 callable이면 command 소유 native 경로만 사용하고,
+일부만 있으면 호환되는 것으로 추정하지 않고 실패한다. 세 helper가 모두 없는 경우에는
+현재 persistent-development API의 exact release
+`sha-db54b32e6e33538b320aedbc13fd6011090e961a-run-33825614585-1`와 digest
+`sha256:7cd21c84866b296129d68f6fb2d7b420ab29a2bc33b42e44845a719cdaaa525b`
+쌍에만 문서 내부 legacy adapter를 허용한다. 다른 release/digest에는 자동으로
+확대하지 않는다.
+
+Legacy adapter도 residue 검사를 생략하지 않는다. exact scenario user ID의
+OutstandingToken과 exact tenant/actor/target user 및 성공 `development.qa.setup`
+seal 이후의 세 activity action만 ID 목록으로 고정해 삭제하고, 같은 ID가 0인지 다시
+읽는다. seal이 없는데 activity가 있으면 삭제를 거부한다. R2 five-prefix 열거와
+`QA_TENANT` process, port 18000 listener 계수는 native helper와 같은 경계를 사용하며
+broad R2/process/listener 삭제는 하지 않는다. 이 adapter는 문서가 command보다 먼저
+활성화되어 old image의 없는 private helper를 호출했던 rollout ordering 결함만 봉합한다.
+백엔드 image를 배포하거나 CVE gate를 우회하지 않으며 production 성공 증거도 아니다.
+Persistent-development active image가 세 native helper를 포함한 digest로 교체되고
+same-artifact Inspect/Setup/cases/Cleanup residue0가 확인되면, exact legacy pair와 adapter는
+별도 문서 변경으로 제거한다.
+
 이 경계는 생성 요청자가 보유한 capability의 증명이며 GitHub JWT의 run claim을 서버가
 직접 검증한 것은 아니다. 원문 capability는 runner 메모리와 고정 SSM parameter로만
 전달하고 artifact/CLI stdout/오류에 넣지 않는다. SSM control-plane 요청 기록이나 host
@@ -279,7 +301,9 @@ QA 원격 명령은 curl 각 10초, Docker inspect 15초(+kill 5초), Docker exe
 또한 token/activity/R2/process/listener residue가 모두 numeric 0이어야 한다. 실제
 cleanup 명령 회귀는 scenario command 테스트에서 소유 user token과 seal 이후 activity만
 삭제하고, 타 tenant token·다른 actor·seal 이전 activity·setup seal을 보존하는지
-검증한다. 외부 QA tenant나 실제 DB 행을 삭제하는 회귀가 아니다.
+검증한다. 문서 테스트는 native helper 3개, exact legacy helper0, 부분 helper, 미등록
+release/digest fixture를 각각 검사하고 legacy Inspect와 cleanup도 다섯 residue를 모두
+요구한다. 외부 QA tenant나 실제 DB 행을 삭제하는 회귀가 아니다.
 
 ## 최초 구성
 
