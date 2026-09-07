@@ -476,6 +476,17 @@ COMPLETE_ALLOWED_STATUSES = {"attended"}
 | cancelled | 종단 | 종단 | (미노출) |
 | rejected | 종단 | 종단 | (미노출) |
 
+#### 패스카드와 이름 하이라이트 투영
+
+참가자 상태를 학생 합격 여부로 직접 바꾸지 않는다. 미해결 자동 `ClinicLink`가 있는
+학생은 `pending`이거나 예약이 `cancelled`·`rejected`·`no_show`로 끝났거나,
+`attended` 참가자의 `completed_at`이 기록된 뒤에도 과락이 남아 있으면
+`CLINIC_REQUIRED`이며 이름을 노란색으로 표시한다. 오늘 또는 미래의 `booked`, 혹은
+아직 완료하지 않은 `attended` 참가자가 있으면 `BOOKING_CONFIRMED`이고 하이라이트를
+제거한다. 모든 과락이 해소된 경우에만 `PASSED`가 된다. 이 판정은
+`apps/domains/clinic/services/passcard_state.py`를 패스카드와
+`name_highlight_clinic_target`이 함께 사용하며, 클라이언트가 별도로 추정하지 않는다.
+
 #### 희망 시간과 메모 소유권
 
 - `Session.allow_time_preference=true`인 일정에서만 학생이
