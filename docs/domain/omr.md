@@ -130,6 +130,7 @@ flowchart LR
   보이고, 명시 명단이 없는 기존 시험에 한해 차시 roster 전체에 보인다.
 - 오인식/미식별 스캔은 `Submission`의 수동 검토 상태와 답안 보정 API를 통해 보정한다. 원본 운영 데이터를 임의로 수정하지 않고, 검토자가 선택적으로 답안/점수를 확정한다.
 - 학생이 이미 후보로 연결된 fuzzy match도 답안 변경 여부와 무관하게 같은 수동 보정 API에서 현재 `enrollment_id`를 명시해 확정한다. 이 요청은 수동 검토 표시를 해제하고 매칭 fact, 문항별 `ResultFact`, canonical `Result`, legacy `ExamResult`를 한 transaction에서 동기화한다.
+- 종이 OMR의 인식·수동 학생 확정·재채점은 교사가 시험 이후 수행하는 사후 채점이므로 `Exam.open_at`/`close_at` 온라인 응시 시간창으로 차단하지 않는다. 학생의 온라인 제출 attempt는 기존 시간창을 계속 강제하며, OMR도 tenant·시험 대상자·재응시 횟수·중복 submission 보호는 그대로 적용한다.
 - 객관식 전용 시험에 OMR과 동일한 수기 결과가 먼저 저장돼 있으면 별도 재응시로 만들지 않는다. tenant·시험·submission·enrollment가 일치하는 현재 `confirmed` OMR 매칭 fact가 있고, 완료된 1차 대표 수기 attempt의 문항 집합·답안·정오·문항 점수·만점·총점이 새 OMR 계산값과 모두 정확히 같을 때만 그 attempt를 OMR submission에 연결해 재사용한다. 누락/추가 문항, 답·점수 불일치, 수기 외 source, 서술형이 포함된 시험은 이 경로를 거부하고 기존 재응시 보호를 유지한다. 수기 `ResultFact`는 보존하고 OMR 동기화 fact를 append-only로 추가한다.
 - 제출함 원본 미리보기는 같은 tenant의 교직원이 `Submission` id로 요청한다. 서버가 해당 row의 AI 버킷 객체 소유권과 `tenants/{tenant_id}/` 경계를 확인한 뒤 15분짜리 GET URL만 반환하며, 목록 응답이나 클라이언트 요청에는 원본 객체 키를 노출하지 않는다. 파일 없음·다른 tenant·잘못된 키는 404, 서명 실패는 503으로 fail-closed 한다.
 
@@ -340,6 +341,7 @@ HTTPS 로고를 PDF 서버가 가져오지 못하면 `renderer/logos/{tenant.cod
 
 | 버전 | 날짜 | 변경 |
 |------|------|------|
+| v17.3 | 2026-09-07 | 종료된 시험의 종이 OMR도 교사가 미식별 학생을 확정하고 재채점할 수 있도록 온라인 응시 시간창과 사후 OMR 채점 경계를 분리. 학생 온라인 응시 시간, tenant, 대상자, 재응시, 중복 보호는 유지하고 예상 밖 재채점 실패는 원자 rollback과 운영 로그 및 재시도 가능한 안내를 제공. |
 | v17.2 | 2026-08-30 | 이미 연결된 fuzzy match를 답안 변경 없이 현재 학생으로 확정하는 OMR 검토 동작을 추가. 객관식 전용 수기 결과가 OMR의 학생·문항·답안·정오·점수와 완전히 같을 때만 기존 attempt를 원자적으로 연결하며, 불일치·혼합형은 기존 재응시 보호로 fail-closed. |
 | v17.1 | 2026-08-30 | OMR의 미사용 0~999 숫자 버블을 제거하고 모든 비객관식 문항을 번호가 붙은 서술형 빈 작성칸으로 통일. 종이 OMR AI 인식·자동판정은 객관식만 수행하며 기존 답안키/성적 데이터와 온라인 숫자 단답 자동채점은 유지. |
 | v17 | 2026-08-27 | 1~100장 OMR 접수를 durable batch/ordinal로 먼저 만들고 기존 Submission/AI worker 상태를 집계. 모달 종료·SPA 이동·새로고침 뒤에도 접수/처리/완료/식별필요/실패를 복구하며, 성공 ordinal 중복 생성 없이 미접수·실패 ordinal만 재시도. GET은 read-only이고 별도 row-lock POST만 완료 알림을 정확히 1회 claim. batch 계약에는 파일명·학생 PII·raw key를 저장하거나 응답하지 않음. |

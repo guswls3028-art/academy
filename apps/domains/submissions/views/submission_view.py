@@ -1,6 +1,8 @@
 # PATH: apps/domains/submissions/views/submission_view.py
 from __future__ import annotations
 
+import logging
+
 from django.db import transaction
 from django.utils import timezone
 
@@ -55,6 +57,9 @@ from apps.support.submissions.dependencies import (
     target_enrollment_assignment_exists,
     validate_exam_enrollment_candidate,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class SubmissionViewSet(ModelViewSet):
@@ -757,13 +762,19 @@ class SubmissionViewSet(ModelViewSet):
                 allow_done_regrade=True,
             )
         except Exception:
+            logger.exception(
+                "OMR manual grading failed tenant_id=%s submission_id=%s",
+                getattr(tenant, "id", None),
+                submission.id,
+            )
             transaction.set_rollback(True)
             return Response(
                 {
                     "submission_id": submission.id,
                     "status": submission.status,
                     "updated": updated,
-                    "detail": "grading failed",
+                    "code": "OMR_REGRADING_FAILED",
+                    "detail": "재채점에 실패했습니다. 변경 사항은 저장되지 않았습니다. 잠시 후 다시 시도해 주세요.",
                 },
                 status=500,
             )
@@ -949,8 +960,19 @@ class SubmissionViewSet(ModelViewSet):
                     allow_done_regrade=True,
                 )
             except Exception:
+                logger.exception(
+                    "OMR duplicate resolution grading failed tenant_id=%s submission_id=%s",
+                    getattr(tenant, "id", None),
+                    submission.id,
+                )
                 transaction.set_rollback(True)
-                return Response({"detail": "grading failed"}, status=500)
+                return Response(
+                    {
+                        "code": "OMR_REGRADING_FAILED",
+                        "detail": "재채점에 실패했습니다. 변경 사항은 저장되지 않았습니다. 잠시 후 다시 시도해 주세요.",
+                    },
+                    status=500,
+                )
 
         submission.refresh_from_db()
 
