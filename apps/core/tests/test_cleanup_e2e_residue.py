@@ -12,15 +12,24 @@ from django.utils import timezone
 from apps.core.models import Tenant
 from apps.core.management.commands.cleanup_e2e_residue import matches_residue
 from apps.domains.exams.models import Exam
+from apps.domains.enrollment.models import Enrollment
 from apps.domains.fees.models import FeeTemplate, StudentFee
 from apps.domains.inventory.models import InventoryFile
 from apps.domains.lectures.models import Lecture, Session
 from apps.domains.matchup.models import MatchupDocument
-from apps.domains.messaging.models import MessageTemplate
+from apps.domains.messaging.models import (
+    MessageTemplate,
+    NotificationLog,
+    ScheduledNotification,
+)
 from apps.domains.results.models import Result, ScoreEditDraft
 from apps.domains.staffs.models import Staff
 from apps.domains.students.models import Student
-from apps.domains.submissions.models import Submission
+from apps.domains.submissions.models import (
+    OmrUploadBatch,
+    OmrUploadBatchItem,
+    Submission,
+)
 
 
 User = get_user_model()
@@ -210,6 +219,170 @@ class CleanupE2EResidueTests(TestCase):
         self.assertFalse(Exam.objects.filter(id=exam.id).exists())
         self.assertFalse(Result.objects.filter(id=result.id).exists())
         self.assertFalse(Submission.objects.filter(id=submission.id).exists())
+
+    @patch(
+        "apps.infrastructure.storage.r2.head_object_r2_storage",
+        return_value=(False, 0),
+    )
+    @patch("apps.infrastructure.storage.r2.delete_object_r2_storage")
+    def test_exam_cleanup_removes_omr_batch_graph_and_scan_objects(
+        self,
+        delete_object,
+        _head_object,
+    ):
+        student_user = User.objects.create_user(
+            tenant=self.tenant,
+            username="cleanup-e2e-omr-user",
+            password="test1234",
+            is_active=False,
+        )
+        uploader = User.objects.create_user(
+            tenant=self.tenant,
+            username="cleanup-e2e-omr-uploader",
+            password="test1234",
+        )
+        student = Student.objects.create(
+            tenant=self.tenant,
+            user=student_user,
+            ps_number="_del_777_e2eomr123456",
+            omr_code="OMR12345",
+            name="[E2E-123456] OMR Student",
+            deleted_at=timezone.now(),
+        )
+        lecture = Lecture.objects.create(
+            tenant=self.tenant,
+            title="[E2E-123456] OMR lecture",
+            name="E2E",
+            subject="MATH",
+        )
+        enrollment = Enrollment.objects.create(
+            tenant=self.tenant,
+            student=student,
+            lecture=lecture,
+            status="INACTIVE",
+        )
+        exam = Exam.objects.create(
+            tenant=self.tenant,
+            title="[E2E-123456] OMR exam",
+            exam_type=Exam.ExamType.REGULAR,
+            max_score=100,
+            pass_score=80,
+        )
+        submission = Submission.objects.create(
+            tenant=self.tenant,
+            user=uploader,
+            enrollment=enrollment,
+            target_type=Submission.TargetType.EXAM,
+            target_id=exam.id,
+            source=Submission.Source.OMR_SCAN,
+            status=Submission.Status.DONE,
+            file_key=None,
+            meta={
+                "ai_result": {
+                    "result": {
+                        "aligned_image_key": ""
+                    }
+                }
+            },
+        )
+        original_key = (
+            f"tenants/{self.tenant.id}/ai/submissions/{submission.id}/original.pdf"
+        )
+        aligned_key = (
+            f"tenants/{self.tenant.id}/ai/submissions/{submission.id}/aligned/job.jpg"
+        )
+        legacy_aligned_key = (
+            f"tenants/{self.tenant.id}/ai/submissions/{submission.id}/aligned/legacy.jpg"
+        )
+        submission.file_key = original_key
+        submission.meta["ai_result"]["result"]["aligned_image_key"] = aligned_key
+        submission.meta["ai_result"]["result"][
+            "aligned_scan_image_key"
+        ] = legacy_aligned_key
+        submission.save(update_fields=["file_key", "meta"])
+        batch = OmrUploadBatch.objects.create(
+            tenant=self.tenant,
+            created_by=uploader,
+            exam_id=exam.id,
+            lecture_id=lecture.id,
+            total_count=1,
+        )
+        item = OmrUploadBatchItem.objects.create(
+            tenant=self.tenant,
+            exam_id=exam.id,
+            batch=batch,
+            ordinal=1,
+            submission=submission,
+            content_sha256="a" * 64,
+            admission_status=OmrUploadBatchItem.AdmissionStatus.RECEIVED,
+        )
+
+        self.execute_cleanup()
+
+        self.assertFalse(Student.objects.filter(id=student.id).exists())
+        self.assertFalse(Exam.objects.filter(id=exam.id).exists())
+        self.assertFalse(Submission.objects.filter(id=submission.id).exists())
+        self.assertFalse(OmrUploadBatch.objects.filter(id=batch.id).exists())
+        self.assertFalse(OmrUploadBatchItem.objects.filter(id=item.id).exists())
+        self.assertEqual(
+            {call.kwargs["key"] for call in delete_object.call_args_list},
+            {original_key, aligned_key, legacy_aligned_key},
+        )
+        self.assertEqual(NotificationLog.objects.count(), 0)
+        self.assertEqual(ScheduledNotification.objects.count(), 0)
+
+    def test_exam_cleanup_refuses_omr_batch_item_linked_outside_target_exam(self):
+        uploader = User.objects.create_user(
+            tenant=self.tenant,
+            username="cleanup-e2e-cross-exam-uploader",
+            password="test1234",
+        )
+        target_exam = Exam.objects.create(
+            tenant=self.tenant,
+            title="[E2E-123456] Target OMR exam",
+            exam_type=Exam.ExamType.REGULAR,
+            max_score=100,
+            pass_score=80,
+        )
+        normal_exam = Exam.objects.create(
+            tenant=self.tenant,
+            title="사용자 정규 시험",
+            exam_type=Exam.ExamType.REGULAR,
+            max_score=100,
+            pass_score=80,
+        )
+        normal_submission = Submission.objects.create(
+            tenant=self.tenant,
+            user=uploader,
+            target_type=Submission.TargetType.EXAM,
+            target_id=normal_exam.id,
+            source=Submission.Source.OMR_SCAN,
+            status=Submission.Status.DONE,
+        )
+        batch = OmrUploadBatch.objects.create(
+            tenant=self.tenant,
+            created_by=uploader,
+            exam_id=target_exam.id,
+            total_count=1,
+        )
+        item = OmrUploadBatchItem.objects.create(
+            tenant=self.tenant,
+            exam_id=target_exam.id,
+            batch=batch,
+            ordinal=1,
+            submission=normal_submission,
+            content_sha256="b" * 64,
+            admission_status=OmrUploadBatchItem.AdmissionStatus.RECEIVED,
+        )
+
+        with self.assertRaisesMessage(CommandError, "exact target 밖"):
+            self.execute_cleanup()
+
+        self.assertTrue(Exam.objects.filter(id=target_exam.id).exists())
+        self.assertTrue(Exam.objects.filter(id=normal_exam.id).exists())
+        self.assertTrue(Submission.objects.filter(id=normal_submission.id).exists())
+        self.assertTrue(OmrUploadBatch.objects.filter(id=batch.id).exists())
+        self.assertTrue(OmrUploadBatchItem.objects.filter(id=item.id).exists())
 
     def test_legacy_omr_timestamp_graph_is_strict_residue(self):
         user = User.objects.create_user(
