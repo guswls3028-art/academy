@@ -26,7 +26,7 @@ from apps.domains.lectures.test_support import (
     create_lecture_fixture,
     create_session_fixture,
 )
-from apps.domains.parents.services import ensure_parent_account_for_student
+from apps.domains.parents.test_support import create_parent_account_fixture
 from apps.domains.students.test_support import create_student_fixture
 from apps.domains.submissions.models import Submission, SubmissionMedia
 from apps.domains.submissions.services import dispatcher
@@ -140,7 +140,7 @@ class HomeworkSubmissionMediaTests(TestCase):
         )
 
     def _link_parent(self):
-        result = ensure_parent_account_for_student(
+        result = create_parent_account_fixture(
             tenant=self.tenant,
             parent_phone="01033334444",
             student_name=self.student.name,
