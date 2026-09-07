@@ -5483,6 +5483,22 @@
         ],
         "type": "string"
       },
+      "ManualMessageRecipient": {
+        "description": "* `student` - 학생\n* `parent` - 학부모\n* `staff` - 직원",
+        "enum": [
+          "student",
+          "parent",
+          "staff"
+        ],
+        "type": "string"
+      },
+      "MessageModeEnum": {
+        "description": "* `alimtalk` - 알림톡만",
+        "enum": [
+          "alimtalk"
+        ],
+        "type": "string"
+      },
       "MessagingInfo": {
         "description": "GET/PATCH 응답: 테넌트 메시징 정보",
         "properties": {
@@ -12735,6 +12751,132 @@
         "required": [
           "code",
           "detail"
+        ],
+        "type": "object"
+      },
+      "SendMessageRequestRequest": {
+        "description": "알림톡 발송 요청: 학생/학부모 수신자 + 직접 입력 본문 또는 템플릿 ID.",
+        "properties": {
+          "alimtalk_extra_vars": {
+            "additionalProperties": {
+              "maxLength": 1000,
+              "type": "string"
+            },
+            "description": "알림톡 추가 치환 변수 (예: {시험명: '수학', 시험성적: '80/100'})",
+            "type": "object"
+          },
+          "alimtalk_extra_vars_per_student": {
+            "additionalProperties": {},
+            "description": "학생별 개별 치환 변수 (key: student_id, value: {변수명: 값})",
+            "type": "object"
+          },
+          "block_category": {
+            "default": "",
+            "description": "frontend 발송 진입점의 블록 카테고리 (grades/attendance/clinic 등). template_id 누락 또는 t.category 매핑 안 될 때 unified 봉투 fallback 매칭에 사용. 학원장 본문 어떻게 수정해도 봉투(검수 양식)는 유지되어 발송 (domain.md §5).",
+            "maxLength": 40,
+            "type": "string"
+          },
+          "message_mode": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/MessageModeEnum"
+              }
+            ],
+            "default": "alimtalk",
+            "description": "alimtalk\n\n* `alimtalk` - 알림톡만"
+          },
+          "raw_body": {
+            "maxLength": 5000,
+            "type": "string"
+          },
+          "raw_subject": {
+            "default": "",
+            "maxLength": 200,
+            "type": "string"
+          },
+          "request_id": {
+            "description": "한 번의 사용자 발송 요청을 발송 로그까지 추적하는 식별자",
+            "format": "uuid",
+            "type": "string"
+          },
+          "scheduled_send_at": {
+            "description": "예약 발송 시각. 비어 있으면 즉시 발송합니다.",
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "send_to": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ManualMessageRecipient"
+              }
+            ],
+            "default": "parent",
+            "description": "학생/학부모 번호로 보낼지\n\n* `student` - 학생\n* `parent` - 학부모\n* `staff` - 직원"
+          },
+          "staff_ids": {
+            "description": "legacy field. 직원 대상 범용 발송은 비활성화됨.",
+            "items": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "student_ids": {
+            "description": "수신 대상 학생 ID 목록 (send_to가 student/parent일 때 사용)",
+            "items": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "template_id": {
+            "nullable": true,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "SendMessageResponse": {
+        "properties": {
+          "accepted_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "batch_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "enqueue_failed": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "enqueued": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "scheduled": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "skipped_no_phone": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "accepted_count",
+          "batch_id",
+          "detail",
+          "enqueue_failed",
+          "enqueued",
+          "scheduled",
+          "skipped_no_phone"
         ],
         "type": "object"
       },
@@ -36981,6 +37123,14 @@
         "operationId": "messaging_log_retrieve",
         "parameters": [
           {
+            "description": "한 번의 사용자 발송 요청과 정확히 일치하는 PII 없는 원천 식별자.",
+            "in": "query",
+            "name": "origin_id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "description": "PII가 없는 원천 식별자 접두사. 클리닉 참가자별 발송 이력 조회에 사용합니다.",
             "in": "query",
             "name": "origin_id_prefix",
@@ -37183,9 +37333,35 @@
       "post": {
         "description": "POST: 선택 학생(들)의 학생/학부모 번호로 알림톡 발송 (SQS enqueue → 워커가 Solapi 발송).\n- student_ids + send_to \"student\"|\"parent\": 학생/학부모 전화로 발송",
         "operationId": "messaging_send_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendMessageRequestRequest"
+              }
+            },
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/SendMessageRequestRequest"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/SendMessageRequestRequest"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
-            "description": "No response body"
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendMessageResponse"
+                }
+              }
+            },
+            "description": ""
           }
         },
         "security": [

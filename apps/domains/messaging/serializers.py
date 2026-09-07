@@ -306,6 +306,16 @@ class SendMessageRequestSerializer(serializers.Serializer):
         return attrs
 
 
+class SendMessageResponseSerializer(serializers.Serializer):
+    detail = serializers.CharField()
+    batch_id = serializers.UUIDField()
+    accepted_count = serializers.IntegerField(min_value=0)
+    enqueued = serializers.IntegerField(min_value=0)
+    scheduled = serializers.IntegerField(min_value=0)
+    enqueue_failed = serializers.IntegerField(min_value=0)
+    skipped_no_phone = serializers.IntegerField(min_value=0)
+
+
 class ScheduledNotificationSerializer(serializers.ModelSerializer):
     recipient_summary = serializers.SerializerMethodField()
     message_preview = serializers.SerializerMethodField()

@@ -35,6 +35,16 @@ SPECTACULAR_SETTINGS = {
         "InactiveVideoEntitlementSource": [
             ("STAFF_AUTHORIZATION", "교직원 명시 승인"),
         ],
+        "ManualMessageRecipient": [
+            ("student", "학생"),
+            ("parent", "학부모"),
+            ("staff", "직원"),
+        ],
+        "SendToEnum": [
+            ("student", "student"),
+            ("parent", "parent"),
+            ("both", "both"),
+        ],
     },
 }
 

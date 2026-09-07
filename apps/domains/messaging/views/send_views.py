@@ -10,12 +10,16 @@ from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from drf_spectacular.utils import extend_schema
 
 from apps.core.permissions import TenantResolvedAndStaff
 from apps.domains.messaging.models import MessageTemplate
 from apps.domains.messaging.permissions import can_send_messages
 from apps.domains.messaging.selectors import HOURLY_SEND_LIMIT, get_hourly_notification_usage
-from apps.domains.messaging.serializers import SendMessageRequestSerializer
+from apps.domains.messaging.serializers import (
+    SendMessageRequestSerializer,
+    SendMessageResponseSerializer,
+)
 from apps.domains.messaging.services.grade_personalization import (
     validate_grade_personalization,
 )
@@ -59,6 +63,10 @@ class SendMessageView(APIView):
     """
     permission_classes = [IsAuthenticated, TenantResolvedAndStaff]
 
+    @extend_schema(
+        request=SendMessageRequestSerializer,
+        responses={200: SendMessageResponseSerializer},
+    )
     def post(self, request):
         tenant = request.tenant
         if not can_send_messages(request, tenant):
