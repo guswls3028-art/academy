@@ -178,7 +178,14 @@ def _parse_position(value) -> int:
     return position
 
 
-def _ensure_parent_submission(*, tenant, user, enrollment_id: int, homework_id: int) -> Submission:
+def _ensure_parent_submission(
+    *,
+    tenant,
+    user,
+    submitted_by_user,
+    enrollment_id: int,
+    homework_id: int,
+) -> Submission:
     parent = (
         Submission.objects.filter(
             tenant=tenant,
@@ -197,6 +204,9 @@ def _ensure_parent_submission(*, tenant, user, enrollment_id: int, homework_id: 
 
     try:
         with transaction.atomic():
+            submission_meta = None
+            if getattr(user, "id", None) != getattr(submitted_by_user, "id", None):
+                submission_meta = {"submitted_by_user_id": submitted_by_user.id}
             return Submission.objects.create(
                 tenant=tenant,
                 user=user,
@@ -206,6 +216,7 @@ def _ensure_parent_submission(*, tenant, user, enrollment_id: int, homework_id: 
                 # Keep the existing single-file source contract so the active-parent
                 # uniqueness constraint remains valid for old and new API instances.
                 source=Submission.Source.HOMEWORK_IMAGE,
+                meta=submission_meta,
                 status=Submission.Status.SUBMITTED,
             )
     except IntegrityError:
@@ -354,6 +365,7 @@ def store_homework_media(
     *,
     tenant,
     user,
+    submitted_by_user,
     enrollment_id: int,
     homework_id: int,
     upload_file,
@@ -368,6 +380,7 @@ def store_homework_media(
     parent = _ensure_parent_submission(
         tenant=tenant,
         user=user,
+        submitted_by_user=submitted_by_user,
         enrollment_id=enrollment_id,
         homework_id=homework_id,
     )

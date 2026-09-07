@@ -53,8 +53,8 @@ def get_request_student(request):
     """
     요청자에 해당하는 Student 반환
     - 학생: request.tenant 기준 active Student
-    - 학부모: X-Student-Id 헤더가 있으면 해당 자녀(삭제 제외 목록 내), 없으면 연결된 첫 번째 학생
-    - 명시된 자녀 ID가 비정상/미소유면 기본 자녀로 대체하지 않고 PermissionDenied
+    - 학부모: X-Student-Id로 명시한 활성 연결 자녀만 허용
+    - 헤더 누락/비정상/미소유면 다른 자녀를 추정하지 않고 PermissionDenied
     """
     user = request.user
     tenant = getattr(request, "tenant", None)
@@ -71,15 +71,14 @@ def get_request_student(request):
     if not parent or getattr(parent, "tenant_id", None) != tenant.id:
         raise PermissionDenied("선택한 자녀 정보를 확인할 수 없습니다.")
     active_students = active_students_for_parent(tenant, parent)
-    if has_explicit_child:
-        header_id = request.META.get("HTTP_X_STUDENT_ID")
-        try:
-            sid = int(header_id)
-        except (TypeError, ValueError):
-            raise PermissionDenied("선택한 자녀 정보를 확인할 수 없습니다.")
-        selected = active_students.filter(id=sid).first()
-        if selected is None:
-            raise PermissionDenied("선택한 자녀 정보를 확인할 수 없습니다.")
-        return selected
-    # Deterministic ordering: latest student ID first (prevents ambiguity when parent has multiple students)
-    return active_students.order_by("-id").first()
+    if not has_explicit_child:
+        raise PermissionDenied("자녀를 선택한 뒤 다시 시도해 주세요.")
+    header_id = request.META.get("HTTP_X_STUDENT_ID")
+    try:
+        sid = int(header_id)
+    except (TypeError, ValueError):
+        raise PermissionDenied("선택한 자녀 정보를 확인할 수 없습니다.")
+    selected = active_students.filter(id=sid).first()
+    if selected is None:
+        raise PermissionDenied("선택한 자녀 정보를 확인할 수 없습니다.")
+    return selected
