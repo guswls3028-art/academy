@@ -579,8 +579,15 @@ only `ok`, effective `access_mode`,
 sessions, activity records, or view counts. A full `POST .../playback/`
 bootstrap rechecks the
 lecture, enrollment, video, and effective mode under row locks before recording
-activity or view count. Every mode receives a short-lived current-access token;
-only `PROCTORED_CLASS` creates a monitored playback session.
+activity or view count. Every mode receives a bounded current-access token;
+only `PROCTORED_CLASS` creates a monitored playback session. For ordinary
+active playback, the token and signed HLS URL share an expiry equal to the
+encoded video duration plus `VIDEO_PLAYBACK_TTL_SECONDS`. The monitored
+session lease remains `VIDEO_PLAYBACK_TTL_SECONDS` and heartbeat extends that
+lease independently. Keeping the media credential and the session lease
+separate prevents the player bootstrap from being replaced every 10 minutes
+during a long class while preserving liveness checks and 30-second access
+revalidation.
 
 For inactive entitlements only, the playback token, HLS URL, and thumbnail URL
 expire at the earliest of the current access TTL (600 seconds by default) and
@@ -596,11 +603,11 @@ Therefore revoke immediately blocks new access checks, playback grants, and
 token validation, while an already issued CDN URL can remain usable until its
 bounded expiry (at most the access TTL). This contract does not claim immediate
 revocation of an already issued CDN signature. For active, system/public, and
-other ordinary playback, an HLS signature lasts at most the encoded video
-duration plus `VIDEO_PLAYBACK_TTL_SECONDS`; legacy READY rows without duration
-retain the historical 24-hour ceiling. This bounds already-issued ordinary
-media after a lecture close without changing the current-access token or
-session rules.
+other ordinary playback, the playback token and HLS signature last at most the
+encoded video duration plus `VIDEO_PLAYBACK_TTL_SECONDS`; legacy READY rows
+without duration retain the historical 24-hour ceiling. This bounds
+already-issued ordinary media after a lecture close without extending the
+monitored session lease.
 Signed URL query parameters and playback tokens are bearer credentials and are
 never logged; playback logs retain only video id, safe status/path metadata,
 and expiry timestamps.

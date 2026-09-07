@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlparse
 
 from django.db import close_old_connections, connection
 from django.db.migrations.executor import MigrationExecutor
-from django.test import TransactionTestCase, override_settings
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
 
@@ -25,10 +25,12 @@ from apps.domains.lectures.test_support import (
 )
 from apps.domains.student_app.media.views import StudentVideoPlaybackView
 from apps.domains.students.test_support import create_student_fixture
+from apps.domains.video.drm import verify_playback_token
 from apps.domains.video.models import (
     AccessMode,
     InactiveVideoEntitlement,
     Video,
+    VideoPlaybackSession,
     VideoProgress,
 )
 from apps.domains.video.services.inactive_entitlements import (
@@ -40,6 +42,103 @@ from apps.domains.video.services.inactive_entitlements import (
 )
 from apps.domains.video.services.skip_budget import consume_video_forward_skip
 from apps.support.student_app.video_media import issue_playback_access_grant
+
+
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
+class ActivePlaybackCredentialTests(TestCase):
+    def setUp(self):
+        self.tenant = Tenant.objects.create(
+            code="active-video-credential",
+            name="Active Video Credential",
+            is_active=True,
+        )
+        student_user = User.objects.create_user(
+            username="active-video-credential-student",
+            password="testpass123",
+            tenant=self.tenant,
+        )
+        TenantMembership.ensure_active(
+            tenant=self.tenant,
+            user=student_user,
+            role="student",
+        )
+        self.student = create_student_fixture(
+            tenant=self.tenant,
+            user=student_user,
+            name="Active Video Student",
+            ps_number="AVE-001",
+            omr_code="12345678",
+            parent_phone="01012345678",
+            school_type="MIDDLE",
+        )
+        lecture = create_lecture_fixture(
+            tenant=self.tenant,
+            title="Active Video Lecture",
+            name="Active Video Lecture",
+            subject="SCIENCE",
+        )
+        self.enrollment = create_enrollment_fixture(
+            tenant=self.tenant,
+            student=self.student,
+            lecture=lecture,
+            status="ACTIVE",
+        )
+        session = create_session_fixture(
+            lecture=lecture,
+            title="Long Session",
+            order=1,
+        )
+        create_session_enrollment_fixture(
+            tenant=self.tenant,
+            enrollment=self.enrollment,
+            session=session,
+        )
+        self.video = Video.objects.create(
+            tenant=self.tenant,
+            session=session,
+            title="Long Active Video",
+            status=Video.Status.READY,
+            duration=8_516,
+        )
+
+    @override_settings(VIDEO_PLAYBACK_TTL_SECONDS=600)
+    @patch("apps.domains.video.services.playback_session.init_session_redis")
+    def test_long_video_keeps_media_credential_beyond_session_heartbeat_ttl(
+        self,
+        _init_session_redis,
+    ):
+        issued_at = timezone.now()
+        with patch(
+            "apps.domains.video.services.access_resolver.get_effective_access_mode",
+            return_value=AccessMode.PROCTORED_CLASS,
+        ):
+            grant = issue_playback_access_grant(
+                video=self.video,
+                enrollment=self.enrollment,
+                user=self.student.user,
+                device_id="active-long-video-device",
+            )
+
+        self.assertIsNone(grant.error)
+        self.assertEqual(grant.access_mode, AccessMode.PROCTORED_CLASS.value)
+        self.assertGreaterEqual(
+            int(grant.expires_at or 0) - int(issued_at.timestamp()),
+            self.video.duration + 598,
+        )
+        token_ok, token_payload, token_error = verify_playback_token(grant.token or "")
+        self.assertTrue(token_ok, token_error)
+        self.assertEqual(token_payload["exp"], grant.expires_at)
+        playback_session = VideoPlaybackSession.objects.get(
+            session_id=grant.session_id,
+        )
+        self.assertLessEqual(
+            (playback_session.expires_at - issued_at).total_seconds(),
+            602,
+        )
+        _init_session_redis.assert_called_once_with(
+            session_id=grant.session_id,
+            ttl_seconds=600,
+        )
 
 
 @skipUnless(connection.vendor == "postgresql", "PostgreSQL row-lock contract")
