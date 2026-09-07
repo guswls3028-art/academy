@@ -148,6 +148,14 @@ python scripts/v1/converge_frontend_development_qa.py --frontend-role-plan
 `templates/ssm/frontend_development_qa.json`은 고정 `NonInteractiveCommands`
 Session document다. Action은 Inspect/Setup/Cleanup뿐이고 tenant, release ID,
 digest는 shell 문자/경로/SSM 참조를 허용하지 않는 strict pattern으로 제한한다.
+`SyntheticLongVideo`는 `false`가 기본인 명시적 boolean 문자열이다. `true`인
+실행에서만 scenario 명령의 `--synthetic-long-video` 분기를 사용하며 학생을 정확히
+2명으로 고정한다. 이 fixture는 READY 영상 metadata 한 건
+(`qa-fixtures/video-long/master.m3u8`, 900초)과 두 활성 수강의
+`PROCTORED_CLASS` override만 만든다. R2 객체를 만들거나 운영 영상을 복제하지 않는다.
+공식 frontend Playwright runner는 API가 반환한 정확한 signed path만 loopback 합성
+HLS server에 매핑해야 하며, 이 매핑 없이 metadata 경로를 재생 성공 증거로 사용할 수
+없다. 일반 Setup과 기존 caller는 기본 `false`라 영상 fixture가 생기지 않는다.
 `NonInteractiveCommands` agent는 command 문자열에 shell을 암묵적으로 추가하지 않는다.
 따라서 Linux command는 POSIX tokenization 결과가 정확히
 `["/bin/sh", "-lc", <고정 script>]`가 되도록 shell과 단일 script 인자를 명시하며,
@@ -185,6 +193,14 @@ Inspect/Setup/Cleanup 출력은 tenant/user 수와 별도로 `outstanding_tokens
 않는다. process/listener 수는 원격 development API container 경계다. runner 로컬
 tunnel/process와 AWS Session tuple은 frontend 계약이 별도로 종료·증명한다. 이 변경은
 스키마나 기존 데이터 migration을 만들지 않는다.
+
+영상 분기를 켠 Setup은 별도 `video_state`에 `videos=1`,
+`video_accesses=2`, `proctored_video_accesses=2`를 반환하고 progress/session/event와
+PLAYER_ERROR/위반 수가 모두 0임을 검증한다. Inspect는 같은 키를 현재 숫자로만
+반환한다. Cleanup과 이미 부재한 cleanup은 soft-delete 포함 영상, 권한, 진도,
+재생 session/event, 활성 session, PLAYER_ERROR, 위반 event가 전부 0인
+`video_residue`를 요구한다. 이름·전화·로그인 ID 같은 사용자 값은 이 readback에
+포함하지 않는다.
 
 이 경계는 생성 요청자가 보유한 capability의 증명이며 GitHub JWT의 run claim을 서버가
 직접 검증한 것은 아니다. 원문 capability는 runner 메모리와 고정 SSM parameter로만

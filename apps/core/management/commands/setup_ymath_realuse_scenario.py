@@ -49,6 +49,10 @@ SCENARIO_ACTIVITY_AUDIT_ACTIONS = (
     "student_activity.target_open",
 )
 SCENARIO_PROVENANCE_ACTION = "development.qa.scenario"
+SYNTHETIC_LONG_VIDEO_DURATION_SECONDS = 900
+SYNTHETIC_LONG_VIDEO_HLS_PATH = "qa-fixtures/video-long/master.m3u8"
+SYNTHETIC_LONG_VIDEO_TITLE = "장시간 재생 갱신 실사용 검증"
+SYNTHETIC_LONG_VIDEO_ACCESS_MODE = "PROCTORED_CLASS"
 
 
 def assert_isolated_runtime() -> None:
@@ -126,6 +130,14 @@ class Command(BaseCommand):
             action="store_true",
             help="Create a secret-free 10 student + 10 parent + 10 staff login manifest.",
         )
+        parser.add_argument(
+            "--synthetic-long-video",
+            action="store_true",
+            help=(
+                "Create one metadata-only 15-minute HLS fixture and exactly two "
+                "PROCTORED_CLASS student accesses in an isolated development/test runtime."
+            ),
+        )
         lifecycle = parser.add_mutually_exclusive_group()
         lifecycle.add_argument("--reset", action="store_true")
         lifecycle.add_argument("--destroy", action="store_true")
@@ -160,10 +172,16 @@ class Command(BaseCommand):
                     existing.delete()
 
             remaining = self._remaining_for_code(tenant_code)
+            video_residue = self._video_residue_for_code(tenant_code)
             if any(remaining.values()):
                 raise CommandError(
                     "Isolated scenario cleanup found a same-code tenant or user residue: "
                     + json.dumps(remaining, ensure_ascii=False, sort_keys=True)
+                )
+            if any(video_residue.values()):
+                raise CommandError(
+                    "Isolated scenario cleanup found video residue: "
+                    + json.dumps(video_residue, sort_keys=True)
                 )
 
             if deleted is None:
@@ -174,6 +192,7 @@ class Command(BaseCommand):
                             "tenant_code": tenant_code,
                             "remaining": {"tenants": 0, "users": 0},
                             "residue": residue,
+                            "video_residue": video_residue,
                         },
                         ensure_ascii=False,
                         sort_keys=True,
@@ -195,6 +214,7 @@ class Command(BaseCommand):
                         },
                         "remaining": remaining,
                         "residue": residue,
+                        "video_residue": video_residue,
                     },
                     ensure_ascii=False,
                     sort_keys=True,
@@ -205,10 +225,13 @@ class Command(BaseCommand):
         login_uat = bool(options["login_uat"])
         student_count = LOGIN_UAT_ACCOUNT_COUNT_PER_ROLE if login_uat else int(options["student_count"])
         session_count = int(options["session_count"])
+        synthetic_long_video = bool(options["synthetic_long_video"])
         if not 1 <= student_count <= 30:
             raise CommandError("student-count must be between 1 and 30.")
         if not 1 <= session_count <= 80:
             raise CommandError("session-count must be between 1 and 80.")
+        if synthetic_long_video and student_count != 2:
+            raise CommandError("--synthetic-long-video requires --student-count=2.")
 
         password = str(os.environ.get(PASSWORD_ENV) or "")
         if not password:
@@ -222,6 +245,7 @@ class Command(BaseCommand):
                 raise CommandError("teacher-username conflicts with a generated parent login identifier.")
 
         reset_counts = None
+        synthetic_long_video_payload = None
         with transaction.atomic():
             self._lock_tenant_code(tenant_code)
             existing = self._exact_tenant_or_fail_on_case_variant(tenant_code)
@@ -401,6 +425,56 @@ class Command(BaseCommand):
                     )
                     login_staff.append(staff)
 
+            if synthetic_long_video:
+                Video = apps.get_model("video", "Video")
+                VideoAccess = apps.get_model("video", "VideoAccess")
+                video, _ = Video.objects.update_or_create(
+                    tenant=tenant,
+                    session=sessions[0],
+                    folder=None,
+                    order=1,
+                    defaults={
+                        "title": SYNTHETIC_LONG_VIDEO_TITLE,
+                        "source_type": Video.SourceType.UPLOADED,
+                        "file_key": "",
+                        "duration": SYNTHETIC_LONG_VIDEO_DURATION_SECONDS,
+                        "status": Video.Status.READY,
+                        "hls_path": SYNTHETIC_LONG_VIDEO_HLS_PATH,
+                        "allow_skip": False,
+                        "max_speed": 1.0,
+                        "show_watermark": True,
+                    },
+                )
+                fixture_enrollments = list(
+                    Enrollment.objects.filter(
+                        tenant=tenant,
+                        lecture=lectures[0],
+                        student__in=students,
+                        status="ACTIVE",
+                    ).order_by("student_id")
+                )
+                if len(fixture_enrollments) != 2:
+                    raise CommandError(
+                        "Synthetic long-video fixture requires exactly two active enrollments."
+                    )
+                for enrollment in fixture_enrollments:
+                    VideoAccess.objects.update_or_create(
+                        video=video,
+                        enrollment=enrollment,
+                        defaults={
+                            "access_mode": SYNTHETIC_LONG_VIDEO_ACCESS_MODE,
+                            "rule": "once",
+                            "is_override": True,
+                        },
+                    )
+                synthetic_long_video_payload = {
+                    "access_mode": SYNTHETIC_LONG_VIDEO_ACCESS_MODE,
+                    "duration_seconds": SYNTHETIC_LONG_VIDEO_DURATION_SECONDS,
+                    "hls_path": SYNTHETIC_LONG_VIDEO_HLS_PATH,
+                    "video_accesses": len(fixture_enrollments),
+                    "video_id": video.id,
+                }
+
             if login_uat:
                 self._validate_login_uat_contract(
                     tenant=tenant,
@@ -436,7 +510,10 @@ class Command(BaseCommand):
             "lecture_ids": [lecture.id for lecture in lectures],
             "session_ids": [session.id for session in sessions],
             "counts": self._tenant_counts(tenant),
+            "video_state": self._video_residue_for_code(tenant.code),
         }
+        if synthetic_long_video_payload is not None:
+            payload["synthetic_long_video"] = synthetic_long_video_payload
         if login_uat:
             accounts = [
                 {
@@ -523,6 +600,31 @@ class Command(BaseCommand):
         return {
             "tenants": Tenant.objects.filter(code__iexact=tenant_code).count(),
             "users": get_user_model().objects.filter(tenant__code__iexact=tenant_code).count(),
+        }
+
+    @staticmethod
+    def _video_residue_for_code(tenant_code: str) -> dict[str, int]:
+        Video = apps.get_model("video", "Video")
+        VideoAccess = apps.get_model("video", "VideoAccess")
+        VideoProgress = apps.get_model("video", "VideoProgress")
+        VideoPlaybackSession = apps.get_model("video", "VideoPlaybackSession")
+        VideoPlaybackEvent = apps.get_model("video", "VideoPlaybackEvent")
+        video_scope = {"video__tenant__code__iexact": tenant_code}
+        events = VideoPlaybackEvent.objects.filter(**video_scope)
+        sessions = VideoPlaybackSession.objects.filter(**video_scope)
+        return {
+            "active_playback_sessions": sessions.filter(status="ACTIVE").count(),
+            "playback_events": events.count(),
+            "playback_sessions": sessions.count(),
+            "player_errors": events.filter(event_type="PLAYER_ERROR").count(),
+            "proctored_video_accesses": VideoAccess.objects.filter(
+                **video_scope,
+                access_mode="PROCTORED_CLASS",
+            ).count(),
+            "video_accesses": VideoAccess.objects.filter(**video_scope).count(),
+            "video_progresses": VideoProgress.objects.filter(**video_scope).count(),
+            "videos": Video.all_with_deleted.filter(tenant__code__iexact=tenant_code).count(),
+            "violated_events": events.filter(violated=True).count(),
         }
 
     @staticmethod

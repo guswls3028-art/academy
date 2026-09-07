@@ -22,11 +22,21 @@ from apps.core.models import OpsAuditLog, Program, Tenant, TenantMembership
 from apps.core.models.user import user_display_username
 from apps.domains.parents.models import Parent
 from apps.domains.staffs.models import Staff
+from apps.domains.video.models import (
+    AccessMode,
+    Video,
+    VideoAccess,
+    VideoPlaybackEvent,
+    VideoPlaybackSession,
+    VideoProgress,
+)
 
 
 class SetupYmathRealuseScenarioTests(TestCase):
     def _call_command(self, **kwargs):
         out = StringIO()
+        student_count = kwargs.pop("student_count", 2)
+        session_count = kwargs.pop("session_count", 3)
         with patch.dict(
             os.environ,
             {"YMATH_REALUSE_SCENARIO_PASSWORD": "scenario-test-password"},
@@ -34,8 +44,8 @@ class SetupYmathRealuseScenarioTests(TestCase):
             call_command(
                 "setup_ymath_realuse_scenario",
                 stdout=out,
-                student_count=2,
-                session_count=3,
+                student_count=student_count,
+                session_count=session_count,
                 **kwargs,
             )
         return out.getvalue()
@@ -82,6 +92,109 @@ class SetupYmathRealuseScenarioTests(TestCase):
         self.assertTrue(teacher.check_password("scenario-test-password"))
         student = User.objects.get(username=f"t{tenant.id}_ymath-qa-student-01")
         self.assertTrue(student.check_password("scenario-test-password"))
+        self.assertFalse(Video.objects.filter(tenant=tenant).exists())
+
+    def test_explicit_long_video_fixture_creates_two_proctored_accesses_only(self):
+        payload = json.loads(self._call_command(synthetic_long_video=True).splitlines()[-1])
+
+        tenant = Tenant.objects.get(code="qa-ymath-realuse-20260805")
+        video = Video.objects.get(tenant=tenant)
+        accesses = VideoAccess.objects.filter(video=video).order_by("enrollment_id")
+
+        self.assertEqual(video.status, Video.Status.READY)
+        self.assertEqual(video.duration, 900)
+        self.assertEqual(video.hls_path, "qa-fixtures/video-long/master.m3u8")
+        self.assertEqual(video.session, tenant.lectures.order_by("id").first().sessions.order_by("order").first())
+        self.assertEqual(accesses.count(), 2)
+        self.assertEqual(set(accesses.values_list("access_mode", flat=True)), {AccessMode.PROCTORED_CLASS})
+        self.assertEqual(set(accesses.values_list("rule", flat=True)), {"once"})
+        self.assertTrue(all(accesses.values_list("is_override", flat=True)))
+        self.assertEqual(
+            payload["synthetic_long_video"],
+            {
+                "access_mode": AccessMode.PROCTORED_CLASS,
+                "duration_seconds": 900,
+                "hls_path": "qa-fixtures/video-long/master.m3u8",
+                "video_accesses": 2,
+                "video_id": video.id,
+            },
+        )
+        self.assertEqual(
+            payload["video_state"],
+            {
+                "active_playback_sessions": 0,
+                "playback_events": 0,
+                "playback_sessions": 0,
+                "player_errors": 0,
+                "proctored_video_accesses": 2,
+                "video_accesses": 2,
+                "video_progresses": 0,
+                "videos": 1,
+                "violated_events": 0,
+            },
+        )
+
+    def test_long_video_fixture_requires_exactly_two_students_before_mutation(self):
+        with self.assertRaisesMessage(
+            CommandError,
+            "--synthetic-long-video requires --student-count=2",
+        ):
+            self._call_command(synthetic_long_video=True, student_count=1)
+
+        self.assertFalse(Tenant.objects.filter(code="qa-ymath-realuse-20260805").exists())
+
+    def test_destroy_reports_zero_video_residue_after_playback_rows(self):
+        self._call_command(synthetic_long_video=True)
+        tenant = Tenant.objects.get(code="qa-ymath-realuse-20260805")
+        video = Video.objects.get(tenant=tenant)
+        access = VideoAccess.objects.filter(video=video).select_related("enrollment").first()
+        progress = VideoProgress.objects.create(
+            video=video,
+            enrollment=access.enrollment,
+            progress=0.25,
+            last_position=225,
+        )
+        playback = VideoPlaybackSession.objects.create(
+            video=video,
+            enrollment=access.enrollment,
+            session_id="qa-long-video-session",
+            device_id="qa-long-video-device",
+            status=VideoPlaybackSession.Status.ACTIVE,
+        )
+        VideoPlaybackEvent.objects.create(
+            video=video,
+            enrollment=access.enrollment,
+            session_id=playback.session_id,
+            user_id=access.enrollment.student.user_id,
+            event_type=VideoPlaybackEvent.EventType.PLAYER_ERROR,
+            violated=True,
+        )
+        self.assertIsNotNone(progress.pk)
+
+        out = StringIO()
+        call_command(
+            "setup_ymath_realuse_scenario",
+            tenant_code=tenant.code,
+            destroy=True,
+            stdout=out,
+        )
+        payload = json.loads(out.getvalue().splitlines()[-1])
+
+        self.assertEqual(payload["status"], "YMATH_REALUSE_SCENARIO_DESTROYED")
+        self.assertEqual(
+            payload["video_residue"],
+            {
+                "active_playback_sessions": 0,
+                "playback_events": 0,
+                "playback_sessions": 0,
+                "player_errors": 0,
+                "proctored_video_accesses": 0,
+                "video_accesses": 0,
+                "video_progresses": 0,
+                "videos": 0,
+                "violated_events": 0,
+            },
+        )
 
     def test_rejects_non_scenario_tenant_code(self):
         with self.assertRaisesMessage(CommandError, "tenant-code must match"):

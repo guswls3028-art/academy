@@ -661,6 +661,59 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
         self.assertIn("signal.alarm(180)", command)
         self.assertIn("timeout --kill-after=5s 210s docker exec", command)
 
+    def test_fixed_video_state_contract_is_numeric_and_contains_no_identity_fields(self):
+        session = json.loads(
+            (ROOT / "scripts/v1/templates/ssm/frontend_development_qa.json").read_text()
+        )
+        shell_script = shlex.split(
+            session["properties"]["linux"]["commands"],
+            posix=True,
+        )[2]
+        source = shell_script.split("<<'ACADEMY_QA_PY'\n", 1)[1].rsplit(
+            "ACADEMY_QA_PY",
+            1,
+        )[0]
+        function = next(
+            node
+            for node in ast.parse(source).body
+            if isinstance(node, ast.FunctionDef) and node.name == "expected_video_state"
+        )
+        namespace = {}
+        exec(
+            compile(
+                ast.Module(body=[function], type_ignores=[]),
+                "fixed-video-state",
+                "exec",
+            ),
+            namespace,
+        )
+
+        disabled = namespace["expected_video_state"](False)
+        enabled = namespace["expected_video_state"](True)
+
+        self.assertEqual(
+            set(enabled),
+            {
+                "active_playback_sessions",
+                "playback_events",
+                "playback_sessions",
+                "player_errors",
+                "proctored_video_accesses",
+                "video_accesses",
+                "video_progresses",
+                "videos",
+                "violated_events",
+            },
+        )
+        self.assertTrue(all(type(value) is int for value in enabled.values()))
+        self.assertTrue(all(value == 0 for value in disabled.values()))
+        self.assertEqual(enabled["videos"], 1)
+        self.assertEqual(enabled["video_accesses"], 2)
+        self.assertEqual(enabled["proctored_video_accesses"], 2)
+        self.assertFalse(
+            {"name", "phone", "username", "student_id", "user_id"} & set(enabled)
+        )
+
     def test_actual_fixed_cleanup_control_flow_never_destroys_foreign_or_unowned_tenant(self):
         session = json.loads((ROOT / "scripts/v1/templates/ssm/frontend_development_qa.json").read_text())
         shell_script = shlex.split(session["properties"]["linux"]["commands"], posix=True)[2]
@@ -685,12 +738,25 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
             "processes": 0,
             "r2_objects": 0,
         }
+        video_zero = {
+            "active_playback_sessions": 0,
+            "playback_events": 0,
+            "playback_sessions": 0,
+            "player_errors": 0,
+            "proctored_video_accesses": 0,
+            "video_accesses": 0,
+            "video_progresses": 0,
+            "videos": 0,
+            "violated_events": 0,
+        }
+        command._video_residue_for_code.return_value = video_zero
         cursor = MagicMock()
         audit = Mock()
         destroy = Mock(side_effect=lambda *args, **kwargs: kwargs["stdout"].write(json.dumps({
             "status": "YMATH_REALUSE_SCENARIO_DESTROYED", "tenant_code": tenant,
             "remaining": {"tenants": 0, "users": 0},
             "residue": {"activity_audits": 0, "outstanding_tokens": 0},
+            "video_residue": video_zero,
         })))
         bucket_keys = ("R2_AI_BUCKET", "R2_STORAGE_BUCKET", "R2_ADMIN_BUCKET", "R2_VIDEO_BUCKET", "R2_EXCEL_BUCKET")
         settings = SimpleNamespace(
@@ -712,6 +778,7 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
         release = "sha-" + "a" * 40 + "-run-123-1"
         env = {"QA_ACTION": "Cleanup", "QA_TENANT": tenant, "QA_CAPABILITY": capability,
                "QA_RELEASE": release, "QA_DIGEST": digest,
+               "QA_SYNTHETIC_LONG_VIDEO": "false",
                "QA_IMAGE": "809466760795.dkr.ecr.ap-northeast-2.amazonaws.com/academy-api@" + digest,
                "DJANGO_SETTINGS_MODULE": "apps.api.config.settings.development", "ACADEMY_RUNTIME_ENV": "development",
                "ACADEMY_DEVELOPMENT_RELEASE_ID": release, "SOLAPI_MOCK": "true", "TOSS_AUTO_BILLING_ENABLED": "false",
@@ -734,6 +801,7 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
                 "processes": 0,
                 "r2_objects": 0,
             })
+            self.assertEqual(result["video_residue"], video_zero)
             self.assertEqual(destroy.call_count, 1)
             self.assertTrue(destroy.call_args.kwargs["destroy"])
             self.assertEqual(destroy.call_args.kwargs["tenant_code"], tenant)
@@ -817,7 +885,7 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
                          "187f6ac218435d3b3f938d903153c5785db3529ace89f4e79ea9b6e1bde8ddb6")
         for path, expected in (
             ("iam/trust_frontend_development_qa.json", "aa2c1a60b63ad287c2e8caba7257beaafe5d602df66659c3093f917ad670713a"),
-            ("ssm/frontend_development_qa.json", "35867ef06dd6933993a1e716b6d7deb9e2242010e0f22ba93a59888c1889b340"),
+            ("ssm/frontend_development_qa.json", "49ee1ba31f8583105df1b35325142f33d6f53bbb196790e5b24e6f6007418433"),
             ("ssm/frontend_development_api_port.json", "974b6bf4e518533ee0ecd14c5e82b0a5f0538813e41253940cd46a6cb5e8d173"),
         ):
             with self.subTest(path=path):
@@ -828,7 +896,26 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
         directory = ROOT / "scripts/v1/templates/ssm"
         session = json.loads((directory / "frontend_development_qa.json").read_text())
         self.assertEqual(session["sessionType"], "NonInteractiveCommands")
-        self.assertEqual(set(session["parameters"]), {"Action", "TenantCode", "ReleaseId", "ApiDigest", "OwnershipCapability"})
+        self.assertEqual(
+            set(session["parameters"]),
+            {
+                "Action",
+                "TenantCode",
+                "ReleaseId",
+                "ApiDigest",
+                "OwnershipCapability",
+                "SyntheticLongVideo",
+            },
+        )
+        self.assertEqual(
+            session["parameters"]["SyntheticLongVideo"],
+            {
+                "type": "String",
+                "default": "false",
+                "allowedValues": ["false", "true"],
+                "allowedPattern": "^(false|true)$",
+            },
+        )
         for parameter in session["parameters"].values():
             for unsafe in ("'; touch /tmp/escape; '", "$(id)", "{{ssm:/academy/api/env}}", "x\ny", "../production"):
                 self.assertIsNone(re.fullmatch(parameter["allowedPattern"], unsafe))
@@ -846,6 +933,9 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
         self.assertIn('payload["remaining"] == {"tenants": 0, "users": 0}', python)
         self.assertIn('payload["residue"] == {"activity_audits": 0, "outstanding_tokens": 0}', python)
         self.assertIn('payload["residue"] == {"activity_audits": 0, "outstanding_tokens": 0, "listeners": 0,', python)
+        self.assertIn("student_count=2 if synthetic_long_video else 1", python)
+        self.assertIn("synthetic_long_video=synthetic_long_video", python)
+        self.assertIn('assert payload["video_residue"] == expected_video_state(False)', python)
         for residue_key in (
             "activity_audits",
             "listeners",
@@ -854,6 +944,18 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
             "r2_objects",
         ):
             self.assertIn(f'"{residue_key}"', python)
+        for video_key in (
+            "active_playback_sessions",
+            "playback_events",
+            "playback_sessions",
+            "player_errors",
+            "proctored_video_accesses",
+            "video_accesses",
+            "video_progresses",
+            "videos",
+            "violated_events",
+        ):
+            self.assertIn(f'"{video_key}"', python)
         self.assertNotIn("reset=True", python)
         port = json.loads((directory / "frontend_development_api_port.json").read_text())
         self.assertEqual(port["properties"], {"portNumber": "8000", "localPortNumber": "18000", "type": "LocalPortForwarding"})
