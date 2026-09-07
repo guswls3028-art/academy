@@ -147,6 +147,16 @@ class ParentExamChildSelectionTests(TestCase):
         self.assertEqual(response_b.status_code, 200)
         self.assertEqual([row["id"] for row in response_b.data["items"]], [self.exam_b.id])
 
+    def test_parent_request_without_selected_child_fails_closed(self):
+        request = self.factory.get("/student/exams/")
+        force_authenticate(request, user=self.parent_user)
+        request.tenant = self.tenant
+
+        response = StudentExamListView.as_view()(request)
+
+        self.assertEqual(response.status_code, 403, response.data)
+        self.assertEqual(response.data["detail"], "자녀를 선택한 뒤 다시 시도해 주세요.")
+
     @patch("apps.domains.student_app.exams.views.dispatch_student_exam_submission")
     def test_submit_rejects_max_attempts_before_superseding_current_done(self, mock_dispatch):
         self.exam_b.allow_retake = True
