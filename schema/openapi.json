@@ -1641,6 +1641,14 @@
             "nullable": true,
             "type": "string"
           },
+          "enrollment_ids": {
+            "items": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
           "memo": {
             "default": "",
             "maxLength": 2000,

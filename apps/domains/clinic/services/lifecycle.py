@@ -20,6 +20,8 @@ from apps.support.clinic.session_dependencies import (
     cancel_pending_clinic_participant_reminders,
     clinic_enrollment_for_tenant,
     clinic_reason_for_unresolved_auto_links,
+    clinic_reasons_for_unresolved_auto_links,
+    enrollments_for_clinic_tenant,
     locked_clinic_links_for_participant_plan,
     preferred_active_enrollment_id_for_student_session,
     student_has_current_required_clinic_target,
@@ -1277,9 +1279,13 @@ def create_participant(
             session=session,
         )
 
-    clinic_reason = validated_data.get("clinic_reason") or _clinic_reason_for_enrollment(
-        tenant=tenant,
-        enrollment_id=enrollment_id,
+    clinic_reason = (
+        validated_data["clinic_reason"]
+        if "clinic_reason" in validated_data
+        else _clinic_reason_for_enrollment(
+            tenant=tenant,
+            enrollment_id=enrollment_id,
+        )
     )
 
     if not requested_status:
@@ -1325,7 +1331,8 @@ def create_participants_bulk(
     *,
     tenant,
     session_ids: list[int],
-    student_ids: list[int],
+    student_ids: list[int] | None = None,
+    enrollment_ids: list[int] | None = None,
     request_student=None,
     student_request_memo: str = "",
     memo: str = "",
@@ -1336,27 +1343,71 @@ def create_participants_bulk(
 ) -> ParticipantBulkWriteResult:
     """Create the complete same-day session/student selection or create nothing."""
     requested_session_ids = [int(session_id) for session_id in session_ids]
+    requested_student_ids = [int(student_id) for student_id in (student_ids or [])]
+    requested_enrollment_ids = [
+        int(enrollment_id) for enrollment_id in (enrollment_ids or [])
+    ]
     if request_student is not None:
-        if student_ids:
+        if requested_student_ids or requested_enrollment_ids:
             raise PermissionDenied("다른 학생의 클리닉 예약을 신청할 수 없습니다.")
-        students = [
+        booking_targets = [(
             _lock_active_student_for_booking(
                 tenant=tenant,
                 student=request_student,
-            )
-        ]
+            ),
+            None,
+        )]
     else:
-        if not student_ids:
+        if requested_student_ids and requested_enrollment_ids:
+            raise ValidationError(
+                {"detail": "student_ids와 enrollment_ids 중 하나만 선택해 주세요."}
+            )
+        if not requested_student_ids and not requested_enrollment_ids:
             raise ValidationError({"student_ids": "추가할 학생을 한 명 이상 선택해 주세요."})
-        requested_student_ids = [int(student_id) for student_id in student_ids]
-        students = list(
-            active_students_for_clinic_tenant(tenant)
-            .filter(id__in=requested_student_ids)
-            .select_for_update()
-            .order_by("id")
-        )
-        if len(students) != len(requested_student_ids):
-            raise NotFound("선택한 학생을 찾을 수 없습니다.")
+        if requested_enrollment_ids:
+            enrollments = list(
+                enrollments_for_clinic_tenant(tenant)
+                .filter(id__in=requested_enrollment_ids, status="ACTIVE")
+                .select_for_update()
+                .order_by("id")
+            )
+            if len(enrollments) != len(requested_enrollment_ids):
+                raise NotFound("선택한 수강 대상을 찾을 수 없습니다.")
+            if len({enrollment.student_id for enrollment in enrollments}) != len(enrollments):
+                raise ValidationError(
+                    {"enrollment_ids": "같은 학생의 수강 대상은 한 번만 선택해 주세요."}
+                )
+            students = list(
+                active_students_for_clinic_tenant(tenant)
+                .filter(id__in=[enrollment.student_id for enrollment in enrollments])
+                .select_for_update()
+                .order_by("id")
+            )
+            if len(students) != len(enrollments):
+                raise NotFound("선택한 수강 대상의 학생을 찾을 수 없습니다.")
+            student_by_id = {student.id: student for student in students}
+            enrollment_by_id = {enrollment.id: enrollment for enrollment in enrollments}
+            booking_targets = [
+                (
+                    student_by_id[enrollment_by_id[enrollment_id].student_id],
+                    enrollment_by_id[enrollment_id],
+                )
+                for enrollment_id in requested_enrollment_ids
+            ]
+        else:
+            students = list(
+                active_students_for_clinic_tenant(tenant)
+                .filter(id__in=requested_student_ids)
+                .select_for_update()
+                .order_by("id")
+            )
+            if len(students) != len(requested_student_ids):
+                raise NotFound("선택한 학생을 찾을 수 없습니다.")
+            student_by_id = {student.id: student for student in students}
+            booking_targets = [
+                (student_by_id[student_id], None)
+                for student_id in requested_student_ids
+            ]
 
     sessions = list(
         Session.objects
@@ -1395,11 +1446,16 @@ def create_participants_bulk(
 
     participants: list[SessionParticipant] = []
     notifications: list[ClinicNotificationEvent] = []
-    for student in students:
+    exact_enrollment_reasons = clinic_reasons_for_unresolved_auto_links(
+        tenant,
+        [enrollment.id for _, enrollment in booking_targets if enrollment is not None],
+    )
+    for student, enrollment in booking_targets:
         for session in sessions:
             validated_data = {
                 "session": session,
                 "student": student,
+                "enrollment": enrollment,
                 "student_request_memo": student_request_memo,
                 "memo": memo,
                 "preferred_start_time": preferred_start_time,
@@ -1407,6 +1463,10 @@ def create_participants_bulk(
                 "booking_start_time": booking_start_time,
                 "booking_end_time": booking_end_time,
             }
+            if enrollment is not None:
+                validated_data["clinic_reason"] = exact_enrollment_reasons.get(
+                    enrollment.id
+                )
             result = create_participant(
                 tenant=tenant,
                 validated_data=validated_data,
