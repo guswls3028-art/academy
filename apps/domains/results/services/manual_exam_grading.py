@@ -25,6 +25,9 @@ from apps.domains.results.services.exam_result_excel_import import (
     _score_adjustments,
     _score_row,
 )
+from apps.domains.results.services.initial_attempt_snapshot import (
+    sync_confirmed_initial_snapshot_meta,
+)
 from apps.support.exams.numeric_short_answer import (
     math_numeric_short_answer_question_ids,
 )
@@ -984,17 +987,15 @@ def _save_result_and_attempt(
     meta["max_score"] = float(max_score)
     meta["synced_from_result"] = True
     meta["last_manual_grid_publish"] = {"published_at": now.isoformat()}
-    if (
-        int(attempt.attempt_index) == 1
-        and not isinstance(meta.get("initial_snapshot"), dict)
-        and not is_not_submitted
-    ):
-        meta["initial_snapshot"] = {
-            "total_score": float(total_score),
-            "max_score": float(max_score),
-            "submitted_at": now.isoformat(),
-            "source": "manual_grading_grid",
-        }
+    if not is_not_submitted:
+        meta = sync_confirmed_initial_snapshot_meta(
+            attempt=attempt,
+            meta=meta,
+            total_score=float(total_score),
+            max_score=float(max_score),
+            confirmed_at=now,
+            fallback_source="manual_grading_grid",
+        )
     attempt.meta = meta
     attempt.status = "done"
     attempt.save(update_fields=["meta", "status", "updated_at"])

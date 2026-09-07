@@ -204,7 +204,9 @@ submission의 저장된 DONE 결과에 답안이 있고 기존 답안이 없으�
 100장까지의 OMR 파일 선택은 브라우저 메모리가 아니라 서버의
 `OmrUploadBatch`/`OmrUploadBatchItem`이 접수 상태의 정본이다.
 
-1. 클라이언트가 시험·차시와 총 파일 수로 batch를 먼저 생성한다.
+1. 클라이언트는 선택한 파일에 미지원 형식이나 0바이트 파일이 하나라도 섞이면
+   유효 파일만 조용히 줄이지 않고 선택 전체를 중단한다. 이 검증을 통과한 뒤에만
+   시험·차시와 총 파일 수로 batch를 생성한다.
 2. 서버는 `1..total_count` ordinal을 원자적으로 만들고, 클라이언트는 그 batch id와
    ordinal을 붙여 파일 전체를 한 multipart 요청으로 보낸다.
 3. 각 ordinal은 별도 transaction에서 `Submission`에 연결된다. 이미 연결된 ordinal을
@@ -222,6 +224,11 @@ submission의 저장된 DONE 결과에 답안이 있고 기존 답안이 없으�
    `received`, AI 작업 중은 `processing`, 채점 완료는 `completed`, 학생 확인 필요는
    `needs_identification`, 처리 실패는 `failed`로 서로 구분한다. 업로드 성공을 AI 완료로
    표시하지 않는다.
+6. initialize/upload/list/detail/retry 응답의 `items`는 총수와 같은 ordinal 원장을
+   순서대로 반환한다. 각 행의 안정 식별자는 `{batch_uuid}:{ordinal}`이고 admission 상태,
+   통합 표시 상태, 연결된 Submission/중복 Submission id, 식별 상태와 안전한 실패
+   코드·메시지만 포함한다. Submission 생성 전에 빈 파일이 거부되어도 해당 ordinal은
+   `failure_code=empty_file`인 `failed` 행으로 남아 목록·새로고침에서 사라지지 않는다.
 
 Batch와 item에는 tenant, 생성 직원, 시험/차시/강의 id, 총수, ordinal, Submission 연결,
 동일 파일 판정용 SHA-256, 안전한 실패 코드만 저장한다. 파일명, 학생 이름·전화번호, R2 raw key는 batch 모델이나
@@ -246,7 +253,9 @@ item 전환도 row lock 아래에서 현재 상태를 다시 확인하며, 이�
 섞인 payload가 legacy 요청으로 오인되어 schema 검증을 통과하지 않는다.
 
 목록과 상세 GET은 같은 tenant의 batch 생성 직원에게만 열리고 최근 7일 작업만 목록으로
-복구한다. 이 GET들은 `completion_notice_claimed_at`을 포함해 어떤 값도 쓰지 않는다.
+복구한다. 제출관리 화면은 Submission 목록과 별도로 이 장별 원장을 표시하므로 admission
+실패처럼 Submission이 없는 행도 총수·ordinal·실패 이유와 함께 보인다. 이 GET들은
+`completion_notice_claimed_at`을 포함해 어떤 값도 쓰지 않는다.
 완료 알림 소유권은 별도 `claim-completion` POST가 batch row를 잠근 transaction 안에서
 획득하며, terminal 이후 최초 호출만 `notify=true`, 이후 호출과 동시 탭은 `false`다.
 처리 중 claim은 409로 실패한다.

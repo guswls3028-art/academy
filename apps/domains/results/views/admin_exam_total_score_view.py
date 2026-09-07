@@ -16,6 +16,9 @@ from rest_framework.exceptions import ValidationError, NotFound
 from apps.domains.results.permissions import IsTeacherOrAdmin
 from apps.domains.results.models import ExamAttempt, Result, ResultFact, ResultItem
 from apps.domains.results.validation import parse_finite_score
+from apps.domains.results.services.initial_attempt_snapshot import (
+    sync_confirmed_initial_snapshot_meta,
+)
 from apps.support.results.exam_policy_dependencies import (
     effective_exam_pass_score,
 )
@@ -154,7 +157,11 @@ class AdminExamTotalScoreView(APIView):
         # -------------------------------------------------
         # 2️⃣ Attempt LOCK 상태 확인
         # -------------------------------------------------
-        attempt = ExamAttempt.objects.filter(id=int(result.attempt_id)).first()
+        attempt = (
+            ExamAttempt.objects.select_for_update()
+            .filter(id=int(result.attempt_id))
+            .first()
+        )
         if not attempt:
             raise NotFound({"detail": "attempt not found", "code": "NOT_FOUND"})
 
@@ -217,10 +224,18 @@ class AdminExamTotalScoreView(APIView):
         # 5-b) Representative ExamAttempt 점수 동기화 + NOT_SUBMITTED 해제
         # -------------------------------------------------
         if attempt and attempt.is_representative:
-            attempt.meta = attempt.meta or {}
-            attempt.meta["total_score"] = float(new_score)
-            attempt.meta["synced_from_result"] = True
-            attempt.meta.pop("status", None)  # 정상 점수 입력 시 NOT_SUBMITTED 해제
+            attempt_meta = dict(attempt.meta or {}) if isinstance(attempt.meta, dict) else {}
+            attempt_meta["total_score"] = float(new_score)
+            attempt_meta["synced_from_result"] = True
+            attempt_meta.pop("status", None)  # 정상 점수 입력 시 NOT_SUBMITTED 해제
+            attempt.meta = sync_confirmed_initial_snapshot_meta(
+                attempt=attempt,
+                meta=attempt_meta,
+                total_score=float(new_score),
+                max_score=float(max_score),
+                confirmed_at=timezone.now(),
+                fallback_source="admin_manual_total",
+            )
             attempt.save(update_fields=["meta", "updated_at"])
 
         # -------------------------------------------------

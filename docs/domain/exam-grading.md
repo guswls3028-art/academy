@@ -353,6 +353,15 @@ tenant가 없거나 다른 tenant의 시험이면 거부한다. 이미 분리 �
 보존된 1차 snapshot을 두 필드에 사용해 재시험 점수가 1차 결과 목록을 덮지 않는다.
 등수도 이 화면에 표시하는 같은 점수 집합으로 다시 계산한다.
 
+OMR 객관식 채점이 1차 attempt를 먼저 만들고 같은 attempt의 서술형을 나중에 확정할
+수 있다. 1차가 아직 대표인 동안 합계·객관식·서술형·문항별 수동 입력, 직접 채점표,
+엑셀 확정은 canonical `Result`와 함께 `initial_snapshot.total_score/max_score`도
+동일 transaction에서 갱신한다. 이때 최초 OMR `source`, `submission_id`,
+`submitted_at`은 보존한다. 재시험이 대표가 된 뒤에는 2차 점수 쓰기가 1차 snapshot을
+바꾸지 않는다. 따라서 석차·동점·통계·분석·내보내기·합불·재시험·클리닉·교사·학생·
+학부모 조회가 공유하는 `load_initial_exam_scores()`는 OMR 객관식과 나중 서술형을 합친
+확정 1차 점수를 투영한다.
+
 1차 `ExamAttempt.meta.initial_snapshot`이 없는 과거 행은
 `backfill_initial_snapshot`으로 복구한다. 이 명령은 append-only 1차 attempt의
 `meta.total_score`를 현재 대표 `Result`보다 우선한다. 재응시가 이미 있어도 1차

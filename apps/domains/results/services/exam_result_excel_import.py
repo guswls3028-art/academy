@@ -24,6 +24,9 @@ from apps.domains.results.guards.score_edit_lease_guard import (
     require_score_edit_scope_available_for_exam,
 )
 from apps.domains.results.models import ExamAttempt, Result, ResultFact, ResultItem
+from apps.domains.results.services.initial_attempt_snapshot import (
+    sync_confirmed_initial_snapshot_meta,
+)
 from apps.domains.results.utils.exam_absence import current_exam_absence_counts
 from apps.support.omr.score_adjustment import get_score_adjustment_from_answers
 from apps.support.omr.score_shape import get_exam_score_shape
@@ -971,13 +974,14 @@ def apply_exam_result_import(*, plan: ImportPlan) -> dict[str, Any]:
             "source_row": planned_row.source_row,
             "imported_at": now.isoformat(),
         }
-        if int(attempt.attempt_index) == 1 and not isinstance(meta.get("initial_snapshot"), dict):
-            meta["initial_snapshot"] = {
-                "total_score": total_score,
-                "max_score": float(planned_row.max_score),
-                "submitted_at": now.isoformat(),
-                "source": "excel_result_import",
-            }
+        meta = sync_confirmed_initial_snapshot_meta(
+            attempt=attempt,
+            meta=meta,
+            total_score=float(total_score),
+            max_score=float(planned_row.max_score),
+            confirmed_at=now,
+            fallback_source="excel_result_import",
+        )
         attempt.meta = meta
         attempt.status = "done"
         attempt.save(update_fields=["meta", "status", "updated_at"])

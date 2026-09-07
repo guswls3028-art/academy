@@ -21,6 +21,7 @@ from apps.domains.results.views.admin_exam_result_detail_view import AdminExamRe
 from apps.domains.results.views.admin_exam_subjective_score_view import AdminExamSubjectiveScoreView
 from apps.domains.results.views.admin_exam_total_score_view import AdminExamTotalScoreView
 from apps.domains.results.views.session_scores_view import SessionScoresView
+from apps.domains.results.utils.initial_exam_score import load_initial_exam_scores
 from apps.domains.students.models import Student
 from apps.support.results.session_scores_dependencies import Attendance
 
@@ -467,6 +468,61 @@ class ManualExamScoreAssignmentGuardTests(TestCase):
         ).latest("id")
         self.assertEqual(float(fact.score), 18.0)
         self.assertEqual(float(fact.max_score), 20.0)
+
+    @patch("apps.domains.results.views.admin_exam_subjective_score_view.dispatch_progress_pipeline")
+    def test_subjective_score_updates_omr_first_attempt_projection_before_retake(self, mock_dispatch):
+        exam, _questions = self._create_structured_exam("OMR then essay", [80], [20])
+        result = self._create_result(exam, objective_score=80)
+        first_attempt = result.attempt
+        first_attempt.meta = {
+            "total_score": 80.0,
+            "max_score": 100.0,
+            "initial_snapshot": {
+                "total_score": 80.0,
+                "max_score": 100.0,
+                "submitted_at": "2026-09-05T10:55:38+09:00",
+                "source": "submission_sync",
+                "submission_id": 1234,
+            },
+        }
+        first_attempt.save(update_fields=["meta", "updated_at"])
+
+        response = self._patch_for_exam(
+            AdminExamSubjectiveScoreView,
+            exam,
+            {"score": 15},
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        first_attempt.refresh_from_db()
+        snapshot = first_attempt.meta["initial_snapshot"]
+        self.assertEqual(float(snapshot["total_score"]), 95.0)
+        self.assertEqual(float(snapshot["max_score"]), 100.0)
+        self.assertEqual(snapshot["source"], "submission_sync")
+        self.assertEqual(snapshot["submission_id"], 1234)
+
+        first_attempt.is_representative = False
+        first_attempt.save(update_fields=["is_representative", "updated_at"])
+        retake = ExamAttempt.objects.create(
+            exam=exam,
+            enrollment=self.assigned_enrollment,
+            submission_id=0,
+            attempt_index=2,
+            is_retake=True,
+            is_representative=True,
+            status="done",
+            meta={"total_score": 90.0, "max_score": 100.0},
+        )
+        result.attempt = retake
+        result.total_score = 90.0
+        result.save(update_fields=["attempt", "total_score", "updated_at"])
+
+        projected = load_initial_exam_scores(
+            exam_ids=[exam.id],
+            enrollment_ids=[self.assigned_enrollment.id],
+        )[(exam.id, self.assigned_enrollment.id)]
+        self.assertEqual(projected.total_score, 95.0)
+        self.assertEqual(projected.max_score, 100.0)
 
     @patch("apps.domains.results.views.admin_exam_subjective_score_view.dispatch_progress_pipeline")
     def test_subjective_score_accepts_direct_input_for_positive_essay_score_without_answer_key_entry(self, mock_dispatch):

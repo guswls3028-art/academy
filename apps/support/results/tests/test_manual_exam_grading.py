@@ -22,6 +22,7 @@ from apps.domains.results.services.manual_exam_grading import (
     plan_manual_grading,
 )
 from apps.domains.results.utils.ranking import compute_exam_rankings
+from apps.domains.results.utils.initial_exam_score import load_initial_exam_scores
 from apps.domains.students.models import Student
 
 
@@ -331,6 +332,95 @@ class ManualExamGradingTests(TestCase):
             ResultItem.objects.get(result=result, question=choice).source,
             "omr",
         )
+
+    def test_mixed_exam_projects_omr_plus_manual_essay_as_first_attempt(self):
+        exam, choice, essay = self._exam(
+            grading_mode=Exam.GradingMode.MIXED,
+            manual_method=Exam.ManualGradingMethod.SCORE,
+        )
+        first_attempt = ExamAttempt.objects.create(
+            exam=exam,
+            enrollment=self.enrollment,
+            submission_id=1234,
+            attempt_index=1,
+            is_representative=True,
+            status="done",
+            meta={
+                "total_score": 40.0,
+                "max_score": 100.0,
+                "initial_snapshot": {
+                    "total_score": 40.0,
+                    "max_score": 100.0,
+                    "submitted_at": "2026-09-05T10:55:38+09:00",
+                    "source": "submission_sync",
+                    "submission_id": 1234,
+                },
+            },
+        )
+        result = Result.objects.create(
+            target_type="exam",
+            target_id=exam.id,
+            enrollment=self.enrollment,
+            attempt=first_attempt,
+            total_score=40,
+            max_score=100,
+            objective_score=40,
+        )
+        ResultItem.objects.create(
+            result=result,
+            question=choice,
+            answer="2",
+            is_correct=True,
+            score=40,
+            max_score=40,
+            source="omr",
+        )
+        sheet = build_manual_grading_sheet(exam=exam, tenant=self.tenant)
+        plan = plan_manual_grading(
+            exam=exam,
+            tenant=self.tenant,
+            payload={
+                "rows": [{
+                    "enrollment_id": self.enrollment.id,
+                    "expected_version": sheet["rows"][0]["expected_version"],
+                    "attendance": "present",
+                    "cells": {str(essay.id): {"score": 50}},
+                }],
+            },
+        )
+
+        self.assertTrue(plan.can_apply, plan.errors)
+        apply_manual_grading(plan=plan)
+
+        first_attempt.refresh_from_db()
+        snapshot = first_attempt.meta["initial_snapshot"]
+        self.assertEqual(float(snapshot["total_score"]), 90.0)
+        self.assertEqual(float(snapshot["max_score"]), 100.0)
+        self.assertEqual(snapshot["source"], "submission_sync")
+        self.assertEqual(snapshot["submission_id"], 1234)
+
+        first_attempt.is_representative = False
+        first_attempt.save(update_fields=["is_representative", "updated_at"])
+        retake = ExamAttempt.objects.create(
+            exam=exam,
+            enrollment=self.enrollment,
+            submission_id=0,
+            attempt_index=2,
+            is_retake=True,
+            is_representative=True,
+            status="done",
+            meta={"total_score": 95.0, "max_score": 100.0},
+        )
+        result.attempt = retake
+        result.total_score = 95.0
+        result.save(update_fields=["attempt", "total_score", "updated_at"])
+
+        projected = load_initial_exam_scores(
+            exam_ids=[exam.id],
+            enrollment_ids=[self.enrollment.id],
+        )[(exam.id, self.enrollment.id)]
+        self.assertEqual(projected.total_score, 90.0)
+        self.assertEqual(projected.max_score, 100.0)
 
     def test_choice_exam_is_read_only_and_keeps_omr_as_correction_source(self):
         exam, first, second = self._exam(

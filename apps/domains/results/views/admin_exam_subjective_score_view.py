@@ -24,6 +24,9 @@ from rest_framework.exceptions import ValidationError, NotFound
 from apps.domains.results.permissions import IsTeacherOrAdmin
 from apps.domains.results.models import Result, ResultFact, ExamAttempt
 from apps.domains.results.validation import parse_finite_score
+from apps.domains.results.services.initial_attempt_snapshot import (
+    sync_confirmed_initial_snapshot_meta,
+)
 from apps.support.results.exam_policy_dependencies import (
     effective_exam_pass_score,
 )
@@ -144,7 +147,11 @@ class AdminExamSubjectiveScoreView(APIView):
                 result.max_score = float(max_score)
                 result.save(update_fields=["attempt_id", "max_score", "updated_at"])
 
-        attempt = ExamAttempt.objects.filter(id=int(result.attempt_id)).first()
+        attempt = (
+            ExamAttempt.objects.select_for_update()
+            .filter(id=int(result.attempt_id))
+            .first()
+        )
         if not attempt:
             raise NotFound({"detail": "attempt not found", "code": "NOT_FOUND"})
         if attempt.status == "grading":
@@ -194,11 +201,19 @@ class AdminExamSubjectiveScoreView(APIView):
         result.save(update_fields=["total_score", "max_score", "updated_at"])
 
         if attempt and attempt.is_representative:
-            attempt.meta = attempt.meta or {}
-            attempt.meta["total_score"] = float(new_total)
-            attempt.meta["subjective_score"] = float(new_subjective)
-            attempt.meta["synced_from_result"] = True
-            attempt.meta.pop("status", None)
+            attempt_meta = dict(attempt.meta or {}) if isinstance(attempt.meta, dict) else {}
+            attempt_meta["total_score"] = float(new_total)
+            attempt_meta["subjective_score"] = float(new_subjective)
+            attempt_meta["synced_from_result"] = True
+            attempt_meta.pop("status", None)
+            attempt.meta = sync_confirmed_initial_snapshot_meta(
+                attempt=attempt,
+                meta=attempt_meta,
+                total_score=float(new_total),
+                max_score=float(max_score),
+                confirmed_at=timezone.now(),
+                fallback_source="admin_manual_subjective",
+            )
             attempt.save(update_fields=["meta", "updated_at"])
 
         _sid = int(submission_id) if submission_id else 0

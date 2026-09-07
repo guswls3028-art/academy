@@ -206,6 +206,34 @@ class ExamOMRBatchUploadPdfGuardTests(TestCase):
         self.assertEqual(response.data["counts"]["pending_admission"], 22)
         self.assertEqual(response.data["pending_admission_ordinals"], list(range(1, 23)))
 
+    def test_empty_file_keeps_a_stable_failed_scan_identity(self):
+        batch_id = self._initialize(1).data["id"]
+
+        response = self._upload_to_batch(
+            batch_id,
+            [SimpleUploadedFile("empty.jpg", b"", content_type="image/jpeg")],
+            [1],
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["created_count"], 0)
+        self.assertEqual(response.data["counts"]["failed"], 1)
+        self.assertEqual(response.data["admission_failed_ordinals"], [1])
+        self.assertEqual(response.data["items"], [
+            {
+                "id": f"{batch_id}:1",
+                "ordinal": 1,
+                "admission_status": "failed",
+                "status": "failed",
+                "submission_id": None,
+                "duplicate_of_submission_id": None,
+                "submission_status": None,
+                "identifier_status": None,
+                "failure_code": "empty_file",
+                "failure_message": "빈 파일은 접수할 수 없습니다.",
+            }
+        ])
+
     @patch("apps.domains.submissions.views.exam_omr_batch_upload_view.dispatch_submission")
     @patch("apps.domains.submissions.serializers.submission.upload_fileobj_to_r2")
     def test_exact_file_reupload_across_batches_is_accounted_without_new_submission(
@@ -486,6 +514,22 @@ class ExamOMRBatchUploadPdfGuardTests(TestCase):
         self.assertEqual(response.data["counts"]["needs_identification"], 1)
         self.assertEqual(response.data["counts"]["failed"], 1)
         self.assertEqual(response.data["counts"]["superseded"], 1)
+        self.assertEqual(
+            [item["status"] for item in response.data["items"]],
+            [
+                "received",
+                "processing",
+                "processing",
+                "completed",
+                "needs_identification",
+                "failed",
+                "superseded",
+            ],
+        )
+        self.assertEqual(
+            [item["id"] for item in response.data["items"]],
+            [f"{batch_id}:{ordinal}" for ordinal in range(1, 8)],
+        )
         self.assertFalse(response.data["terminal"])
         self.assertIsNone(batch_after.completion_notice_claimed_at)
         self.assertEqual(batch_after.updated_at, batch_before.updated_at)
