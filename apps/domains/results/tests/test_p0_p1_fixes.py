@@ -614,6 +614,20 @@ class TestExamValidation(TestCase, BaseTestMixin):
             exam.clean()
         self.assertIn("close_at", ctx.exception.message_dict)
 
+    def test_online_attempt_after_exam_close_remains_blocked(self):
+        from django.utils import timezone
+        import datetime
+
+        exam = self._create_exam(close_at=timezone.now() - datetime.timedelta(minutes=1))
+        submission = self._create_submission(exam)
+
+        with self.assertRaisesMessage(DjangoValidationError, "Exam is closed."):
+            ExamAttemptService.create_for_submission(
+                exam_id=exam.id,
+                enrollment_id=self.enrollment.id,
+                submission_id=submission.id,
+            )
+
     def test_serializer_blocks_invalid_exam(self):
         """ExamSerializer validates max_attempts, pass_score, open_at/close_at."""
         from apps.domains.exams.serializers.exam import ExamSerializer

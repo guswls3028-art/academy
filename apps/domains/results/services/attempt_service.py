@@ -39,6 +39,7 @@ class ExamAttemptService:
         exam_id: int,
         enrollment_id: int,
         submission_id: int,
+        enforce_availability_window: bool = True,
     ) -> ExamAttempt:
 
         # -------------------------------------------------
@@ -51,7 +52,7 @@ class ExamAttemptService:
         # -------------------------------------------------
         # 2️⃣ open_at / close_at 정책 강제
         # -------------------------------------------------
-        if exam:
+        if exam and enforce_availability_window:
             now = timezone.now()
             open_at = getattr(exam, "open_at", None)
             close_at = getattr(exam, "close_at", None)
