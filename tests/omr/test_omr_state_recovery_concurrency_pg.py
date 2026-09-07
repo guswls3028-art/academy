@@ -204,6 +204,9 @@ class StateRecoveryConcurrencyPostgresTests(TransactionTestCase):
             complete_ai_job,
             prepare_ai_job,
         )
+        from academy.application.use_cases.ai.pipelines import (
+            dispatcher as ai_pipeline_dispatcher,
+        )
         from academy.framework.workers.ai_sqs_worker import (
             _dispatch_domain_callback,
             _dispatch_terminal_callback_from_message,
@@ -318,12 +321,14 @@ class StateRecoveryConcurrencyPostgresTests(TransactionTestCase):
             ),
             patch("apps.domains.submissions.services.dispatcher.start_ai_worker_instance"),
             patch("academy.adapters.compute.ec2_control.ensure_ai_worker_asg_min_capacity"),
-            patch(
-                "academy.application.use_cases.ai.pipelines.dispatcher.download_to_tmp",
+            patch.object(
+                ai_pipeline_dispatcher,
+                "download_to_tmp",
                 return_value=str(temp_image),
             ),
-            patch(
-                "academy.application.use_cases.ai.pipelines.dispatcher._upload_omr_aligned_preview",
+            patch.object(
+                ai_pipeline_dispatcher,
+                "_upload_omr_aligned_preview",
                 return_value={},
             ),
             patch(
