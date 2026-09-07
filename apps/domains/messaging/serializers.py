@@ -221,6 +221,10 @@ class SendMessageRequestSerializer(serializers.Serializer):
         allow_null=True,
         help_text="예약 발송 시각. 비어 있으면 즉시 발송합니다.",
     )
+    request_id = serializers.UUIDField(
+        required=False,
+        help_text="한 번의 사용자 발송 요청을 발송 로그까지 추적하는 식별자",
+    )
     block_category = serializers.CharField(
         required=False,
         allow_blank=True,

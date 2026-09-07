@@ -386,6 +386,67 @@ class NotificationLogRedactionTests(TestCase):
         self.assertEqual(detail_response.data["target_id"], "parent:123")
         self.assertNotIn("01031217466", str(detail_response.data))
 
+    def test_log_api_exact_origin_filter_is_tenant_scoped(self):
+        other_tenant = Tenant.objects.create(
+            name="Other Exact Origin",
+            code="other-exact-origin",
+            is_active=True,
+        )
+        matching = NotificationLog.objects.create(
+            tenant=self.tenant,
+            success=True,
+            status="sent",
+            message_mode="alimtalk",
+            origin_type="manual_send",
+            origin_id="request-exact-123",
+        )
+        NotificationLog.objects.create(
+            tenant=self.tenant,
+            success=True,
+            status="sent",
+            message_mode="alimtalk",
+            origin_type="manual_send",
+            origin_id="request-exact-123-suffix",
+        )
+        NotificationLog.objects.create(
+            tenant=other_tenant,
+            success=True,
+            status="sent",
+            message_mode="alimtalk",
+            origin_type="manual_send",
+            origin_id="request-exact-123",
+        )
+
+        request = self.factory.get(
+            "/api/v1/messaging/log/",
+            {"origin_id": "request-exact-123"},
+        )
+        force_authenticate(request, user=self.admin)
+        request.user = self.admin
+        request.tenant = self.tenant
+
+        response = NotificationLogListView.as_view()(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["count"], 1)
+        self.assertEqual(response.data["results"][0]["id"], matching.id)
+        self.assertEqual(response.data["results"][0]["origin_type"], "manual_send")
+        self.assertEqual(response.data["results"][0]["origin_id"], "request-exact-123")
+
+    def test_log_api_rejects_invalid_exact_origin_filter(self):
+        request = self.factory.get(
+            "/api/v1/messaging/log/",
+            {"origin_id": "unsafe origin?"},
+        )
+        force_authenticate(request, user=self.admin)
+        request.user = self.admin
+        request.tenant = self.tenant
+
+        response = NotificationLogListView.as_view()(request)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("origin_id", response.data)
+
     def test_log_api_scopes_owner_proxy_logs_to_business_tenant(self):
         provider_owner = Tenant.objects.create(name="Provider Owner", code="provider-owner", is_active=True)
         other_customer = Tenant.objects.create(name="Other Customer", code="other-customer", is_active=True)

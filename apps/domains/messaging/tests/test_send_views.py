@@ -1,5 +1,6 @@
 from datetime import timedelta
 from unittest.mock import patch
+from uuid import UUID, uuid4
 
 from django.apps import apps
 from django.contrib.auth import get_user_model
@@ -141,6 +142,91 @@ class SendMessageViewTests(TestCase):
         self.assertNotIn("공지내용", replacements)
         self.assertNotIn("내용", replacements)
         self.assertNotIn("선생님메모1", replacements)
+
+    def test_manual_send_returns_and_propagates_exact_request_correlation(self):
+        request_id = uuid4()
+        request = self.factory.post(
+            "/api/v1/messaging/send/",
+            data={
+                "send_to": "student",
+                "student_ids": [self.student.id],
+                "raw_body": "추적 가능한 안내입니다.",
+                "block_category": "attendance",
+                "request_id": str(request_id),
+            },
+            format="json",
+        )
+        force_authenticate(request, user=self.admin)
+        request.user = self.admin
+        request.tenant = self.tenant
+
+        with (
+            patch("apps.domains.messaging.services.get_tenant_site_url", return_value="https://example.test"),
+            patch("apps.domains.messaging.services.enqueue_alimtalk", return_value=True) as enqueue_alimtalk,
+        ):
+            response = self._send(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(UUID(response.data["batch_id"]), request_id)
+        self.assertEqual(response.data["accepted_count"], 1)
+        notification = ScheduledNotification.objects.get(tenant=self.tenant)
+        self.assertEqual(notification.origin_type, "manual_send")
+        self.assertEqual(notification.origin_id, str(request_id))
+        self.assertEqual(notification.payload["origin_id"], str(request_id))
+        self.assertIn(str(request_id), notification.payload["occurrence_key"])
+        self.assertEqual(enqueue_alimtalk.call_args.kwargs["origin_id"], str(request_id))
+
+    def test_manual_send_without_sendable_phone_fails_closed(self):
+        self.student.phone = ""
+        self.student.save(update_fields=["phone"])
+        request = self.factory.post(
+            "/api/v1/messaging/send/",
+            data={
+                "send_to": "student",
+                "student_ids": [self.student.id],
+                "raw_body": "수신번호 없는 안내입니다.",
+                "block_category": "attendance",
+            },
+            format="json",
+        )
+        force_authenticate(request, user=self.admin)
+        request.user = self.admin
+        request.tenant = self.tenant
+
+        with patch("apps.domains.messaging.services.enqueue_alimtalk") as enqueue_alimtalk:
+            response = self._send(request)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["code"], "no_sendable_recipient")
+        self.assertEqual(response.data["accepted_count"], 0)
+        enqueue_alimtalk.assert_not_called()
+        self.assertFalse(ScheduledNotification.objects.exists())
+
+    def test_manual_send_with_zero_dispatch_acceptance_is_not_success(self):
+        request = self.factory.post(
+            "/api/v1/messaging/send/",
+            data={
+                "send_to": "parent",
+                "student_ids": [self.student.id],
+                "raw_body": "큐 접수 실패 안내입니다.",
+                "block_category": "attendance",
+            },
+            format="json",
+        )
+        force_authenticate(request, user=self.admin)
+        request.user = self.admin
+        request.tenant = self.tenant
+
+        with patch(
+            "apps.domains.messaging.views.send_views._dispatch_or_schedule_message",
+            return_value="failed",
+        ):
+            response = self._send(request)
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.data["code"], "dispatch_not_accepted")
+        self.assertEqual(response.data["accepted_count"], 0)
+        self.assertEqual(response.data["enqueue_failed"], 1)
 
     def test_manual_send_blocks_when_source_business_tenant_quota_is_full(self):
         provider_owner = Tenant.objects.create(code="msg-send-provider", name="Provider", is_active=True)
@@ -562,7 +648,11 @@ class SendMessageViewTests(TestCase):
         self.assertEqual(dispatch.status, ScheduledNotification.Status.PENDING)
         self.assertEqual(dispatch.attempt_count, 1)
         self.assertIsNotNone(dispatch.next_attempt_at)
-        self.assertTrue(dispatch.payload["occurrence_key"].startswith("dispatch:"))
+        self.assertEqual(
+            dispatch.payload["occurrence_key"],
+            f"manual:{response.data['batch_id']}:parent:{self.student.id}",
+        )
+        self.assertEqual(dispatch.origin_id, response.data["batch_id"])
 
     def test_manual_send_rejects_past_scheduled_time(self):
         request = self.factory.post(

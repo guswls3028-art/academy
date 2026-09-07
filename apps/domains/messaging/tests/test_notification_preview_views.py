@@ -459,6 +459,8 @@ class NotificationPreviewViewValidationTests(TestCase):
             scheduled = ScheduledNotification.objects.get(tenant=tenant)
             self.assertEqual(scheduled.trigger, "owner_exact_manual_notice")
             self.assertEqual(scheduled.payload["event_type"], "owner_exact_manual_notice")
+            self.assertEqual(scheduled.origin_type, "manual_preview")
+            self.assertEqual(scheduled.origin_id, "owner-exact-contract")
             self.assertIn("OWNER-APPROVED", _allowed_common_template_ids("owner_exact_manual_notice"))
         self.assertEqual(batch["pending_count"], 1)
 
