@@ -200,6 +200,255 @@ class ClinicMultiSlotBookingAPITest(APITestCase, ClinicAPITestMixin):
             {SessionParticipant.Source.MANUAL},
         )
 
+    def test_staff_adds_exact_enrollment_targets_atomically(self):
+        self._allow_multiple(self.first_session, self.second_session)
+        self.client.force_authenticate(user=self.data["admin_user"])
+        enrollment_ids = [enrollment.id for enrollment in self.data["enrollments"]]
+        Exam = django_apps.get_model("exams", "Exam")
+        ExamEnrollment = django_apps.get_model("exams", "ExamEnrollment")
+        exam = Exam.objects.create(
+            tenant=self.tenant,
+            title="정확 수강 대상 시험",
+            exam_type="regular",
+            is_active=True,
+        )
+        exam.sessions.add(self.data["lec_session"])
+        ExamEnrollment.objects.create(
+            exam=exam,
+            enrollment=self.data["enrollments"][0],
+        )
+        self.make_clinic_link(
+            self.data["enrollments"][0],
+            self.data["lec_session"],
+            tenant=self.tenant,
+            source_type="exam",
+            source_id=exam.id,
+        )
+
+        from apps.support.clinic.session_dependencies import (
+            clinic_reasons_for_unresolved_auto_links,
+        )
+
+        with patch(
+            "apps.domains.clinic.services.lifecycle.clinic_reasons_for_unresolved_auto_links",
+            wraps=clinic_reasons_for_unresolved_auto_links,
+        ) as reason_loader:
+            response = self.client.post(
+                "/api/v1/clinic/participants/bulk-create/",
+                {
+                    "session_ids": [self.first_session.id, self.second_session.id],
+                    "enrollment_ids": enrollment_ids,
+                },
+                format="json",
+                **self._headers(),
+            )
+
+        self.assertEqual(response.status_code, 201, response.data)
+        reason_loader.assert_called_once()
+        self.assertEqual(
+            set(reason_loader.call_args.args[1]),
+            set(enrollment_ids),
+        )
+        self.assertEqual(response.data["count"], 4)
+        participants = SessionParticipant.objects.filter(
+            tenant=self.tenant,
+            session_id__in=[self.first_session.id, self.second_session.id],
+        )
+        self.assertEqual(participants.count(), 4)
+        self.assertEqual(
+            set(participants.values_list("enrollment_id", flat=True)),
+            set(enrollment_ids),
+        )
+        self.assertEqual(
+            set(
+                participants.filter(enrollment_id=enrollment_ids[0]).values_list(
+                    "clinic_reason", flat=True
+                )
+            ),
+            {SessionParticipant.Reason.EXAM},
+        )
+
+    def test_staff_exact_enrollment_bulk_ignores_unassigned_exam_reason(self):
+        self.client.force_authenticate(user=self.data["admin_user"])
+        Exam = django_apps.get_model("exams", "Exam")
+        ExamEnrollment = django_apps.get_model("exams", "ExamEnrollment")
+        exam = Exam.objects.create(
+            tenant=self.tenant,
+            title="미배정 사유 제외 시험",
+            exam_type="regular",
+            is_active=True,
+        )
+        exam.sessions.add(self.data["lec_session"])
+        ExamEnrollment.objects.create(
+            exam=exam,
+            enrollment=self.data["enrollments"][1],
+        )
+        self.make_clinic_link(
+            self.data["enrollments"][0],
+            self.data["lec_session"],
+            tenant=self.tenant,
+            source_type="exam",
+            source_id=exam.id,
+        )
+
+        response = self.client.post(
+            "/api/v1/clinic/participants/bulk-create/",
+            {
+                "session_ids": [self.first_session.id],
+                "enrollment_ids": [self.data["enrollments"][0].id],
+            },
+            format="json",
+            **self._headers(),
+        )
+
+        self.assertEqual(response.status_code, 201, response.data)
+        participant = SessionParticipant.objects.get(
+            tenant=self.tenant,
+            session=self.first_session,
+            enrollment=self.data["enrollments"][0],
+        )
+        self.assertIsNone(participant.clinic_reason)
+
+    def test_staff_exact_enrollment_bulk_rolls_back_with_specific_existing_booking_reason(self):
+        self.client.force_authenticate(user=self.data["admin_user"])
+        existing_enrollment = self.data["enrollments"][0]
+        new_enrollment = self.data["enrollments"][1]
+        self.make_participant(
+            self.tenant,
+            self.first_session,
+            existing_enrollment.student,
+            enrollment=existing_enrollment,
+            status=SessionParticipant.Status.BOOKED,
+        )
+
+        response = self.client.post(
+            "/api/v1/clinic/participants/bulk-create/",
+            {
+                "session_ids": [self.first_session.id],
+                "enrollment_ids": [new_enrollment.id, existing_enrollment.id],
+            },
+            format="json",
+            **self._headers(),
+        )
+
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertEqual(response.data["detail"], "이미 해당 세션에 예약된 학생입니다.")
+        self.assertFalse(
+            SessionParticipant.objects.filter(
+                tenant=self.tenant,
+                session=self.first_session,
+                enrollment=new_enrollment,
+            ).exists()
+        )
+
+    def test_staff_bulk_rejects_mixed_student_and_enrollment_ids_without_writes(self):
+        self.client.force_authenticate(user=self.data["admin_user"])
+
+        response = self.client.post(
+            "/api/v1/clinic/participants/bulk-create/",
+            {
+                "session_ids": [self.first_session.id],
+                "student_ids": [self.student.id],
+                "enrollment_ids": [self.data["enrollments"][0].id],
+            },
+            format="json",
+            **self._headers(),
+        )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertEqual(
+            [str(item) for item in response.data["detail"]],
+            ["student_ids와 enrollment_ids 중 하나만 선택해 주세요."],
+        )
+        self.assertFalse(
+            SessionParticipant.objects.filter(
+                tenant=self.tenant,
+                session=self.first_session,
+            ).exists()
+        )
+
+    def test_staff_exact_enrollment_bulk_rejects_inactive_and_foreign_targets(self):
+        self.client.force_authenticate(user=self.data["admin_user"])
+        inactive = self.data["enrollments"][0]
+        inactive.status = "INACTIVE"
+        inactive.save(update_fields=["status"])
+        foreign = self.setup_api_tenant("clinic_multi_slot_foreign_enrollment")
+
+        for enrollment_id in (inactive.id, foreign["enrollments"][0].id):
+            with self.subTest(enrollment_id=enrollment_id):
+                response = self.client.post(
+                    "/api/v1/clinic/participants/bulk-create/",
+                    {
+                        "session_ids": [self.first_session.id],
+                        "enrollment_ids": [enrollment_id],
+                    },
+                    format="json",
+                    **self._headers(),
+                )
+                self.assertEqual(response.status_code, 404, response.data)
+
+        self.assertFalse(
+            SessionParticipant.objects.filter(
+                tenant=self.tenant,
+                session=self.first_session,
+            ).exists()
+        )
+
+    def test_student_cannot_supply_bulk_enrollment_ids(self):
+        self.client.force_authenticate(user=self.student.user)
+
+        response = self.client.post(
+            "/api/v1/clinic/participants/bulk-create/",
+            {
+                "session_ids": [self.first_session.id],
+                "enrollment_ids": [self.data["enrollments"][0].id],
+            },
+            format="json",
+            **self._headers(),
+        )
+
+        self.assertEqual(response.status_code, 403, response.data)
+        self.assertFalse(
+            SessionParticipant.objects.filter(
+                tenant=self.tenant,
+                session=self.first_session,
+            ).exists()
+        )
+
+    def test_staff_exact_enrollment_bulk_rejects_two_courses_for_same_student(self):
+        self.client.force_authenticate(user=self.data["admin_user"])
+        other_lecture = self.make_lecture(self.tenant, title="영어")
+        other_enrollment = self.make_enrollment(
+            self.tenant,
+            self.student,
+            other_lecture,
+        )
+
+        response = self.client.post(
+            "/api/v1/clinic/participants/bulk-create/",
+            {
+                "session_ids": [self.first_session.id],
+                "enrollment_ids": [
+                    self.data["enrollments"][0].id,
+                    other_enrollment.id,
+                ],
+            },
+            format="json",
+            **self._headers(),
+        )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertEqual(
+            str(response.data["enrollment_ids"]),
+            "같은 학생의 수강 대상은 한 번만 선택해 주세요.",
+        )
+        self.assertFalse(
+            SessionParticipant.objects.filter(
+                tenant=self.tenant,
+                session=self.first_session,
+            ).exists()
+        )
+
     def test_student_cannot_supply_bulk_student_ids(self):
         self.client.force_authenticate(user=self.student.user)
 

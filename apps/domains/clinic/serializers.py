@@ -467,6 +467,12 @@ class ClinicSessionParticipantBulkCreateSerializer(serializers.Serializer):
         default=list,
         max_length=100,
     )
+    enrollment_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1),
+        required=False,
+        default=list,
+        max_length=100,
+    )
     student_request_memo = serializers.CharField(
         required=False,
         allow_blank=True,
@@ -487,6 +493,7 @@ class ClinicSessionParticipantBulkCreateSerializer(serializers.Serializer):
     def validate(self, attrs):
         session_ids = attrs["session_ids"]
         student_ids = attrs.get("student_ids", [])
+        enrollment_ids = attrs.get("enrollment_ids", [])
         if len(set(session_ids)) != len(session_ids):
             raise serializers.ValidationError(
                 {"session_ids": "같은 시간대를 중복해서 선택할 수 없습니다."}
@@ -495,7 +502,19 @@ class ClinicSessionParticipantBulkCreateSerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 {"student_ids": "같은 학생을 중복해서 선택할 수 없습니다."}
             )
-        participant_count = len(session_ids) * max(len(student_ids), 1)
+        if len(set(enrollment_ids)) != len(enrollment_ids):
+            raise serializers.ValidationError(
+                {"enrollment_ids": "같은 수강 대상을 중복해서 선택할 수 없습니다."}
+            )
+        if student_ids and enrollment_ids:
+            raise serializers.ValidationError(
+                {"detail": "student_ids와 enrollment_ids 중 하나만 선택해 주세요."}
+            )
+        participant_count = len(session_ids) * max(
+            len(student_ids),
+            len(enrollment_ids),
+            1,
+        )
         if participant_count > 500:
             raise serializers.ValidationError(
                 {"detail": "한 번에 만들 수 있는 클리닉 예약은 최대 500건입니다."}

@@ -150,27 +150,53 @@ def clinic_highlight_map_for_enrollments(
     ) if ids else {}
 
 
+def clinic_reasons_for_unresolved_auto_links(
+    tenant,
+    enrollment_ids: Iterable[int],
+) -> dict[int, str | None]:
+    from apps.domains.progress.models import ClinicLink
+    from apps.domains.results.utils.clinic import filter_current_clinic_links
+
+    ids = {int(enrollment_id) for enrollment_id in enrollment_ids if enrollment_id}
+    if not ids:
+        return {}
+
+    links = filter_current_clinic_links(
+        ClinicLink.objects.filter(
+            tenant=tenant,
+            enrollment_id__in=ids,
+            is_auto=True,
+            resolved_at__isnull=True,
+        ).order_by("id"),
+        tenant=tenant,
+    )
+    source_types_by_enrollment: dict[int, set[str]] = {
+        enrollment_id: set() for enrollment_id in ids
+    }
+    for link in links:
+        if link.source_type in {"exam", "homework"}:
+            source_types_by_enrollment[int(link.enrollment_id)].add(link.source_type)
+
+    reasons: dict[int, str | None] = {}
+    for enrollment_id, source_types in source_types_by_enrollment.items():
+        if {"exam", "homework"}.issubset(source_types):
+            reasons[enrollment_id] = "both"
+        elif "exam" in source_types:
+            reasons[enrollment_id] = "exam"
+        elif "homework" in source_types:
+            reasons[enrollment_id] = "homework"
+        else:
+            reasons[enrollment_id] = None
+    return reasons
+
+
 def clinic_reason_for_unresolved_auto_links(tenant, enrollment_id: int | None) -> str | None:
     if not enrollment_id:
         return None
-
-    from apps.domains.progress.models import ClinicLink
-
-    links = ClinicLink.objects.filter(
-        tenant=tenant,
-        enrollment_id=enrollment_id,
-        is_auto=True,
-        resolved_at__isnull=True,
-    )
-    has_exam = links.filter(source_type="exam").exists()
-    has_homework = links.filter(source_type="homework").exists()
-    if has_exam and has_homework:
-        return "both"
-    if has_exam:
-        return "exam"
-    if has_homework:
-        return "homework"
-    return None
+    return clinic_reasons_for_unresolved_auto_links(
+        tenant,
+        [enrollment_id],
+    ).get(int(enrollment_id))
 
 
 def storage_presigned_get_url(r2_key: str, *, expires_in: int = 3600) -> str:
