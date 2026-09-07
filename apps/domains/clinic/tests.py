@@ -1374,11 +1374,19 @@ class ParticipantCreateServiceAPITest(APITestCase, ClinicAPITestMixin):
 
     def test_admin_create_with_enrollment_resolves_student_and_reason(self):
         enrollment = self.data["enrollments"][0]
+        exam = Exam.objects.create(
+            tenant=self.tenant,
+            title="참가자 사유 실재 시험",
+            exam_type=Exam.ExamType.REGULAR,
+            is_active=True,
+        )
+        exam.sessions.add(self.data["lec_session"])
         self.make_clinic_link(
             enrollment,
             self.data["lec_session"],
             tenant=self.tenant,
             source_type="exam",
+            source_id=exam.id,
         )
 
         resp = self.client.post(
