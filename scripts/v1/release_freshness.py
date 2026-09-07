@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail closed when a production workflow would deploy an older Git commit."""
+"""Fail closed when a release candidate is stale or not based on current main."""
 
 from __future__ import annotations
 
@@ -67,11 +67,35 @@ def classify_candidate(
     return "divergent"
 
 
+def classify_development_candidate(
+    repo: Path,
+    candidate_sha: str,
+    main_sha: str,
+) -> str:
+    """Allow an unreleased development candidate only when current main is its ancestor."""
+    candidate = candidate_sha.strip().lower()
+    main = main_sha.strip().lower()
+    if not all(SHA_RE.fullmatch(sha) for sha in (candidate, main)):
+        raise ValueError("candidate and main SHAs must be full 40-character hex values")
+    if candidate == main:
+        return "main"
+    if _is_ancestor(repo, main, candidate):
+        return "main-descendant"
+    if _is_ancestor(repo, candidate, main):
+        return "behind-main"
+    return "off-main"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--candidate-sha", required=True)
     parser.add_argument("--deployed-sha", required=True)
     parser.add_argument("--main-sha", required=True)
+    parser.add_argument(
+        "--deployment-scope",
+        choices=("production", "development"),
+        default="production",
+    )
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     return parser.parse_args()
 
@@ -79,12 +103,19 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
-        classification = classify_candidate(
-            args.repo.resolve(),
-            args.candidate_sha,
-            args.deployed_sha,
-            args.main_sha,
-        )
+        if args.deployment_scope == "development":
+            classification = classify_development_candidate(
+                args.repo.resolve(),
+                args.candidate_sha,
+                args.main_sha,
+            )
+        else:
+            classification = classify_candidate(
+                args.repo.resolve(),
+                args.candidate_sha,
+                args.deployed_sha,
+                args.main_sha,
+            )
     except (RuntimeError, ValueError) as exc:
         print(f"[release-freshness] unable to prove freshness: {exc}", file=sys.stderr)
         return 2
@@ -92,13 +123,18 @@ def main() -> int:
     print(
         "[release-freshness] "
         f"candidate={args.candidate_sha} deployed={args.deployed_sha} "
-        f"main={args.main_sha} "
+        f"main={args.main_sha} scope={args.deployment_scope} "
         f"classification={classification}"
     )
-    if classification in {"same", "forward"}:
+    allowed = (
+        {"main", "main-descendant"}
+        if args.deployment_scope == "development"
+        else {"same", "forward"}
+    )
+    if classification in allowed:
         return 0
     print(
-        "[release-freshness] refusing stale or divergent production deployment",
+        "[release-freshness] refusing stale, divergent, or unbased candidate",
         file=sys.stderr,
     )
     return 3

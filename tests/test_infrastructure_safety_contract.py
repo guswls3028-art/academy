@@ -65,6 +65,9 @@ PARAMS = REPO_ROOT / "docs" / "ssot" / "params.yaml"
 DEPLOY_ARCH_DOC = REPO_ROOT / "docs" / "infrastructure" / "deployment-architecture.md"
 V1_README = REPO_ROOT / "scripts" / "v1" / "README.md"
 DEPLOY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "v1-build-and-push-latest.yml"
+WRONG_NOTE_DEVELOPMENT_CANARY = (
+    REPO_ROOT / "scripts" / "v1" / "run-wrong-note-development-canary.ps1"
+)
 ROLLBACK_SCRIPTS = {
     "api": REPO_ROOT / "scripts" / "v1" / "rollback-api.ps1",
     "messaging": REPO_ROOT / "scripts" / "v1" / "rollback-messaging.ps1",
@@ -1495,6 +1498,22 @@ def test_release_freshness_allows_forward_only_and_rejects_stale_or_divergent(
         freshness.classify_candidate(repo, sha_off_main, sha_a, sha_evidence)
         == "off-main"
     )
+    git("checkout", "-b", "development-candidate", sha_evidence)
+    marker.write_text("development", encoding="utf-8")
+    git("commit", "-am", "development")
+    sha_development = git("rev-parse", "HEAD")
+    assert (
+        freshness.classify_development_candidate(repo, sha_development, sha_evidence)
+        == "main-descendant"
+    )
+    assert (
+        freshness.classify_development_candidate(repo, sha_b, sha_evidence)
+        == "behind-main"
+    )
+    assert (
+        freshness.classify_development_candidate(repo, sha_c, sha_evidence)
+        == "off-main"
+    )
 
 
 def test_workflow_checks_release_freshness_under_lock_and_always_releases() -> None:
@@ -1549,6 +1568,51 @@ def test_workflow_checks_release_freshness_under_lock_and_always_releases() -> N
     assert "verify-runtime-iam" in release_block
     assert "verify-release-freshness" in release_block
     assert "if: always() && needs.acquire-production-lock.result == 'success'" in release_block
+
+
+def test_development_only_workflow_cannot_reach_preprod_or_update_main() -> None:
+    workflow = DEPLOY_WORKFLOW.read_text(encoding="utf-8")
+    detect_block = _job_block(workflow, "detect-changes")
+    development_block = _job_block(workflow, "verify-api-development")
+    preprod_block = _job_block(workflow, "verify-api-preprod")
+    build_block = _job_block(workflow, "build-and-push")
+
+    assert "deployment_scope:" in workflow
+    assert "development_only" in workflow
+    assert "run_wrong_note_canary:" in workflow
+    assert "build_api=true" in detect_block
+    assert "build_tools=true" in detect_block
+    assert "build_video=false" in detect_block
+    assert "build_messaging=false" in detect_block
+    assert "build_ai=false" in detect_block
+    assert "--deployment-scope \"$ACADEMY_DEPLOYMENT_SCOPE\"" in workflow
+    assert "run-wrong-note-development-canary.ps1" in development_block
+    assert "if: inputs.deployment_scope != 'development_only'" in build_block
+    assert "inputs.deployment_scope != 'development_only'" in preprod_block
+
+
+def test_wrong_note_development_canary_is_real_and_fail_closed() -> None:
+    script = WRONG_NOTE_DEVELOPMENT_CANARY.read_text(encoding="utf-8")
+
+    for marker in (
+        'settings.DATABASES["default"]["NAME"] == "academy_api_development"',
+        'settings.DATABASES["default"]["USER"] == "academy_api_development_app"',
+        'settings.TOOLS_SQS_QUEUE_NAME == "academy-v1-development-tools-queue"',
+        'getattr(settings, key) == "academy-development-artifacts"',
+        '"/api/v1/token/"',
+        '"/api/v1/results/wrong-notes/pdf/"',
+        "publish_wrong_note_pdf_ai_job(new_ai_job)",
+        'mismatch_job.last_error != "tenant_mismatch_in_sqs_message"',
+        'boundary_status != 403',
+        'payload.startswith(b"%PDF")',
+        "delete_wrong_note_pdf_object",
+        "delete_prefix(tenant_id)",
+        'message_deleted=true',
+        '"WRONG_NOTE_DEVELOPMENT_CLEANUP_PASS"',
+    ):
+        assert marker in script
+    assert "api.hakwonplus.com" not in script
+    assert "academy-v1-tools-queue\"" not in script
 
 
 def test_runtime_worker_sqs_policy_grants_only_exact_dlq_readback() -> None:

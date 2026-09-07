@@ -46,6 +46,12 @@ $requiredProductionMarkers = @(
     "needs.build-and-push.result == 'success'",
     "contents: read",
     'ssh-key: ${{ secrets.ACADEMY_RELEASE_DEPLOY_KEY }}'
+    "deployment_scope:"
+    "development_only"
+    "run_wrong_note_canary:"
+    "run-wrong-note-development-canary.ps1"
+    "inputs.deployment_scope != 'development_only'"
+    '--deployment-scope "$ACADEMY_DEPLOYMENT_SCOPE"'
 )
 foreach ($marker in $requiredProductionMarkers) {
     if (-not $productionWorkflow.Contains($marker)) {

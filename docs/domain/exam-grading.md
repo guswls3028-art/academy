@@ -771,6 +771,12 @@ python manage.py test `
   apps.domains.results.tests.test_wrong_note_service `
   apps.domains.results.tests.test_security_regression `
   --settings apps.api.config.settings.test
+
+pwsh scripts/v1/run-wrong-note-development-canary.ps1 `
+  -ExpectedReleaseId <release-id> `
+  -ExpectedApiDigest <api-digest> `
+  -ExpectedToolsDigest <tools-digest> `
+  -RunId <run-id> -RunAttempt <attempt> -Ci
 ```
 
 검증은 PDF/HWP/HWPX 처리 상태, 검수 전 proposal, 승인·번호 변경·제외·tenant 차단,
@@ -784,6 +790,9 @@ python manage.py test `
 전체 PATCH 응답, 혼합형 OMR 보존, stale result version 거부,
 다중 시트 선택, tenant 차단, 양끝을 포함하는 회차 범위, 다중 회차 시험의
 중복 제거, 오답노트 포함과 PDF/HWPX 문제·해설 분리, worker/R2 상태를 포함한다.
+마지막 canary는 disposable 두 tenant에서 실제 SQS 소비와 terminal message 삭제,
+PDF download/reload, cross-tenant denial을 확인한 뒤 tenant/user/AI job/audit/R2
+잔여가 모두 0이어야 통과한다.
 Ymath 전체 원본을 운영 데이터 없이 persistent development에서 재현하는 절차와
 합격 기준은 [Ymath 실자료 원본 전수 검증](../operations/runbooks/ymath-real-source-qa.md)을
 따른다. `scripts/exam_source_bundle.py`, `scripts/exam_source_hwp_qa.py`,
