@@ -1,3 +1,5 @@
+"""PostgreSQL OMR stale-recovery races and the full queue/worker review flow."""
+
 from __future__ import annotations
 
 import json
