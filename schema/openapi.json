@@ -19401,8 +19401,40 @@
     },
     "/api/v1/clinic/sessions/tree/": {
       "get": {
-        "description": "GET /clinic/sessions/tree/?year=YYYY&month=MM\n- 운영 페이지 좌측 트리 전용\n- serializer 우회 (UI 최적화 목적)",
+        "description": "GET /clinic/sessions/tree/?year=YYYY&month=MM\nGET /clinic/sessions/tree/?date_from=YYYY-MM-DD&date_to=YYYY-MM-DD\n- 운영 페이지 좌측 트리 전용\n- 날짜 범위 모드는 이전 주 복사처럼 월 경계를 건너는 최대 31일 조회용\n- serializer 우회 (UI 최적화 목적)",
         "operationId": "clinic_sessions_tree_retrieve",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "date_from",
+            "schema": {
+              "format": "date",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "date_to",
+            "schema": {
+              "format": "date",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "month",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "year",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
