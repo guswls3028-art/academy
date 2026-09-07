@@ -27,6 +27,7 @@ from apps.domains.results.services.submission_answer_map import (
     require_complete_omr_answers,
 )
 from apps.domains.results.services.submission_scope_guard import validate_exam_submission_scope
+from apps.domains.submissions.selectors import is_omr_scan_submission
 from apps.support.results.exam_policy_dependencies import (
     effective_exam_pass_score,
 )
@@ -300,6 +301,7 @@ def sync_result_from_exam_submission(submission_id: int) -> Result | None:
             exam_id=int(exam.id),
             enrollment_id=int(enrollment_id),
             submission_id=int(submission.id),
+            enforce_availability_window=not is_omr_scan_submission(submission),
         )
         created_attempt = True
 

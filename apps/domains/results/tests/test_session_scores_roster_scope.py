@@ -518,8 +518,10 @@ class SessionScoresRosterScopeTests(TestCase):
             [self.exam.id],
         )
 
-    def test_omr_manual_match_registers_exam_target_and_score_appears(self):
+    def test_omr_manual_match_after_exam_close_registers_target_and_score(self):
         ExamEnrollment.objects.filter(exam=self.exam).delete()
+        self.exam.close_at = timezone.now() - datetime.timedelta(minutes=1)
+        self.exam.save(update_fields=["close_at", "updated_at"])
         sheet = Sheet.objects.create(exam=self.exam, name="MAIN", total_questions=2)
         q1 = ExamQuestion.objects.create(sheet=sheet, number=1, score=5)
         q2 = ExamQuestion.objects.create(sheet=sheet, number=2, score=5)
