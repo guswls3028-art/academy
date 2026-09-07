@@ -49,6 +49,7 @@ from apps.support.submissions.dependencies import (
     create_exam_enrollment_assignment,
     enrollment_belongs_to_tenant,
     exam_question_number_by_id,
+    finalize_omr_result_projection,
     get_synced_exam_score,
     rebind_representative_omr_submission,
     request_is_parent,
@@ -799,12 +800,19 @@ class SubmissionViewSet(ModelViewSet):
 
         synced_score = None
         synced_max_score = None
+        projection_ready = True
+        grading_status = None
         if submission.target_type == Submission.TargetType.EXAM and submission.enrollment_id:
             synced_score, synced_max_score = get_synced_exam_score(
                 tenant=tenant,
                 target_id=int(submission.target_id),
                 enrollment_id=int(submission.enrollment_id),
             )
+            finalization = finalize_omr_result_projection(
+                result_id=int(decision.result_id)
+            )
+            projection_ready = finalization.projection_ready
+            grading_status = finalization.pending_reason
 
         return Response(
             {
@@ -818,6 +826,8 @@ class SubmissionViewSet(ModelViewSet):
                 "score": synced_score,
                 "total_score": synced_score,
                 "max_score": synced_max_score,
+                "projection_ready": projection_ready,
+                "grading_status": grading_status,
             }
         )
 

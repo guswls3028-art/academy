@@ -10,7 +10,7 @@ from apps.domains.exams.models import (
 )
 from apps.domains.lectures.models import Lecture, Session
 from apps.domains.progress.dispatcher import dispatch_progress_pipeline
-from apps.domains.progress.models import ClinicLink, ProgressPolicy
+from apps.domains.progress.models import ClinicLink, ProgressPolicy, SessionProgress
 from apps.domains.students.models import Student
 from apps.domains.submissions.models import Submission, SubmissionAnswer
 
@@ -25,6 +25,7 @@ __all__ = [
     "ProgressPolicy",
     "Session",
     "SessionEnrollment",
+    "SessionProgress",
     "Sheet",
     "Student",
     "Submission",

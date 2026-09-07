@@ -18,6 +18,10 @@ from apps.domains.results.utils.initial_exam_score import (
     load_initial_exam_scores,
     project_initial_exam_score,
 )
+from apps.domains.results.services.omr_subjective_completion import (
+    pending_omr_enrollment_ids_for_exams,
+    pending_omr_result_ids,
+)
 from apps.support.results.admin_student_grades_dependencies import explicit_exam_target_scope
 from apps.support.results.exam_policy_dependencies import exam_pass_score_overrides
 from apps.support.results.progress_read_dependencies import (
@@ -82,10 +86,19 @@ class AdminSessionExamsSummaryView(APIView):
             tenant=request.tenant,
             session=session,
         )
+        pending_enrollment_ids = pending_omr_enrollment_ids_for_exams(
+            exam_ids=exam_ids,
+            tenant_id=int(request.tenant.id),
+            enrollment_ids=roster_enrollment_ids,
+        )
 
         # 세션 단위 시험 통과율(집계 결과)
-        pass_count = sp_qs.filter(exam_passed=True).count()
-        pass_rate = (pass_count / participant_count) if participant_count else 0.0
+        pass_eligible_qs = sp_qs.exclude(
+            enrollment_id__in=pending_enrollment_ids
+        )
+        pass_denominator = pass_eligible_qs.count()
+        pass_count = pass_eligible_qs.filter(exam_passed=True).count()
+        pass_rate = (pass_count / pass_denominator) if pass_denominator else 0.0
 
         # clinic_rate(단일 규칙)
         clinic_count = len(
@@ -143,6 +156,7 @@ class AdminSessionExamsSummaryView(APIView):
         exam_rows = []
         for ex in exams:
             results = results_by_exam.get(int(ex.id), [])
+            pending_result_ids = pending_omr_result_ids(results)
             projected_scores = [
                 project_initial_exam_score(
                     state=initial_scores.get((int(ex.id), int(result.enrollment_id))),
@@ -155,6 +169,7 @@ class AdminSessionExamsSummaryView(APIView):
                     ),
                 )
                 for result in results
+                if int(result.id) not in pending_result_ids
             ]
             scores = [
                 projected.total_score

@@ -771,3 +771,13 @@ def get_synced_exam_score(*, tenant, target_id: int, enrollment_id: int) -> tupl
     except Exception:
         return None, None
     return None, None
+
+
+def finalize_omr_result_projection(*, result_id: int):
+    """Finalize an OMR result through the results-domain service boundary."""
+
+    from apps.domains.results.services.omr_subjective_completion import (
+        finalize_omr_result_if_ready,
+    )
+
+    return finalize_omr_result_if_ready(result_id=int(result_id))

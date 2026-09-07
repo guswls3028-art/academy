@@ -4,6 +4,10 @@ from __future__ import annotations
 from django.db.models import Count
 
 from apps.domains.results.models import ExamAttempt
+from apps.domains.results.services.omr_subjective_completion import (
+    pending_omr_enrollment_ids_for_exams,
+    pending_omr_result_ids,
+)
 
 # ✅ 단일 진실 유틸
 from apps.domains.results.utils.clinic import get_clinic_enrollment_ids_for_session
@@ -99,12 +103,21 @@ class SessionScoreSummaryService:
             session=session,
             enrollment_ids=roster_enrollment_ids,
         )
+        pending_enrollment_ids = pending_omr_enrollment_ids_for_exams(
+            exam_ids=exam_ids,
+            tenant_id=tenant_id,
+            enrollment_ids=roster_enrollment_ids,
+        )
 
         # -------------------------------------------------
         # pass_rate: 원본은 SessionProgress.completed 기준
         # -------------------------------------------------
-        pass_count = progresses.filter(completed=True).count()
-        pass_rate = (pass_count / participant_count) if participant_count else 0.0
+        pass_eligible_qs = progresses.exclude(
+            enrollment_id__in=pending_enrollment_ids
+        )
+        pass_denominator = pass_eligible_qs.count()
+        pass_count = pass_eligible_qs.filter(completed=True).count()
+        pass_rate = (pass_count / pass_denominator) if pass_denominator else 0.0
 
         # -------------------------------------------------
         # clinic_rate: ClinicLink 중 현재 참여자만 집계
@@ -142,6 +155,7 @@ class SessionScoreSummaryService:
             exam_ids=exam_ids,
             enrollment_ids=roster_enrollment_ids,
         )
+        pending_result_ids = pending_omr_result_ids(all_results)
         projected_scores = [
             project_initial_exam_score(
                 state=initial_scores.get((int(result.target_id), int(result.enrollment_id))),
@@ -154,6 +168,7 @@ class SessionScoreSummaryService:
                 ),
             )
             for result in all_results
+            if int(result.id) not in pending_result_ids
         ]
         scores = [
             projected.total_score

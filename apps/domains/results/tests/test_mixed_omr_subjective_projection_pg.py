@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
+from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
 from django.test import TestCase
-from rest_framework.test import APIRequestFactory, force_authenticate
+from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
 
 from apps.core.models import Tenant, TenantMembership
 from apps.domains.results.models import (
@@ -23,6 +26,20 @@ from apps.domains.results.utils.ranking import compute_exam_rankings
 from apps.domains.results.views.admin_exam_subjective_score_view import (
     AdminExamSubjectiveScoreView,
 )
+from apps.domains.results.views.admin_exam_summary_view import AdminExamSummaryView
+from apps.domains.results.views.admin_session_exams_summary_view import (
+    AdminSessionExamsSummaryView,
+)
+from apps.domains.results.views.admin_student_grades_view import (
+    AdminStudentGradesView,
+)
+from apps.domains.results.services.session_score_summary_service import (
+    SessionScoreSummaryService,
+)
+from apps.support.results.enterprise_analytics import (
+    build_teacher_enterprise_analytics,
+)
+from apps.support.student_app.results_summary import build_student_grades_summary
 from apps.domains.results.views.admin_exam_result_detail_view import (
     AdminExamResultDetailView,
 )
@@ -31,6 +48,12 @@ from apps.domains.results.views.admin_exam_results_view import (
 )
 from apps.domains.results.views.admin_exam_item_score_view import (
     AdminExamItemScoreView,
+)
+from apps.domains.results.views.admin_exam_objective_score_view import (
+    AdminExamObjectiveScoreView,
+)
+from apps.domains.results.views.admin_exam_total_score_view import (
+    AdminExamTotalScoreView,
 )
 from apps.domains.results.views.session_scores_view import SessionScoresView
 from apps.support.results.tests.omr_subjective_completion_fixtures import (
@@ -44,6 +67,7 @@ from apps.support.results.tests.omr_subjective_completion_fixtures import (
     ProgressPolicy,
     Session,
     SessionEnrollment,
+    SessionProgress,
     Sheet,
     Student,
     Submission,
@@ -231,6 +255,33 @@ class MixedOmrSubjectiveProjectionPostgresTests(TestCase):
         self.assertEqual(float(canonical.max_score), 100.0)
         dispatch.assert_not_called()
 
+    def test_omr_review_save_reports_objective_regrade_without_final_projection(self):
+        self._grade_objective_only()
+        client = APIClient()
+        client.force_authenticate(user=self.staff)
+        response = client.post(
+            f"/api/v1/submissions/submissions/{self.submission.id}/manual-edit/",
+            {
+                "answers": [
+                    {
+                        "exam_question_id": self.choice.id,
+                        "answer": "1",
+                    }
+                ],
+                "note": "mixed_omr_realuse_review",
+            },
+            format="json",
+            HTTP_HOST="api.hakwonplus.com",
+            HTTP_X_TENANT_CODE=self.tenant.code,
+        )
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 200, payload)
+        self.assertTrue(payload["graded"])
+        self.assertFalse(payload["projection_ready"])
+        self.assertEqual(payload["grading_status"], "subjective_pending")
+        self.assertEqual(float(payload["score"]), 80.0)
+
     def test_omr_result_sync_failure_rolls_back_and_skips_projection_dispatch(self):
         with patch(
             "apps.domains.results.services.grading_service.sync_result_from_exam_submission",
@@ -288,6 +339,185 @@ class MixedOmrSubjectiveProjectionPostgresTests(TestCase):
         self.assertEqual(payload["grading_status"], "subjective_pending")
         self.assertNotIn("total_score", payload)
         self.assertNotIn(self.enrollment.id, rankings)
+
+    def test_pending_partial_is_visible_but_scoreless_in_student_parent_and_staff_history(self):
+        self._grade_objective_only()
+
+        student_payload = build_student_grades_summary(
+            tenant=self.tenant,
+            student=self.student,
+        )
+        student_exam = student_payload["exams"][0]
+        self.assertEqual(student_exam["grading_status"], "subjective_pending")
+        self.assertTrue(student_exam["is_provisional"])
+        self.assertIsNone(student_exam["total_score"])
+        self.assertIsNone(student_exam["is_pass"])
+        self.assertIsNone(student_exam["rank"])
+        self.assertEqual(student_exam["total_questions"], 0)
+        self.assertEqual(student_exam["wrong_question_numbers"], [])
+        self.assertEqual(student_payload["exam_summary"]["scored_count"], 0)
+        self.assertEqual(student_payload["exam_trend"], [])
+
+        # Parent grades use the same authorized student read model. Keep this
+        # assertion explicit so future parent-only shaping cannot leak the score.
+        parent_payload = build_student_grades_summary(
+            tenant=self.tenant,
+            student=self.student,
+        )
+        self.assertIsNone(parent_payload["exams"][0]["total_score"])
+        self.assertEqual(
+            parent_payload["exams"][0]["grading_status"],
+            "subjective_pending",
+        )
+
+        staff_request = self.factory.get(
+            "/results/admin/student-grades/",
+            {"student_id": self.student.id},
+        )
+        staff_request.tenant = self.tenant
+        force_authenticate(staff_request, user=self.staff)
+        staff_response = AdminStudentGradesView.as_view()(staff_request)
+        self.assertEqual(staff_response.status_code, 200, staff_response.data)
+        staff_exam = staff_response.data["exams"][0]
+        self.assertIsNone(staff_exam["total_score"])
+        self.assertIsNone(staff_exam["rank"])
+        self.assertEqual(staff_exam["grading_status"], "subjective_pending")
+        self.assertEqual(staff_response.data["exam_summary"]["scored_count"], 0)
+
+    def test_pending_partial_is_excluded_from_all_staff_score_aggregates(self):
+        self._grade_objective_only()
+
+        exam_request = self.factory.get(
+            f"/results/admin/exams/{self.exam.id}/summary/"
+        )
+        exam_request.tenant = self.tenant
+        force_authenticate(exam_request, user=self.staff)
+        exam_response = AdminExamSummaryView.as_view()(
+            exam_request,
+            exam_id=self.exam.id,
+        )
+        self.assertEqual(exam_response.status_code, 200, exam_response.data)
+        self.assertEqual(float(exam_response.data["avg_score"]), 0.0)
+        self.assertEqual(exam_response.data["pass_count"], 0)
+        self.assertEqual(exam_response.data["fail_count"], 0)
+
+        session_request = self.factory.get(
+            f"/results/admin/sessions/{self.session.id}/exams/summary/"
+        )
+        session_request.tenant = self.tenant
+        force_authenticate(session_request, user=self.staff)
+        session_response = AdminSessionExamsSummaryView.as_view()(
+            session_request,
+            session_id=self.session.id,
+        )
+        self.assertEqual(session_response.status_code, 200, session_response.data)
+        session_exam = session_response.data["exams"][0]
+        self.assertEqual(float(session_exam["avg_score"]), 0.0)
+        self.assertEqual(session_exam["participant_count"], 0)
+        self.assertEqual(session_exam["pass_count"], 0)
+        self.assertEqual(session_exam["fail_count"], 0)
+
+        score_summary = SessionScoreSummaryService.build(session_id=self.session.id)
+        self.assertEqual(float(score_summary["avg_score"]), 0.0)
+        self.assertEqual(float(score_summary["min_score"]), 0.0)
+        self.assertEqual(float(score_summary["max_score"]), 0.0)
+
+        analytics = build_teacher_enterprise_analytics(
+            tenant=self.tenant,
+            days=365,
+        )
+        self.assertEqual(analytics["summary"]["scored_count"], 0)
+        self.assertIsNone(analytics["summary"]["avg_score_pct"])
+        self.assertEqual(analytics["top_exams"], [])
+        self.assertEqual(analytics["weak_questions"], [])
+
+    def test_reconcile_command_dry_run_then_retracts_historical_projections(self):
+        legacy, _canonical = self._grade_objective_only()
+        legacy.status = ExamResult.Status.FINAL
+        legacy.save(update_fields=["status", "updated_at"])
+        progress = SessionProgress.objects.create(
+            enrollment=self.enrollment,
+            session=self.session,
+            exam_attempted=True,
+            exam_aggregate_score=80,
+            exam_passed=True,
+        )
+        link = ClinicLink.objects.create(
+            tenant=self.tenant,
+            enrollment=self.enrollment,
+            session=self.session,
+            reason=ClinicLink.Reason.AUTO_FAILED,
+            is_auto=True,
+            source_type="exam",
+            source_id=self.exam.id,
+        )
+
+        session_request = self.factory.get(
+            f"/results/admin/sessions/{self.session.id}/exams/summary/"
+        )
+        session_request.tenant = self.tenant
+        force_authenticate(session_request, user=self.staff)
+        session_response = AdminSessionExamsSummaryView.as_view()(
+            session_request,
+            session_id=self.session.id,
+        )
+        self.assertEqual(session_response.status_code, 200, session_response.data)
+        self.assertEqual(float(session_response.data["pass_rate"]), 0.0)
+        self.assertEqual(float(session_response.data["clinic_rate"]), 0.0)
+
+        exam_request = self.factory.get(
+            f"/results/admin/exams/{self.exam.id}/summary/"
+        )
+        exam_request.tenant = self.tenant
+        force_authenticate(exam_request, user=self.staff)
+        exam_response = AdminExamSummaryView.as_view()(
+            exam_request,
+            exam_id=self.exam.id,
+        )
+        self.assertEqual(exam_response.data["clinic_count"], 0)
+
+        dry_output = StringIO()
+        call_command(
+            "reconcile_mixed_omr_projections",
+            tenant=self.tenant.id,
+            stdout=dry_output,
+            as_json=True,
+        )
+        dry_payload = json.loads(dry_output.getvalue())
+        self.assertTrue(dry_payload["dry_run"])
+        self.assertEqual(dry_payload["pending_result_count"], 1)
+        self.assertEqual(dry_payload["stale_progress_count"], 1)
+        self.assertEqual(dry_payload["stale_clinic_count"], 1)
+        progress.refresh_from_db()
+        link.refresh_from_db()
+        self.assertEqual(float(progress.exam_aggregate_score), 80.0)
+        self.assertTrue(progress.exam_passed)
+        self.assertIsNone(link.resolved_at)
+
+        apply_output = StringIO()
+        call_command(
+            "reconcile_mixed_omr_projections",
+            tenant=self.tenant.id,
+            apply=True,
+            stdout=apply_output,
+            as_json=True,
+        )
+        apply_payload = json.loads(apply_output.getvalue())
+        self.assertFalse(apply_payload["dry_run"])
+        self.assertEqual(apply_payload["reconciled_count"], 1)
+        progress.refresh_from_db()
+        link.refresh_from_db()
+        self.assertIsNone(progress.exam_aggregate_score)
+        self.assertFalse(progress.exam_passed)
+        self.assertEqual(
+            progress.exam_meta["exams"][0]["grading_status"],
+            "subjective_pending",
+        )
+        self.assertIsNotNone(link.resolved_at)
+        self.assertEqual(
+            link.resolution_type,
+            ClinicLink.ResolutionType.GRADING_RETRACTED,
+        )
 
     def test_objective_only_mixed_omr_does_not_create_clinic_projection(self):
         self._grade_objective_only()
@@ -485,12 +715,91 @@ class MixedOmrSubjectiveProjectionPostgresTests(TestCase):
             )
 
         self.assertEqual(response.status_code, 200, response.data)
+        self.assertTrue(response.data["ok"])
+        self.assertTrue(response.data["saved"])
+        self.assertTrue(response.data["projection_ready"])
         self.assertIsNone(response.data["grading_status"])
         legacy.refresh_from_db()
         canonical.refresh_from_db()
         self.assertEqual(legacy.status, ExamResult.Status.FINAL)
         self.assertEqual(float(legacy.total_score), 100.0)
         self.assertEqual(float(canonical.total_score), 100.0)
+        dispatch.assert_called_once_with(submission_id=self.submission.id)
+
+    def test_objective_quick_edit_saves_but_does_not_claim_final_success(self):
+        legacy, _canonical = self._grade_objective_only()
+        ScoreEditDraft.objects.create(
+            tenant=self.tenant,
+            session=self.session,
+            editor_user=self.staff,
+            client_id="mixed-omr-browser",
+            payload={"client_id": "mixed-omr-browser", "changes": []},
+        )
+        request = self.factory.patch(
+            "/results/admin/exams/objective/",
+            {"score": 75},
+            format="json",
+            HTTP_X_SCORE_EDITOR_CLIENT="mixed-omr-browser",
+            HTTP_X_SCORE_SESSION_ID=str(self.session.id),
+        )
+        request.tenant = self.tenant
+        force_authenticate(request, user=self.staff)
+
+        with patch(
+            "apps.domains.results.views.admin_exam_objective_score_view.dispatch_progress_pipeline"
+        ) as dispatch, self.captureOnCommitCallbacks(execute=True):
+            response = AdminExamObjectiveScoreView.as_view()(
+                request,
+                exam_id=self.exam.id,
+                enrollment_id=self.enrollment.id,
+            )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertFalse(response.data["ok"])
+        self.assertTrue(response.data["saved"])
+        self.assertFalse(response.data["projection_ready"])
+        self.assertEqual(response.data["grading_status"], "subjective_pending")
+        legacy.refresh_from_db()
+        self.assertEqual(legacy.status, ExamResult.Status.DRAFT)
+        dispatch.assert_not_called()
+
+    def test_total_quick_edit_is_explicit_complete_score_and_finalizes(self):
+        legacy, _canonical = self._grade_objective_only()
+        ScoreEditDraft.objects.create(
+            tenant=self.tenant,
+            session=self.session,
+            editor_user=self.staff,
+            client_id="mixed-omr-browser",
+            payload={"client_id": "mixed-omr-browser", "changes": []},
+        )
+        request = self.factory.patch(
+            "/results/admin/exams/score/",
+            {"score": 95, "max_score": 100},
+            format="json",
+            HTTP_X_SCORE_EDITOR_CLIENT="mixed-omr-browser",
+            HTTP_X_SCORE_SESSION_ID=str(self.session.id),
+        )
+        request.tenant = self.tenant
+        force_authenticate(request, user=self.staff)
+
+        with patch(
+            "apps.domains.results.views.admin_exam_total_score_view.dispatch_progress_pipeline"
+        ) as dispatch:
+            response = AdminExamTotalScoreView.as_view()(
+                request,
+                exam_id=self.exam.id,
+                enrollment_id=self.enrollment.id,
+            )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertTrue(response.data["ok"])
+        self.assertTrue(response.data["saved"])
+        self.assertTrue(response.data["projection_ready"])
+        self.assertIsNone(response.data["grading_status"])
+        legacy.refresh_from_db()
+        self.assertEqual(legacy.status, ExamResult.Status.FINAL)
+        self.assertEqual(float(legacy.total_score), 95.0)
+        self.assertEqual(float(legacy.subjective_score), 15.0)
         dispatch.assert_called_once_with(submission_id=self.submission.id)
 
     def test_completed_subjective_score_survives_objective_regrade(self):
@@ -605,6 +914,9 @@ class MixedOmrSubjectiveProjectionPostgresTests(TestCase):
             first = self._patch_item_score(question=self.essay, score=20)
             legacy.refresh_from_db()
             self.assertEqual(first.status_code, 200, first.data)
+            self.assertFalse(first.data["ok"])
+            self.assertTrue(first.data["saved"])
+            self.assertFalse(first.data["projection_ready"])
             self.assertEqual(first.data["grading_status"], "subjective_pending")
             self.assertEqual(legacy.status, ExamResult.Status.DRAFT)
             dispatch.assert_not_called()
@@ -613,6 +925,9 @@ class MixedOmrSubjectiveProjectionPostgresTests(TestCase):
 
         legacy.refresh_from_db()
         self.assertEqual(second.status_code, 200, second.data)
+        self.assertTrue(second.data["ok"])
+        self.assertTrue(second.data["saved"])
+        self.assertTrue(second.data["projection_ready"])
         self.assertIsNone(second.data["grading_status"])
         self.assertEqual(legacy.status, ExamResult.Status.FINAL)
         self.assertEqual(float(legacy.total_score), 100.0)

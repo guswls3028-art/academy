@@ -199,6 +199,18 @@ class ClinicTriggerService:
                 exam_id=exam_id,
             )
 
+            if exam_row.get("grading_status") == "subjective_pending":
+                from apps.domains.progress.services.clinic_resolution_service import (
+                    ClinicResolutionService,
+                )
+
+                ClinicResolutionService.resolve_by_pending_grading(
+                    tenant_id=int(session_progress.enrollment.tenant_id),
+                    enrollment_id=int(session_progress.enrollment_id),
+                    exam_id=exam_id,
+                )
+                continue
+
             # Missing/ungraded exams keep the session incomplete, but they are
             # not a scored failure. Creating a ClinicLink here makes multi-exam
             # sessions emit premature remediation/resolution notifications while

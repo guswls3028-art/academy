@@ -12,6 +12,9 @@ from rest_framework.permissions import IsAuthenticated
 
 from apps.domains.results.permissions import IsTeacherOrAdmin
 from apps.domains.results.models import Result
+from apps.domains.results.services.omr_subjective_completion import (
+    pending_omr_result_ids_for_ids,
+)
 from apps.domains.results.utils.exam_achievement import compute_exam_achievement_bulk
 from apps.domains.results.utils.ranking import compute_exam_rankings_batch
 from apps.domains.results.utils.initial_exam_score import (
@@ -93,6 +96,9 @@ class AdminStudentGradesView(APIView):
                 "recorded_at",
                 "attempt_id",
             )
+        )
+        pending_result_ids = pending_omr_result_ids_for_ids(
+            row["id"] for row in results
         )
         exam_ids = list({r["target_id"] for r in results})
         initial_scores = load_initial_exam_scores(
@@ -196,6 +202,7 @@ class AdminStudentGradesView(APIView):
                 "lecture_id": lecture_id, "lecture_title": lecture_title,
                 "lecture_color": lecture_color, "lecture_chip_label": lecture_chip_label,
                 "initial_score": projected_score,
+                "subjective_pending": int(r["id"]) in pending_result_ids,
             })
 
         # ── Stage 2: SSOT 유틸로 성취 일괄 계산 (ClinicLink/ExamAttempt/ExamResult 각 1쿼리)
@@ -212,6 +219,7 @@ class AdminStudentGradesView(APIView):
                 "session": row["session"],
             }
             for row in exam_rows
+            if not row["subjective_pending"]
         ]
         # admin_student_grades_view 는 exam 별로 대표 session 을 이미 선택했으므로
         # (동일 exam 이 여러 session 에 걸려도 primary 만 사용), session-agnostic 매칭.
@@ -220,7 +228,11 @@ class AdminStudentGradesView(APIView):
             items=bulk_items, use_session_filter=False, tenant=tenant,
         )
         exam_rank_maps = compute_exam_rankings_batch(
-            exam_ids=[int(row["eid"]) for row in exam_rows],
+            exam_ids=[
+                int(row["eid"])
+                for row in exam_rows
+                if not row["subjective_pending"]
+            ],
             enrollment_ids=enrollment_ids,
             tenant=tenant,
         )
@@ -233,12 +245,13 @@ class AdminStudentGradesView(APIView):
             info = row["info"]
             enroll_id = r["enrollment_id"]
             ach_data = bulk_ach.get((int(enroll_id), int(eid)), {})
-            meta_status = ach_data.get("meta_status")
+            subjective_pending = bool(row["subjective_pending"])
+            meta_status = None if subjective_pending else ach_data.get("meta_status")
             is_not_submitted = meta_status == "NOT_SUBMITTED"
             max_attempt = retake_counts.get((enroll_id, eid), 1)
             rank_info = (
                 {}
-                if is_not_submitted
+                if is_not_submitted or subjective_pending
                 else exam_rank_maps.get(int(eid), {}).get(int(enroll_id), {})
             )
 
@@ -246,11 +259,17 @@ class AdminStudentGradesView(APIView):
                 "exam_id": eid,
                 "enrollment_id": enroll_id,
                 "title": info["title"],
-                "total_score": None if is_not_submitted else row["initial_score"].total_score,
+                "total_score": (
+                    None
+                    if is_not_submitted or subjective_pending
+                    else row["initial_score"].total_score
+                ),
                 "max_score": row["initial_score"].max_score,
-                "is_pass": ach_data.get("is_pass"),
-                "achievement": ach_data.get("achievement"),
+                "is_pass": None if subjective_pending else ach_data.get("is_pass"),
+                "achievement": None if subjective_pending else ach_data.get("achievement"),
                 "meta_status": meta_status,
+                "grading_status": "subjective_pending" if subjective_pending else None,
+                "is_provisional": subjective_pending,
                 "retake_count": max_attempt,
                 "session_id": row["session_id"],
                 "session_title": row["session_title"],

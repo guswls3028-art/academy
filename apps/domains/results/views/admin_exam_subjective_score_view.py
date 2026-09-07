@@ -224,7 +224,9 @@ class AdminExamSubjectiveScoreView(APIView):
 
         return Response(
             {
-                "ok": True,
+                "ok": finalization.projection_ready,
+                "saved": True,
+                "projection_ready": finalization.projection_ready,
                 "exam_id": exam_id,
                 "enrollment_id": enrollment_id,
                 "objective_score": float(result.objective_score or 0.0),

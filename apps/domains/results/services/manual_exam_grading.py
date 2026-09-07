@@ -680,7 +680,15 @@ def apply_manual_grading(
             now=now,
             is_not_submitted=False,
         )
-        finalize_omr_result_if_ready(result_id=int(result.id))
+        finalization = finalize_omr_result_if_ready(result_id=int(result.id))
+        if not finalization.projection_ready:
+            raise ManualExamGradingError(
+                (
+                    f"{planned_row.candidate.student_name} 학생의 OMR 결과를 "
+                    "최종 확정할 수 없습니다: "
+                    f"{finalization.pending_reason or 'projection_not_ready'}"
+                )
+            )
 
     exam_id = int(exam.id)
 

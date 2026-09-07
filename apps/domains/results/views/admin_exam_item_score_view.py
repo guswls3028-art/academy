@@ -401,7 +401,9 @@ class AdminExamItemScoreView(APIView):
 
         return Response(
             {
-                "ok": True,
+                "ok": finalization.projection_ready,
+                "saved": True,
+                "projection_ready": finalization.projection_ready,
                 "exam_id": exam_id,
                 "enrollment_id": enrollment_id,
                 "question_id": question_id,

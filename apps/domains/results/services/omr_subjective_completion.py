@@ -73,7 +73,7 @@ def _attempt_has_aggregate_subjective_score(attempt: ExamAttempt) -> bool:
         if isinstance(meta.get("initial_snapshot"), dict)
         else {}
     )
-    if initial.get("source") == "admin_manual_subjective":
+    if initial.get("source") in {"admin_manual_subjective", "admin_manual_total"}:
         return True
 
     placeholder = (
@@ -147,7 +147,7 @@ def omr_subjective_completion_states(
     aggregate_attempt_ids = set(
         ResultFact.objects.filter(
             attempt_id__in=omr_attempt_ids,
-            source="manual_subjective",
+            source__in=("manual_subjective", "manual_total"),
         ).values_list("attempt_id", flat=True)
     )
 
@@ -226,6 +226,49 @@ def pending_omr_result_ids(results: Iterable[Result]) -> set[int]:
         result_id
         for result_id, state in omr_subjective_completion_states(results).items()
         if state.pending
+    }
+
+
+def pending_omr_result_ids_for_ids(result_ids: Iterable[int]) -> set[int]:
+    """Batch-load result rows and return mixed OMR snapshots not safe to publish."""
+
+    normalized_ids = {int(result_id) for result_id in result_ids if result_id}
+    if not normalized_ids:
+        return set()
+    return pending_omr_result_ids(
+        Result.objects.filter(id__in=normalized_ids, target_type="exam")
+    )
+
+
+def pending_omr_enrollment_ids_for_exams(
+    *,
+    exam_ids: Iterable[int],
+    tenant_id: int,
+    enrollment_ids: Iterable[int] | None = None,
+) -> set[int]:
+    """Return enrollments whose current exam snapshot is not projection-ready."""
+
+    normalized_exam_ids = {int(exam_id) for exam_id in exam_ids if exam_id}
+    if not normalized_exam_ids:
+        return set()
+    queryset = Result.objects.filter(
+        target_type="exam",
+        target_id__in=normalized_exam_ids,
+        enrollment__tenant_id=int(tenant_id),
+    )
+    if enrollment_ids is not None:
+        normalized_enrollment_ids = {
+            int(enrollment_id) for enrollment_id in enrollment_ids if enrollment_id
+        }
+        if not normalized_enrollment_ids:
+            return set()
+        queryset = queryset.filter(enrollment_id__in=normalized_enrollment_ids)
+    results = list(queryset)
+    pending_result_ids = pending_omr_result_ids(results)
+    return {
+        int(result.enrollment_id)
+        for result in results
+        if int(result.id) in pending_result_ids
     }
 
 

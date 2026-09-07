@@ -500,11 +500,22 @@ AI OMR 성공 콜백은 인식 fact를 저장한 뒤 같은 worker 프로세스�
 `ExamResult`도 확정 준비 상태를 검사한다. 현재 점수 구조에 답변형 문항이 없을 때만
 즉시 `FINAL`로 확정하고 진행도와 수업 분석을 갱신한다. 답변형 문항이 있으면
 객관식 OMR 점수는 교직원 입력 화면에만 보존하고, 현재 대표 attempt의 모든 답변형
-`ResultItem` 또는 명시적인 `manual_subjective` 합산 근거가 채워질 때까지
+`ResultItem` 또는 명시적인 `manual_subjective`/`manual_total` 합산 근거가 채워질 때까지
 `ExamResult=DRAFT`, `grading_status=subjective_pending`으로 유지한다. 이 상태는
 학생·학부모 결과, 석차·평균, 합불·진척, 클리닉 생성·해소, 오답 후속, 성적 알림과
 외부 성적 출력에 사용하지 않는다. 시험의 `grading_mode`가 과거 값으로 남아 있어도
 실제 문항 점수 구조를 기준으로 판단한다.
+
+학생·학부모 성적 이력에는 응시 사실과 시험명은 남기되 점수 대신
+`grading_status=subjective_pending`, `is_provisional=true`를 반환한다. 총점·합불·석차·
+문항 분석·오답·성장 추이는 비워 두며 관리자 개인 성적과 시험·차시·강의·기업 분석의
+점수 집계에서도 제외한다. 문항별 저장 API는 저장 자체와 최종 투영 준비를 구분해
+`saved=true`를 반환하고, 남은 답변형 문항이 있으면 `ok=false`,
+`projection_ready=false`로 응답한다. 모든 필수 문항 또는 명시적인 답변형/총점 합계가
+저장된 뒤에만 두 값이 `true`가 된다. OMR 검토의 `manual-edit` 응답도 객관식 재채점
+성공(`graded=true`)과 최종 성적 투영을 구분해 `projection_ready`와
+`grading_status`를 함께 반환하므로, 검토 화면은 부분 점수를 최종 채점 완료로 알리지
+않는다.
 
 서술형 입력이 끝나면 같은 transaction에서 legacy 결과를 정확히 한 번 `FINAL`로
 전환하고 commit 뒤 진행도 파이프라인을 한 번만 실행한다. 같은 attempt를 재채점할 때는
@@ -516,6 +527,18 @@ attempt 중 하나라도 현재 결과와 맞지 않거나 수동 검토가 남�
 `score_edit_lease_state`를 사용한다. worker 이미지 빌드와
 `tests/test_worker_entrypoint_imports.py`는 DRF가 없는 환경에서
 `grading_service` import가 성공해야 통과한다.
+
+과거 버전에서 이미 `FINAL` 또는 진행도·자동 클리닉으로 투영된 부분 채점은 기본
+dry-run 명령으로 테넌트와 정확한 대상 수를 먼저 확인한다.
+
+```powershell
+python manage.py reconcile_mixed_omr_projections --tenant <tenant-id> --json
+python manage.py reconcile_mixed_omr_projections --tenant <tenant-id> --apply --json
+```
+
+적용 모드는 해당 테넌트의 `subjective_pending` OMR에 연결된 학생×차시만 재계산한다.
+잘못 생성된 자동 클리닉 링크는 삭제하지 않고
+`resolution_type=GRADING_RETRACTED` 감사 이력으로 닫으며 알림은 보내지 않는다.
 
 문항 순서는 유형별 블록으로 재정렬하지 않는다. 예를 들어
 `1 객관식 / 2 숫자 단답형 / 3 객관식`은 그대로 반환한다. 각 문항에는

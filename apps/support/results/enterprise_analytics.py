@@ -13,6 +13,9 @@ from django.utils import timezone
 
 from apps.domains.exams.models import Exam, ExamLecturePolicy
 from apps.domains.results.models import Result, ResultFact, ResultItem
+from apps.domains.results.services.omr_subjective_completion import (
+    pending_omr_result_ids_for_ids,
+)
 from apps.domains.results.utils.initial_exam_score import (
     load_initial_exam_scores,
     project_initial_exam_score,
@@ -381,6 +384,12 @@ def build_teacher_enterprise_analytics(*, tenant: Any, days: int = 180) -> dict[
         for row in result_rows
         if int(row["target_id"]) not in explicit_exam_ids
         or (int(row["enrollment_id"]), int(row["target_id"])) in explicit_target_pairs
+    ]
+    pending_result_ids = pending_omr_result_ids_for_ids(
+        row["id"] for row in result_rows
+    )
+    result_rows = [
+        row for row in result_rows if int(row["id"]) not in pending_result_ids
     ]
     lecture_pass_scores = {
         (int(row["exam_id"]), int(row["lecture_id"])): float(row["pass_score"])
