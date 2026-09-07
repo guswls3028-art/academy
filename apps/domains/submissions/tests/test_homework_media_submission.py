@@ -26,7 +26,7 @@ from apps.domains.lectures.test_support import (
     create_lecture_fixture,
     create_session_fixture,
 )
-from apps.domains.parents.models import Parent
+from apps.domains.parents.services import ensure_parent_account_for_student
 from apps.domains.students.test_support import create_student_fixture
 from apps.domains.submissions.models import Submission, SubmissionMedia
 from apps.domains.submissions.services import dispatcher
@@ -140,23 +140,14 @@ class HomeworkSubmissionMediaTests(TestCase):
         )
 
     def _link_parent(self):
-        self.parent_user = User.objects.create_user(
-            username="homework-media-parent",
-            password="pw1234",
+        result = ensure_parent_account_for_student(
             tenant=self.tenant,
-            name="학부모",
+            parent_phone="01033334444",
+            student_name=self.student.name,
+            initial_password="pw1234",
         )
-        TenantMembership.ensure_active(
-            tenant=self.tenant,
-            user=self.parent_user,
-            role="parent",
-        )
-        self.parent = Parent.objects.create(
-            tenant=self.tenant,
-            user=self.parent_user,
-            name="학부모",
-            phone="01033334444",
-        )
+        self.parent = result.parent
+        self.parent_user = result.parent.user
         self.student.parent = self.parent
         self.student.save(update_fields=["parent", "updated_at"])
 
