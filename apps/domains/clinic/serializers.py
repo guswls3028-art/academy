@@ -13,6 +13,7 @@ from apps.support.clinic.session_dependencies import (
     enrollments_for_clinic_tenant,
     lectures_for_tenant,
     sections_for_tenant,
+    student_has_current_required_clinic_target,
     storage_presigned_get_url,
 )
 
@@ -194,6 +195,8 @@ class ClinicSessionParticipantSerializer(serializers.ModelSerializer):
     session_location = serializers.SerializerMethodField()
     session_title = serializers.SerializerMethodField()
     planned_clinic_link_ids = serializers.SerializerMethodField()
+    can_self_cancel = serializers.SerializerMethodField()
+    self_cancel_reason = serializers.SerializerMethodField()
 
     # ✅ 파생 노출
     session_duration_minutes = serializers.SerializerMethodField()
@@ -249,6 +252,50 @@ class ClinicSessionParticipantSerializer(serializers.ModelSerializer):
             data.pop("completion_history", None)
             data.pop("recipient_contacts", None)
         return data
+
+    def _self_cancel_policy(self, obj):
+        from apps.domains.clinic.services import participant_self_cancel_policy
+
+        cache = self.context.setdefault("_clinic_self_cancel_policy", {})
+        if obj.pk not in cache:
+            required_cache = self.context.setdefault(
+                "_clinic_self_cancel_required_target",
+                {},
+            )
+            if obj.student_id not in required_cache:
+                required_cache[obj.student_id] = student_has_current_required_clinic_target(
+                    tenant=obj.tenant,
+                    student=obj.student,
+                )
+            cache[obj.pk] = participant_self_cancel_policy(
+                tenant=obj.tenant,
+                participant=obj,
+                has_current_required_target=required_cache[obj.student_id],
+            )
+        return cache[obj.pk]
+
+    def _self_cancel_is_staff_request(self):
+        cache_key = "_clinic_self_cancel_is_staff_request"
+        if cache_key not in self.context:
+            request = self.context.get("request")
+            self.context[cache_key] = bool(
+                request is not None
+                and is_effective_staff(
+                    getattr(request, "user", None),
+                    getattr(request, "tenant", None),
+                )
+            )
+        return self.context[cache_key]
+
+    def get_can_self_cancel(self, obj):
+        if self._self_cancel_is_staff_request():
+            return False
+        return self._self_cancel_policy(obj).allowed
+
+    def get_self_cancel_reason(self, obj):
+        if self._self_cancel_is_staff_request():
+            return "교직원은 클리닉 명단에서 취소할 수 있습니다."
+        return self._self_cancel_policy(obj).reason
 
     def get_recipient_contacts(self, obj: SessionParticipant) -> list[dict[str, str]]:
         student = obj.student

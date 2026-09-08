@@ -26,6 +26,7 @@ import sys
 from pathlib import Path
 
 import django
+import pytest
 
 
 # 워커가 의도적으로 사용하지 않는 도메인 — base.py에는 있지만 worker.py에는 없어도 OK.
@@ -113,6 +114,21 @@ def test_worker_storage_settings_honor_runtime_bucket_overrides(monkeypatch):
     assert worker_mod.R2_REGION == "test-region"
     assert worker_mod.R2_STORAGE_BUCKET == "test-storage-worker"
     assert worker_mod.R2_ADMIN_BUCKET == "test-admin-worker"
+
+
+def test_worker_settings_load_owner_tenant_id_from_runtime(monkeypatch):
+    monkeypatch.setenv("OWNER_TENANT_ID", "23")
+
+    worker_mod = _load_worker_settings_module()
+
+    assert worker_mod.OWNER_TENANT_ID == 23
+
+
+def test_worker_settings_fail_startup_for_malformed_owner_tenant_id(monkeypatch):
+    monkeypatch.setenv("OWNER_TENANT_ID", "not-an-integer")
+
+    with pytest.raises(ValueError):
+        _load_worker_settings_module()
 
 
 def test_worker_models_fk_targets_resolvable():

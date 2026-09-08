@@ -130,6 +130,34 @@ def active_students_for_clinic_tenant(tenant):
     return students_for_tenant(tenant, deleted="active")
 
 
+def student_has_current_required_clinic_target(*, tenant, student) -> bool:
+    """Return the passcard-equivalent current unresolved automatic target state."""
+    from apps.domains.enrollment.selectors import enrollments_for_tenant
+    from apps.domains.progress.models import ClinicLink
+    from apps.domains.results.utils.clinic import filter_current_clinic_links
+
+    enrollment_ids = list(
+        enrollments_for_tenant(tenant)
+        .filter(student=student, status="ACTIVE")
+        .values_list("id", flat=True)
+    )
+    if not enrollment_ids:
+        return False
+
+    links = (
+        ClinicLink.objects.filter(
+            tenant=tenant,
+            enrollment_id__in=enrollment_ids,
+            is_auto=True,
+            resolved_at__isnull=True,
+            session__lecture__tenant=tenant,
+        )
+        .select_related("session__lecture")
+        .order_by("-created_at", "-id")
+    )
+    return bool(filter_current_clinic_links(links, tenant=tenant))
+
+
 def get_student_for_clinic_request(request):
     from apps.domains.student_app.permissions import get_request_student
 
