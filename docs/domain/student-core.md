@@ -485,6 +485,24 @@ python -m pytest apps\domains\students\tests\test_student_support.py -v --tb=sho
 
 ### Student video playback controls
 
+Tenant-resolved staff can change the default `allow_skip`, `max_speed`, and
+`show_watermark` values through the ordinary video detail PATCH. An actual
+default-policy change locks the video row and increments `Video.policy_version`
+exactly once; title/order-only or no-op PATCH requests do not increment it. This
+lets the student's periodic access check reject a stale playback grant while
+avoiding needless interruption when the effective defaults did not change.
+
+For one session, staff can update skip and/or speed defaults for selected videos
+with `POST /api/v1/media/videos/bulk-policy/`. The JSON body contains the exact
+positive `session_id`, one to 500 unique positive `video_ids`, and at least one
+of `allow_skip` or `max_speed`. The action first locks the tenant-owned session
+and all active requested video rows in deterministic order. Every ID must be an
+active video in that exact tenant and session; a missing, deleted, duplicate,
+cross-session, or cross-tenant ID rejects the whole request with no writes.
+Only rows whose saved value changes are written, and each changed row increments
+`policy_version` once. Student-level `VideoAccess` overrides continue to take
+precedence over these video defaults.
+
 `FREE_REVIEW` and `PROCTORED_CLASS` decide whether monitored playback sessions
 and event writes are required. They do not erase the teacher's saved video
 controls. In every non-blocked mode, `Video.allow_skip=True` (or a student-level

@@ -191,6 +191,7 @@ class VideoViewSet(VideoPlaybackMixin, ModelViewSet):
         "update",
         "partial_update",
         "reorder",
+        "bulk_policy",
         "destroy",
         "public_session",
         "delete_folder",
@@ -211,6 +212,24 @@ class VideoViewSet(VideoPlaybackMixin, ModelViewSet):
     filter_backends = [DjangoFilterBackend, SearchFilter]
     filterset_fields = ["session", "status", "folder"]
     search_fields = ["title"]
+
+    @transaction.atomic
+    def update(self, request, *args, **kwargs):
+        return super().update(request, *args, **kwargs)
+
+    def perform_update(self, serializer):
+        locked = self.get_queryset().select_for_update().get(
+            pk=serializer.instance.pk,
+        )
+        serializer.instance = locked
+        policy_changed = any(
+            field in serializer.validated_data
+            and serializer.validated_data[field] != getattr(locked, field)
+            for field in ("allow_skip", "max_speed", "show_watermark")
+        )
+        serializer.save(
+            policy_version=locked.policy_version + (1 if policy_changed else 0),
+        )
 
     def perform_destroy(self, instance):
         """
@@ -417,6 +436,135 @@ class VideoViewSet(VideoPlaybackMixin, ModelViewSet):
         Video.objects.bulk_update(collection, ["order"], batch_size=500)
 
         return Response({"updated": len(video_ids)}, status=status.HTTP_200_OK)
+
+    @transaction.atomic
+    @action(detail=False, methods=["post"], url_path="bulk-policy")
+    def bulk_policy(self, request):
+        """Atomically update playback defaults for videos in one tenant session."""
+        session_id = request.data.get("session_id")
+        video_ids = request.data.get("video_ids")
+
+        if type(session_id) is not int or session_id <= 0:
+            return Response(
+                {"detail": "session_id는 1 이상의 정수여야 합니다."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not isinstance(video_ids, list) or not video_ids:
+            return Response(
+                {"detail": "video_ids에 한 개 이상의 영상을 보내 주세요."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(video_ids) > 500:
+            return Response(
+                {"detail": "한 번에 최대 500개 영상의 정책을 변경할 수 있습니다."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if any(type(video_id) is not int or video_id <= 0 for video_id in video_ids):
+            return Response(
+                {"detail": "video_ids는 1 이상의 정수 목록이어야 합니다."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(set(video_ids)) != len(video_ids):
+            return Response(
+                {"detail": "같은 영상을 두 번 선택할 수 없습니다."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        has_allow_skip = "allow_skip" in request.data
+        has_max_speed = "max_speed" in request.data
+        if not has_allow_skip and not has_max_speed:
+            return Response(
+                {"detail": "건너뛰기 또는 최대 배속 중 하나 이상을 선택해 주세요."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        allow_skip = request.data.get("allow_skip")
+        if has_allow_skip and type(allow_skip) is not bool:
+            return Response(
+                {"detail": "allow_skip은 true 또는 false여야 합니다."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        max_speed = request.data.get("max_speed")
+        if has_max_speed:
+            if isinstance(max_speed, bool):
+                return Response(
+                    {"detail": "max_speed는 숫자여야 합니다."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            try:
+                max_speed = normalize_video_max_speed(max_speed)
+            except ValueError:
+                return Response(
+                    {"detail": "최대 배속은 0.25 이상 5 이하의 숫자여야 합니다."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        locked_session_ids = list(
+            video_repo.session_all_queryset()
+            .select_for_update()
+            .filter(pk=session_id, lecture__tenant=request.tenant)
+            .values_list("id", flat=True)
+        )
+        if len(locked_session_ids) != 1:
+            return Response(
+                {"detail": "해당 차시를 찾을 수 없습니다."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        videos = list(
+            Video.objects.select_for_update()
+            .filter(
+                tenant=request.tenant,
+                session_id=session_id,
+                id__in=video_ids,
+            )
+            .only(
+                "id",
+                "allow_skip",
+                "max_speed",
+                "policy_version",
+                "updated_at",
+            )
+            .order_by("id")
+        )
+        if len(videos) != len(video_ids):
+            return Response(
+                {
+                    "detail": (
+                        "존재하지 않거나 삭제되었거나 다른 차시 또는 학원 소속인 "
+                        "영상이 포함되어 있습니다."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        changed = []
+        changed_at = timezone.now()
+        for video in videos:
+            next_allow_skip = allow_skip if has_allow_skip else video.allow_skip
+            next_max_speed = max_speed if has_max_speed else video.max_speed
+            if (
+                next_allow_skip == video.allow_skip
+                and next_max_speed == video.max_speed
+            ):
+                continue
+            video.allow_skip = next_allow_skip
+            video.max_speed = next_max_speed
+            video.policy_version += 1
+            video.updated_at = changed_at
+            changed.append(video)
+
+        if changed:
+            Video.objects.bulk_update(
+                changed,
+                ["allow_skip", "max_speed", "policy_version", "updated_at"],
+                batch_size=500,
+            )
+
+        return Response(
+            {"updated": len(videos), "changed": len(changed)},
+            status=status.HTTP_200_OK,
+        )
 
     # ==================================================
     # upload/init
