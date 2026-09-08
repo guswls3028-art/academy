@@ -161,6 +161,11 @@ bulk 모두 `409`로 거부하고 요청 전체를 롤백한다. 일정 변경�
   학생과 학부모 각각에게 강제로 요청한다. 응답의 `notification.targets`가 두 대상의
   접수 여부를 개별 표시한다. SMS/LMS 대체는 없으며 확정 실패 재시도는 기존 exact
   log/outbox 기반 `retry-notification`을 사용해 같은 재시도 occurrence를 중복 생성하지 않는다.
+- 림글리쉬도 같은 계약을 사용한다. 큐에는 공용 owner tenant와 승인된
+  `clinic_change` template ID를 넣고, `source_tenant_id`와 서명으로 림글리쉬를 보존한다.
+  worker는 provider 호출 직전에만 활성 channel binding과 `APPROVED`·동일 지문 template
+  binding을 림글리쉬 채널/템플릿으로 치환한다. 합성 QA는 두 수신자 enqueue·서명·라우팅만
+  확인하고 provider 실수신과 SMS/LMS를 발생시키지 않는다.
 - 교직원의 행정 취소 권한과 교직원 수신자 선택은 유지한다.
 
 ### 자동 시작 리마인더
