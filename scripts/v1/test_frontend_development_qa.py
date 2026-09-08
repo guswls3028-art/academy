@@ -661,6 +661,149 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
         self.assertIn("signal.alarm(180)", command)
         self.assertIn("timeout --kill-after=5s 210s docker exec", command)
 
+    def test_existing_tenant_inspection_reads_owned_residue_inside_atomic(self):
+        session = json.loads(
+            (ROOT / "scripts/v1/templates/ssm/frontend_development_qa.json").read_text()
+        )
+        shell_script = shlex.split(
+            session["properties"]["linux"]["commands"],
+            posix=True,
+        )[2]
+        source = shell_script.split("<<'ACADEMY_QA_PY'\n", 1)[1].rsplit(
+            "ACADEMY_QA_PY",
+            1,
+        )[0]
+        functions = [
+            node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef)
+        ]
+        namespace = {
+            "hashlib": hashlib,
+            "hmac": hmac,
+            "re": re,
+            "io": io,
+            "json": json,
+            "os": os,
+            "django": SimpleNamespace(setup=Mock()),
+        }
+        exec(
+            compile(
+                ast.Module(body=functions, type_ignores=[]),
+                "fixed-inspect-existing",
+                "exec",
+            ),
+            namespace,
+        )
+
+        class AtomicReadback:
+            depth = 0
+
+            def __call__(self):
+                return self
+
+            def __enter__(self):
+                self.depth += 1
+
+            def __exit__(self, *_args):
+                self.depth -= 1
+
+        atomic = AtomicReadback()
+        tenant = "qa-ymath-realuse-fe-456-1-fedcba654321"
+        existing = SimpleNamespace(pk=72)
+        command = Mock()
+        command._remaining_for_code.return_value = {"tenants": 1, "users": 2}
+        command._video_residue_for_code.return_value = {
+            "active_playback_sessions": 0,
+            "playback_events": 0,
+            "playback_sessions": 0,
+            "player_errors": 0,
+            "proctored_video_accesses": 0,
+            "video_accesses": 0,
+            "video_progresses": 0,
+            "videos": 0,
+            "violated_events": 0,
+        }
+        command._exact_tenant_or_fail_on_case_variant.return_value = existing
+
+        def owned_residue(subject):
+            self.assertIs(subject, existing)
+            if atomic.depth != 1:
+                raise RuntimeError("owned residue read escaped transaction.atomic")
+            return {"activity_audits": 0, "outstanding_tokens": 0}
+
+        command._owned_database_residue.side_effect = owned_residue
+        command._non_database_residue.return_value = {
+            "listeners": 0,
+            "processes": 0,
+            "r2_objects": 0,
+        }
+        bucket_keys = (
+            "R2_AI_BUCKET",
+            "R2_STORAGE_BUCKET",
+            "R2_ADMIN_BUCKET",
+            "R2_VIDEO_BUCKET",
+            "R2_EXCEL_BUCKET",
+        )
+        settings = SimpleNamespace(
+            VIDEO_BATCH_JOB_QUEUE="",
+            VIDEO_BATCH_JOB_DEFINITION="",
+            TOOLS_SQS_QUEUE_NAME="academy-v1-development-tools-queue",
+            MESSAGING_SQS_QUEUE_NAME="academy-v1-development-messaging-queue",
+            DATABASES={
+                "default": {
+                    "NAME": "academy_api_development",
+                    "USER": "academy_api_development_app",
+                }
+            },
+            **{key: "academy-development-artifacts" for key in bucket_keys},
+        )
+        modules = {
+            "django.conf": SimpleNamespace(settings=settings),
+            "django.core.management": SimpleNamespace(call_command=Mock()),
+            "django.db": SimpleNamespace(
+                transaction=SimpleNamespace(atomic=atomic),
+                connection=SimpleNamespace(cursor=Mock()),
+            ),
+            "apps.core.models": SimpleNamespace(OpsAuditLog=Mock()),
+            "apps.core.management.commands.setup_ymath_realuse_scenario": SimpleNamespace(
+                Command=lambda: command,
+                assert_isolated_runtime=Mock(),
+            ),
+        }
+        digest = "sha256:" + "b" * 64
+        release = "sha-" + "a" * 40 + "-run-123-1"
+        env = {
+            "QA_ACTION": "Inspect",
+            "QA_TENANT": tenant,
+            "QA_CAPABILITY": "a" * 64,
+            "QA_RELEASE": release,
+            "QA_DIGEST": digest,
+            "QA_SYNTHETIC_LONG_VIDEO": "false",
+            "QA_IMAGE": (
+                "809466760795.dkr.ecr.ap-northeast-2.amazonaws.com/academy-api@"
+                + digest
+            ),
+            "DJANGO_SETTINGS_MODULE": "apps.api.config.settings.development",
+            "ACADEMY_RUNTIME_ENV": "development",
+            "ACADEMY_DEVELOPMENT_RELEASE_ID": release,
+            "SOLAPI_MOCK": "true",
+            "TOSS_AUTO_BILLING_ENABLED": "false",
+            **{
+                key: "academy-v1-development-ai-queue"
+                for key in (
+                    "AI_SQS_QUEUE_NAME_LITE",
+                    "AI_SQS_QUEUE_NAME_BASIC",
+                    "AI_SQS_QUEUE_NAME_PREMIUM",
+                )
+            },
+        }
+        with patch.dict(sys.modules, modules), patch.dict(os.environ, env, clear=True):
+            result = namespace["run"]()
+
+        self.assertEqual(result["status"], "DEVELOPMENT_QA_IDENTITY_PASS")
+        self.assertEqual(result["remaining"], {"tenants": 1, "users": 2})
+        self.assertEqual(result["residue"]["activity_audits"], 0)
+        self.assertEqual(atomic.depth, 0)
+
     def test_fixed_video_state_contract_is_numeric_and_contains_no_identity_fields(self):
         session = json.loads(
             (ROOT / "scripts/v1/templates/ssm/frontend_development_qa.json").read_text()
@@ -885,7 +1028,7 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
                          "187f6ac218435d3b3f938d903153c5785db3529ace89f4e79ea9b6e1bde8ddb6")
         for path, expected in (
             ("iam/trust_frontend_development_qa.json", "aa2c1a60b63ad287c2e8caba7257beaafe5d602df66659c3093f917ad670713a"),
-            ("ssm/frontend_development_qa.json", "49ee1ba31f8583105df1b35325142f33d6f53bbb196790e5b24e6f6007418433"),
+            ("ssm/frontend_development_qa.json", "7c0aa1f5b6793a4115dc1769bbe95811fa299aa26818e498e4d8bcfaea4378a2"),
             ("ssm/frontend_development_api_port.json", "974b6bf4e518533ee0ecd14c5e82b0a5f0538813e41253940cd46a6cb5e8d173"),
         ):
             with self.subTest(path=path):
