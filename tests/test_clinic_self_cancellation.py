@@ -1,4 +1,5 @@
 import datetime
+import json
 import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -18,6 +19,9 @@ from apps.domains.messaging.alimtalk_content_builders import SOLAPI_CLINIC_CHANG
 from apps.domains.messaging.models import (
     AlimtalkChannelBinding,
     AlimtalkTemplateBinding,
+    AutoSendConfig,
+    MessageTemplate,
+    NotificationLog,
     ScheduledNotification,
 )
 from apps.domains.messaging.security import verify_tenant_binding_signature
@@ -66,6 +70,25 @@ class ClinicSelfCancellationAPITest(APITestCase, ClinicAPITestMixin):
             format="json",
             **self._headers(self.tenant),
         )
+
+    def _configure_cancel_notifications(self):
+        template = MessageTemplate.objects.create(
+            tenant=self.tenant,
+            category=MessageTemplate.Category.CLINIC,
+            name="클리닉 취소",
+            body="클리닉 예약이 취소되었습니다.",
+        )
+        AutoSendConfig.objects.create(
+            tenant=self.tenant,
+            trigger=AutoSendConfig.Trigger.CLINIC_CANCELLED,
+            template=template,
+            enabled=True,
+            message_mode="alimtalk",
+            delay_mode="immediate",
+        )
+        self.student.phone = "01011112222"
+        self.student.parent_phone = "01033334444"
+        self.student.save(update_fields=["phone", "parent_phone"])
 
     def test_required_student_cannot_cancel_only_active_booking_without_side_effects(self):
         link = self._current_required_link()
@@ -127,8 +150,8 @@ class ClinicSelfCancellationAPITest(APITestCase, ClinicAPITestMixin):
         }
 
         with patch(
-            "apps.domains.clinic.views.participant_views._send_clinic_notification",
-            return_value=notification,
+            "apps.domains.clinic.services.lifecycle.send_clinic_event_notification",
+            return_value=True,
         ) as send_notification:
             response = self._cancel(first)
 
@@ -138,8 +161,10 @@ class ClinicSelfCancellationAPITest(APITestCase, ClinicAPITestMixin):
         self.assertEqual(first.status, SessionParticipant.Status.CANCELLED)
         self.assertEqual(second.status, SessionParticipant.Status.PENDING)
         self.assertEqual(response.data["notification"], notification)
-        self.assertEqual(send_notification.call_args.args[2], "clinic_cancelled")
-        self.assertEqual(send_notification.call_args.kwargs["send_to"], "both")
+        self.assertEqual(
+            [call.kwargs["send_to"] for call in send_notification.call_args_list],
+            ["parent", "student"],
+        )
 
     def test_required_student_other_week_booking_does_not_satisfy_minimum(self):
         self._current_required_link()
@@ -167,6 +192,57 @@ class ClinicSelfCancellationAPITest(APITestCase, ClinicAPITestMixin):
         current.refresh_from_db()
         self.assertEqual(current.status, SessionParticipant.Status.BOOKED)
 
+    def test_required_student_ended_same_week_booking_does_not_satisfy_minimum(self):
+        self._current_required_link()
+        current = self.make_participant(
+            self.tenant,
+            self._session(3, 15),
+            self.student,
+            status=SessionParticipant.Status.BOOKED,
+        )
+        ended = self.make_participant(
+            self.tenant,
+            self._session(1, 9),
+            self.student,
+            status=SessionParticipant.Status.BOOKED,
+        )
+        decision_time = timezone.make_aware(datetime.datetime.combine(
+            self.week_start + datetime.timedelta(days=2),
+            datetime.time(12, 0),
+        ))
+
+        with patch("apps.domains.clinic.services.lifecycle.timezone.now", return_value=decision_time):
+            response = self._cancel(current)
+
+        self.assertEqual(response.status_code, 409, response.data)
+        current.refresh_from_db()
+        ended.refresh_from_db()
+        self.assertEqual(current.status, SessionParticipant.Status.BOOKED)
+        self.assertEqual(ended.status, SessionParticipant.Status.BOOKED)
+
+    def test_required_student_checked_out_same_week_booking_does_not_satisfy_minimum(self):
+        self._current_required_link()
+        current = self.make_participant(
+            self.tenant,
+            self._session(3, 15),
+            self.student,
+            status=SessionParticipant.Status.BOOKED,
+        )
+        inactive = self.make_participant(
+            self.tenant,
+            self._session(4, 17),
+            self.student,
+            status=SessionParticipant.Status.BOOKED,
+        )
+        inactive.checked_out_at = timezone.now()
+        inactive.save(update_fields=["checked_out_at"])
+
+        response = self._cancel(current)
+
+        self.assertEqual(response.status_code, 409, response.data)
+        current.refresh_from_db()
+        self.assertEqual(current.status, SessionParticipant.Status.BOOKED)
+
     def test_non_required_student_can_cancel_final_confirmed_booking(self):
         participant = self.make_participant(
             self.tenant,
@@ -175,8 +251,8 @@ class ClinicSelfCancellationAPITest(APITestCase, ClinicAPITestMixin):
             status=SessionParticipant.Status.BOOKED,
         )
         with patch(
-            "apps.domains.clinic.views.participant_views._send_clinic_notification",
-            return_value={"requested": 2, "failed": 0, "send_to": "both", "targets": []},
+            "apps.domains.clinic.services.lifecycle.send_clinic_event_notification",
+            return_value=True,
         ):
             response = self._cancel(participant)
 
@@ -210,8 +286,8 @@ class ClinicSelfCancellationAPITest(APITestCase, ClinicAPITestMixin):
         self.client.force_authenticate(user=parent_user)
 
         with patch(
-            "apps.domains.clinic.views.participant_views._send_clinic_notification",
-            return_value={"requested": 2, "failed": 0, "send_to": "both", "targets": []},
+            "apps.domains.clinic.services.lifecycle.send_clinic_event_notification",
+            return_value=True,
         ) as send_notification:
             response = self.client.patch(
                 f"/api/v1/clinic/participants/{participant.id}/set_status/",
@@ -222,7 +298,102 @@ class ClinicSelfCancellationAPITest(APITestCase, ClinicAPITestMixin):
             )
 
         self.assertEqual(response.status_code, 200, response.data)
-        self.assertEqual(send_notification.call_args.kwargs["send_to"], "both")
+        self.assertEqual(
+            [call.kwargs["send_to"] for call in send_notification.call_args_list],
+            ["parent", "student"],
+        )
+
+    @override_settings(OWNER_TENANT_ID=0)
+    def test_self_cancel_persists_both_target_outboxes_and_retry_is_idempotent(self):
+        self._configure_cancel_notifications()
+        participant = self.make_participant(
+            self.tenant,
+            self._session(4, 19),
+            self.student,
+            status=SessionParticipant.Status.BOOKED,
+        )
+
+        with override_settings(OWNER_TENANT_ID=self.tenant.id):
+            response = self._cancel(participant)
+
+        self.assertEqual(response.status_code, 200, response.data)
+        participant.refresh_from_db()
+        self.assertEqual(participant.status, SessionParticipant.Status.CANCELLED)
+        outboxes = list(ScheduledNotification.objects.order_by("id"))
+        self.assertEqual(len(outboxes), 2)
+        self.assertEqual({row.trigger for row in outboxes}, {"clinic_cancelled"})
+        self.assertCountEqual(
+            [row.payload["target_type"] for row in outboxes],
+            ["parent", "student"],
+        )
+        self.assertTrue(all(row.payload["message_mode"] == "alimtalk" for row in outboxes))
+        self.assertEqual(response.data["notification"]["requested"], 2)
+        self.assertEqual(response.data["notification"]["failed"], 0)
+
+        with override_settings(OWNER_TENANT_ID=self.tenant.id):
+            retry = self._cancel(participant)
+
+        self.assertEqual(retry.status_code, 200, retry.data)
+        self.assertEqual(ScheduledNotification.objects.count(), 2)
+        self.assertEqual(retry.data["status"], SessionParticipant.Status.CANCELLED)
+
+    def test_self_cancel_rolls_back_when_both_durable_targets_cannot_be_persisted(self):
+        from apps.domains.messaging import scheduled
+
+        self._configure_cancel_notifications()
+        participant = self.make_participant(
+            self.tenant,
+            self._session(4, 19),
+            self.student,
+            status=SessionParticipant.Status.BOOKED,
+        )
+        original_create = scheduled._create_scheduled_notification_unlocked
+        attempts = 0
+
+        def fail_second_outbox(**kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 2:
+                raise RuntimeError("synthetic second outbox failure")
+            return original_create(**kwargs)
+
+        with override_settings(OWNER_TENANT_ID=self.tenant.id), patch(
+            "apps.domains.messaging.scheduled._create_scheduled_notification_unlocked",
+            side_effect=fail_second_outbox,
+        ):
+            response = self._cancel(participant)
+
+        self.assertEqual(response.status_code, 503, response.data)
+        participant.refresh_from_db()
+        self.assertEqual(participant.status, SessionParticipant.Status.BOOKED)
+        self.assertEqual(ScheduledNotification.objects.count(), 0)
+
+    def test_self_cancel_queue_failure_keeps_durable_target_pending_for_automatic_retry(self):
+        self._configure_cancel_notifications()
+        participant = self.make_participant(
+            self.tenant,
+            self._session(4, 19),
+            self.student,
+            status=SessionParticipant.Status.BOOKED,
+        )
+
+        with override_settings(OWNER_TENANT_ID=self.tenant.id), patch(
+            "apps.domains.messaging.services.enqueue_alimtalk",
+            side_effect=(True, False),
+        ) as enqueue:
+            with self.captureOnCommitCallbacks(execute=True):
+                response = self._cancel(participant)
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["notification"]["requested"], 2)
+        self.assertEqual(enqueue.call_count, 2)
+        outboxes = list(ScheduledNotification.objects.order_by("id"))
+        self.assertEqual(
+            [row.status for row in outboxes],
+            [ScheduledNotification.Status.SENT, ScheduledNotification.Status.PENDING],
+        )
+        self.assertIsNotNone(outboxes[1].next_attempt_at)
+        self.assertEqual(outboxes[1].attempt_count, 1)
 
     def test_self_cancel_notification_reports_each_alimtalk_target_without_fallback(self):
         from apps.domains.clinic.views.participant_views import _send_clinic_notification
@@ -255,9 +426,8 @@ class ClinicSelfCancellationAPITest(APITestCase, ClinicAPITestMixin):
             {"target": "student", "requested": False},
         ])
 
-    def test_limglish_both_target_notifications_keep_verified_alimtalk_route_without_provider_send(self):
-        from apps.domains.clinic.views.participant_views import _send_clinic_notification
-        from apps.domains.messaging.sqs_queue import MessagingSQSQueue
+    def test_limglish_cancel_flows_through_verified_route_to_mock_provider(self):
+        from apps.worker.messaging_worker import sqs_main
         from apps.worker.messaging_worker.sqs_main import (
             _allowed_common_template_ids,
             _resolve_tenant_delivery_context,
@@ -271,6 +441,13 @@ class ClinicSelfCancellationAPITest(APITestCase, ClinicAPITestMixin):
         self.student.parent_phone = "01033334444"
         self.student.save(update_fields=["phone", "parent_phone"])
         owner = Tenant.objects.create(code="alimtalk-owner", name="Alimtalk Owner")
+        self._configure_cancel_notifications()
+        participant = self.make_participant(
+            self.tenant,
+            self._session(4, 19),
+            self.student,
+            status=SessionParticipant.Status.BOOKED,
+        )
 
         now = timezone.now()
         channel = AlimtalkChannelBinding.objects.create(
@@ -289,35 +466,6 @@ class ClinicSelfCancellationAPITest(APITestCase, ClinicAPITestMixin):
             channel_fingerprint="same-clinic-change-fingerprint",
             last_synced_at=now,
         )
-        source_template = SimpleNamespace(
-            tenant_id=self.tenant.id,
-            body="클리닉 예약 취소 안내",
-            name="클리닉 예약 취소 안내",
-            solapi_template_id="",
-            solapi_status="",
-        )
-        source_config = SimpleNamespace(
-            enabled=True,
-            message_mode="alimtalk",
-            template=source_template,
-            show_actual_time=False,
-            delay_mode="immediate",
-            delay_value=None,
-        )
-        dispatched = []
-
-        def get_config(tenant_id, trigger):
-            self.assertEqual(trigger, "clinic_cancelled")
-            return source_config if int(tenant_id) == self.tenant.id else None
-
-        def capture_dispatch(*, tenant_id, trigger, payload):
-            dispatched.append({
-                "tenant_id": tenant_id,
-                "trigger": trigger,
-                "payload": dict(payload),
-            })
-            return SimpleNamespace(status=ScheduledNotification.Status.PENDING)
-
         fake_queue = MagicMock()
         fake_queue.send_message.return_value = True
         settings_override = override_settings(
@@ -325,40 +473,85 @@ class ClinicSelfCancellationAPITest(APITestCase, ClinicAPITestMixin):
             SOLAPI_KAKAO_PF_ID="COMMON-OWNER-CHANNEL",
             MESSAGING_TENANT_BINDING_KEY="limglish-clinic-contract-key",
         )
+        def provider_mock(*args, before_provider_call=None, **kwargs):
+            del args, kwargs
+            self.assertIsNotNone(before_provider_call)
+            self.assertTrue(before_provider_call())
+            return {"status": "ok", "group_id": "provider-mock-only"}
+
         with settings_override, patch(
-            "apps.domains.messaging.selectors.get_auto_send_config",
-            side_effect=get_config,
-        ), patch(
-            "apps.domains.messaging.scheduled.dispatch_notification_now",
-            side_effect=capture_dispatch,
-        ), patch(
             "apps.domains.messaging.sqs_queue.get_queue_client",
             return_value=fake_queue,
         ), patch(
+            "apps.domains.messaging.policy.check_recipient_allowed",
+            return_value=True,
+        ), patch(
+            "academy.adapters.compute.ec2_control.ensure_messaging_worker_asg_min_capacity",
+        ), patch(
             "apps.worker.messaging_worker.sqs_main.send_one_alimtalk",
+            side_effect=provider_mock,
         ) as provider_send:
-            result = _send_clinic_notification(
-                self.tenant,
-                self.student,
-                "clinic_cancelled",
-                {"_domain_object_id": "clinic_participant:77:clinic_cancelled:1"},
-                send_to="both",
-                include_target_results=True,
-            )
-            queue = MessagingSQSQueue(wake_messaging_workers=False)
-            for item in dispatched:
-                self.assertEqual(item["tenant_id"], self.tenant.id)
-                self.assertEqual(item["trigger"], "clinic_cancelled")
-                self.assertTrue(queue.enqueue(**item["payload"]))
+            with self.captureOnCommitCallbacks(execute=True):
+                response = self._cancel(participant)
 
             route = _resolve_tenant_delivery_context(
                 owner.id,
                 self.tenant.id,
                 SOLAPI_CLINIC_CHANGE,
             )
-            provider_send.assert_not_called()
 
-        self.assertEqual(result, {
+            messages = [
+                call.kwargs["message"]
+                for call in fake_queue.send_message.call_args_list
+            ]
+            raw_messages = [
+                {
+                    "Body": json.dumps(message),
+                    "ReceiptHandle": f"receipt-{index}",
+                    "MessageId": f"message-{index}",
+                }
+                for index, message in enumerate(messages, start=1)
+            ]
+
+            def receive_message(**kwargs):
+                del kwargs
+                if raw_messages:
+                    return raw_messages.pop(0)
+                sqs_main._shutdown = True
+                return None
+
+            fake_queue.receive_message.side_effect = receive_message
+            worker_config = SimpleNamespace(
+                MESSAGING_SQS_QUEUE_NAME="clinic-cancel-worker-mock",
+                SQS_WAIT_TIME_SECONDS=0,
+                TEST_TENANT_ID=9999,
+                OWNER_TENANT_ID=owner.id,
+                SOLAPI_SENDER="0212345678",
+                SOLAPI_KAKAO_PF_ID="COMMON-OWNER-CHANNEL",
+            )
+            sqs_main._shutdown = False
+            try:
+                with patch.object(sqs_main, "load_config", return_value=worker_config), patch.object(
+                    sqs_main,
+                    "get_queue_client",
+                    return_value=fake_queue,
+                ), patch.object(
+                    sqs_main,
+                    "acquire_job_lock",
+                    return_value=True,
+                ), patch.object(
+                    sqs_main,
+                    "release_job_lock",
+                ), patch.object(
+                    sqs_main,
+                    "_record_progress",
+                ), patch.object(sqs_main.signal, "signal"):
+                    self.assertEqual(sqs_main.main(), 0)
+            finally:
+                sqs_main._shutdown = False
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["notification"], {
             "requested": 2,
             "failed": 0,
             "send_to": "both",
@@ -367,6 +560,11 @@ class ClinicSelfCancellationAPITest(APITestCase, ClinicAPITestMixin):
                 {"target": "student", "requested": True},
             ],
         })
+        participant.refresh_from_db()
+        self.assertEqual(participant.status, SessionParticipant.Status.CANCELLED)
+        outboxes = list(ScheduledNotification.objects.order_by("id"))
+        self.assertEqual(len(outboxes), 2)
+        self.assertTrue(all(row.status == ScheduledNotification.Status.SENT for row in outboxes))
         self.assertEqual(mapping.status, "APPROVED")
         self.assertEqual(_allowed_common_template_ids("clinic_cancelled"), {SOLAPI_CLINIC_CHANGE})
         self.assertEqual(route["billing_tenant_id"], self.tenant.id)
@@ -374,7 +572,6 @@ class ClinicSelfCancellationAPITest(APITestCase, ClinicAPITestMixin):
         self.assertEqual(route["channel"]["pf_id"], "VERIFIED-LIMGLISH-CHANNEL")
         self.assertEqual(route["template_id"], "APPROVED-LIMGLISH-CLINIC-CHANGE")
 
-        messages = [call.kwargs["message"] for call in fake_queue.send_message.call_args_list]
         self.assertEqual(len(messages), 2)
         self.assertCountEqual(
             [message["target_type"] for message in messages],
@@ -397,6 +594,30 @@ class ClinicSelfCancellationAPITest(APITestCase, ClinicAPITestMixin):
                     source_tenant_id=message["source_tenant_id"],
                     business_idempotency_key=message["business_idempotency_key"],
                 ))
+        self.assertEqual(provider_send.call_count, 2)
+        self.assertCountEqual(
+            [call.kwargs["pf_id"] for call in provider_send.call_args_list],
+            ["VERIFIED-LIMGLISH-CHANNEL", "VERIFIED-LIMGLISH-CHANNEL"],
+        )
+        self.assertCountEqual(
+            [call.kwargs["template_id"] for call in provider_send.call_args_list],
+            [
+                "APPROVED-LIMGLISH-CLINIC-CHANGE",
+                "APPROVED-LIMGLISH-CLINIC-CHANGE",
+            ],
+        )
+        delivery_logs = NotificationLog.objects.filter(
+            source_tenant_id=self.tenant.id,
+            notification_type="clinic_cancelled",
+            success=True,
+        )
+        self.assertEqual(delivery_logs.count(), 2)
+        self.assertCountEqual(
+            delivery_logs.values_list("target_type", flat=True),
+            ["parent", "student"],
+        )
+        participant.refresh_from_db()
+        self.assertEqual(participant.status, SessionParticipant.Status.CANCELLED)
 
     def test_resolved_stale_and_completed_links_do_not_block_final_booking(self):
         cases = []
@@ -450,8 +671,8 @@ class ClinicSelfCancellationAPITest(APITestCase, ClinicAPITestMixin):
             status=SessionParticipant.Status.BOOKED,
         )
         with patch(
-            "apps.domains.clinic.views.participant_views._send_clinic_notification",
-            return_value={"requested": 2, "failed": 0, "send_to": "both", "targets": []},
+            "apps.domains.clinic.services.lifecycle.send_clinic_event_notification",
+            return_value=True,
         ):
             response = self._cancel(participant)
 
@@ -574,14 +795,18 @@ class ClinicSelfCancellationConcurrencyTest(TransactionTestCase, ClinicTestMixin
             with outcome_lock:
                 outcomes.append(result)
 
-        threads = [
-            threading.Thread(target=cancel, args=(participant.id,))
-            for participant in self.participants
-        ]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join(timeout=10)
+        with patch(
+            "apps.domains.clinic.services.lifecycle.send_clinic_event_notification",
+            return_value=True,
+        ):
+            threads = [
+                threading.Thread(target=cancel, args=(participant.id,))
+                for participant in self.participants
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
 
         self.assertTrue(all(not thread.is_alive() for thread in threads))
         self.assertCountEqual(outcomes, ["cancelled", "blocked"])

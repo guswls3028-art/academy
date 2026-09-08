@@ -107,8 +107,42 @@ def _is_tenant_staff(request):
     )
 
 
+def _requested_student_ps(request) -> str:
+    student_ps = (request.GET.get("student_ps") or "").strip()
+    if student_ps:
+        return student_ps
+    student_ps = (request.POST.get("student_ps") or "").strip()
+    if student_ps:
+        return student_ps
+    import json
+    try:
+        body = json.loads(request.body)
+    except Exception:
+        body = {}
+    return str(body.get("student_ps") or "").strip()
+
+
+def _student_scope_profile(request):
+    user = getattr(request, "user", None)
+    tenant = getattr(request, "tenant", None)
+    if not user or not tenant:
+        return None
+    if getattr(user, "parent_profile", None) is not None:
+        from apps.domains.student_app.permissions import get_request_student
+
+        return get_request_student(request, require_explicit_parent_child=True)
+    student = getattr(user, "student_profile", None)
+    if (
+        student is not None
+        and student.tenant_id == tenant.id
+        and student.deleted_at is None
+    ):
+        return student
+    return None
+
+
 def _check_scope_permission(request, scope=None):
-    """admin scope 접근 시 스태프 권한 필수. 학생은 자기 scope만 접근."""
+    """Admin is staff-only; student scope is the exact student/selected child."""
     if scope is None:
         import json
         try:
@@ -119,18 +153,13 @@ def _check_scope_permission(request, scope=None):
     if scope == "admin" and not _is_tenant_staff(request):
         return JsonResponse({"detail": "관리자 권한이 필요합니다."}, status=403)
     if scope == "student" and not _is_tenant_staff(request):
-        # 학생은 자기 ps_number만 접근 가능
-        student_profile = getattr(request.user, "student_profile", None)
+        try:
+            student_profile = _student_scope_profile(request)
+        except Exception:
+            return JsonResponse({"detail": "선택한 자녀 정보를 확인할 수 없습니다."}, status=403)
         if not student_profile:
             return JsonResponse({"detail": "학생 정보가 없습니다."}, status=403)
-        student_ps = (request.GET.get("student_ps") or "").strip()
-        if not student_ps:
-            import json
-            try:
-                body = json.loads(request.body)
-            except Exception:
-                body = {}
-            student_ps = (body.get("student_ps") or "").strip()
+        student_ps = _requested_student_ps(request)
         if student_ps and student_ps != student_profile.ps_number:
             return JsonResponse({"detail": "다른 학생의 자료에 접근할 수 없습니다."}, status=403)
     return None  # OK
@@ -165,7 +194,10 @@ def _inventory_file_permission_error(request, inv_file):
     if _is_tenant_staff(request):
         return None
 
-    student_profile = getattr(request.user, "student_profile", None)
+    try:
+        student_profile = _student_scope_profile(request)
+    except Exception:
+        return JsonResponse({"detail": "선택한 자녀 정보를 확인할 수 없습니다."}, status=403)
     if not student_profile:
         return JsonResponse({"detail": "학생 정보가 없습니다."}, status=403)
     if inv_file.student_ps != student_profile.ps_number:
@@ -315,7 +347,6 @@ class FolderCreateView(View):
         perm_err = _check_scope_permission(request, scope)
         if perm_err:
             return perm_err
-
         tenant = request.tenant
         parent = None
         pid = None
@@ -361,6 +392,11 @@ class FileUploadView(View):
         perm_err = _check_scope_permission(request, scope)
         if perm_err:
             return perm_err
+        scope_student = (
+            _student_scope_profile(request)
+            if scope == "student" and not _is_tenant_staff(request)
+            else None
+        )
 
         folder_id = request.POST.get("folder_id")
         display_name = (request.POST.get("display_name") or "").strip()
@@ -416,6 +452,7 @@ class FileUploadView(View):
                     user=request.user,
                     student_ps=student_ps,
                     payload=request.POST,
+                    student=scope_student,
                 )
             except ValueError as exc:
                 return JsonResponse({"detail": str(exc)}, status=400)

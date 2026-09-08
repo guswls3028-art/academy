@@ -329,6 +329,243 @@ class TestScopedPostMappingVisibility(CommunityHardeningFixture):
 
 
 class TestParentCommunityReadOnly(CommunityHardeningFixture):
+    @patch("apps.infrastructure.storage.r2.generate_presigned_get_url_storage")
+    @patch("apps.infrastructure.storage.r2.upload_fileobj_to_r2_storage")
+    def test_parent_selected_child_can_create_questions_counsel_and_attach(
+        self,
+        upload_file,
+        presign,
+    ):
+        presign.return_value = "https://storage.example/parent-question.pdf"
+        create = PostViewSet.as_view({"post": "create"})
+        created_posts = []
+        for post_type in ("qna", "counsel"):
+            response = create(
+                self._request(
+                    "post",
+                    self.parent_user,
+                    "/api/v1/community/posts/",
+                    {
+                        "title": f"Parent {post_type}",
+                        "content": "selected child request",
+                        "post_type": post_type,
+                        "node_ids": [],
+                    },
+                    HTTP_X_STUDENT_ID=str(self.student.id),
+                )
+            )
+            self.assertEqual(response.status_code, 201, response.data)
+            post = PostEntity.objects.get(pk=response.data["id"])
+            self.assertEqual(post.created_by_id, self.student.id)
+            self.assertEqual(post.author_role, "parent")
+            self.assertEqual(post.status, "published")
+            created_posts.append(post)
+
+        qna = created_posts[0]
+        upload = PostViewSet.as_view({"post": "upload_attachments"})
+        upload_response = upload(
+            self._request(
+                "post",
+                self.parent_user,
+                f"/api/v1/community/posts/{qna.id}/attachments/",
+                {
+                    "files": [
+                        SimpleUploadedFile(
+                            "question.pdf",
+                            b"%PDF-parent-question",
+                            content_type="application/pdf",
+                        )
+                    ]
+                },
+                format="multipart",
+                HTTP_X_STUDENT_ID=str(self.student.id),
+            ),
+            pk=qna.id,
+        )
+        self.assertEqual(upload_response.status_code, 201, upload_response.data)
+        attachment = PostAttachment.objects.get(post=qna)
+        self.assertEqual(attachment.original_name, "question.pdf")
+        self.assertIn(
+            f"tenants/{self.tenant.id}/community/posts/{qna.id}/",
+            attachment.r2_key,
+        )
+        upload_file.assert_called_once()
+
+        retrieve = PostViewSet.as_view({"get": "retrieve"})
+        reload_response = retrieve(
+            self._request(
+                "get",
+                self.parent_user,
+                f"/api/v1/community/posts/{qna.id}/",
+                HTTP_X_STUDENT_ID=str(self.student.id),
+            ),
+            pk=qna.id,
+        )
+        self.assertEqual(reload_response.status_code, 200, reload_response.data)
+        self.assertEqual(
+            [item["id"] for item in reload_response.data["attachments"]],
+            [attachment.id],
+        )
+
+        delete_attachment = PostViewSet.as_view({"delete": "delete_attachment"})
+        with patch(
+            "apps.infrastructure.storage.r2.delete_object_r2_storage"
+        ) as delete_file:
+            delete_attachment_response = delete_attachment(
+                self._request(
+                    "delete",
+                    self.parent_user,
+                    (
+                        f"/api/v1/community/posts/{qna.id}/attachments/"
+                        f"{attachment.id}/"
+                    ),
+                    HTTP_X_STUDENT_ID=str(self.student.id),
+                ),
+                pk=qna.id,
+                att_id=attachment.id,
+            )
+        self.assertEqual(delete_attachment_response.status_code, 204)
+        delete_file.assert_called_once_with(key=attachment.r2_key)
+
+        destroy = PostViewSet.as_view({"delete": "destroy"})
+        for post in created_posts:
+            delete_response = destroy(
+                self._request(
+                    "delete",
+                    self.parent_user,
+                    f"/api/v1/community/posts/{post.id}/",
+                    HTTP_X_STUDENT_ID=str(self.student.id),
+                ),
+                pk=post.id,
+            )
+            self.assertEqual(delete_response.status_code, 204, delete_response.data)
+        self.assertFalse(
+            PostEntity.objects.filter(id__in=[post.id for post in created_posts]).exists()
+        )
+
+    def test_parent_community_writes_require_exact_owned_selected_child(self):
+        other_student_user = User.objects.create_user(
+            username="comm_unowned_write",
+            password="pw1234",
+            tenant=self.tenant,
+            name="Unowned",
+        )
+        TenantMembership.ensure_active(
+            tenant=self.tenant,
+            user=other_student_user,
+            role="student",
+        )
+        unowned = Student.objects.create(
+            tenant=self.tenant,
+            user=other_student_user,
+            ps_number="S-WRITE-OTHER",
+            name="Unowned",
+            omr_code="77770000",
+        )
+        foreign_user = User.objects.create_user(
+            username="comm_foreign_write",
+            password="pw1234",
+            tenant=self.other_tenant,
+            name="Foreign",
+        )
+        foreign = Student.objects.create(
+            tenant=self.other_tenant,
+            user=foreign_user,
+            ps_number="S-WRITE-FOREIGN",
+            name="Foreign",
+            omr_code="77770002",
+        )
+        create = PostViewSet.as_view({"post": "create"})
+        for selected_id in (None, unowned.id, foreign.id):
+            extra = {}
+            if selected_id is not None:
+                extra["HTTP_X_STUDENT_ID"] = str(selected_id)
+            response = create(
+                self._request(
+                    "post",
+                    self.parent_user,
+                    "/api/v1/community/posts/",
+                    {
+                        "title": f"Denied {selected_id}",
+                        "content": "must not persist",
+                        "post_type": "qna",
+                    },
+                    **extra,
+                )
+            )
+            self.assertEqual(response.status_code, 403, response.data)
+        self.assertFalse(PostEntity.objects.filter(title__startswith="Denied ").exists())
+
+        forged_author = create(
+            self._request(
+                "post",
+                self.parent_user,
+                "/api/v1/community/posts/",
+                {
+                    "title": "Server-owned author",
+                    "content": "forged author must be ignored",
+                    "post_type": "qna",
+                    "created_by": unowned.id,
+                },
+                HTTP_X_STUDENT_ID=str(self.student.id),
+            )
+        )
+        self.assertEqual(forged_author.status_code, 201, forged_author.data)
+        forged_post = PostEntity.objects.get(pk=forged_author.data["id"])
+        self.assertEqual(forged_post.created_by_id, self.student.id)
+        self.assertEqual(forged_post.author_role, "parent")
+
+        sibling_user = User.objects.create_user(
+            username="comm_sibling_write",
+            password="pw1234",
+            tenant=self.tenant,
+            name="Sibling",
+        )
+        TenantMembership.ensure_active(
+            tenant=self.tenant,
+            user=sibling_user,
+            role="student",
+        )
+        sibling = Student.objects.create(
+            tenant=self.tenant,
+            user=sibling_user,
+            parent=self.parent,
+            ps_number="S-WRITE-SIBLING",
+            name="Sibling",
+            omr_code="77770001",
+        )
+        sibling_qna = PostEntity.objects.create(
+            tenant=self.tenant,
+            post_type="qna",
+            title="Sibling qna",
+            content="private",
+            created_by=sibling,
+            author_role="parent",
+            status="published",
+        )
+        upload = PostViewSet.as_view({"post": "upload_attachments"})
+        response = upload(
+            self._request(
+                "post",
+                self.parent_user,
+                f"/api/v1/community/posts/{sibling_qna.id}/attachments/",
+                {
+                    "files": [
+                        SimpleUploadedFile(
+                            "wrong-child.pdf",
+                            b"%PDF-denied",
+                            content_type="application/pdf",
+                        )
+                    ]
+                },
+                format="multipart",
+                HTTP_X_STUDENT_ID=str(self.student.id),
+            ),
+            pk=sibling_qna.id,
+        )
+        self.assertEqual(response.status_code, 404, response.data)
+        self.assertFalse(PostAttachment.objects.filter(post=sibling_qna).exists())
+
     def test_limited_reader_scope_nodes_follow_active_enrollment(self):
         view = ScopeNodeViewSet.as_view({"get": "list"})
 

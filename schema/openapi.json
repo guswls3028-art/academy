@@ -21598,7 +21598,7 @@
     },
     "/api/v1/community/posts/{id}/": {
       "delete": {
-        "description": "학생은 본인 글만 삭제 가능. 학부모는 삭제 불가.",
+        "description": "학생/학부모는 현재 학생 컨텍스트의 본인 글만 삭제 가능.",
         "operationId": "community_posts_destroy",
         "parameters": [
           {
@@ -21724,7 +21724,7 @@
         ]
       },
       "put": {
-        "description": "학생은 본인 글만 수정 가능. 학부모는 수정 불가.",
+        "description": "학생/학부모는 현재 학생 컨텍스트의 본인 글만 수정 가능.",
         "operationId": "community_posts_update",
         "parameters": [
           {

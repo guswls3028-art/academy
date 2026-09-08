@@ -1407,6 +1407,7 @@ class StudentVideoProgressView(APIView):
     def post(self, request, video_id: int):
         Video, _VideoPermission = _import_media_models()
         VideoProgress = get_video_progress_model()
+        request_student = get_request_student(request)
 
         explicit_enrollment_id = _get_explicit_enrollment_id(request, include_body=True)
 
@@ -1432,13 +1433,10 @@ class StudentVideoProgressView(APIView):
         enrollment = access_context.enrollment
         if enrollment is None:
             return _progress_echo_response(video_id=video.id, enrollment_id=0, request=request)
-
-        # 학부모: 영상 시청은 가능하나 진행률 기록 저장 안 함 (읽기 전용)
-        if getattr(request.user, "parent_profile", None) is not None:
-            return _progress_echo_response(
-                video_id=video.id,
-                enrollment_id=enrollment.id,
-                request=request,
+        if enrollment.student_id != request_student.id:
+            return Response(
+                {"detail": "선택한 자녀의 수강 정보가 아닙니다.", "code": "student_mismatch"},
+                status=status.HTTP_403_FORBIDDEN,
             )
 
         # 진행률 업데이트 또는 생성

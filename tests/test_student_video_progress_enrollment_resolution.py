@@ -273,6 +273,32 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
             school_type="HIGH",
         )
 
+    def _create_cross_tenant_student(self):
+        foreign_tenant = Tenant.objects.create(
+            name="Student Video Foreign",
+            code="student_video_progress_foreign",
+            is_active=True,
+        )
+        child_user = User.objects.create_user(
+            username="student-video-progress-foreign",
+            password="testpass123",
+            tenant=foreign_tenant,
+        )
+        TenantMembership.ensure_active(
+            tenant=foreign_tenant,
+            user=child_user,
+            role="student",
+        )
+        return Student.objects.create(
+            tenant=foreign_tenant,
+            user=child_user,
+            name="Foreign Video Student",
+            ps_number="SVP-FOREIGN",
+            omr_code="SVFOREIGN",
+            parent_phone="01012345678",
+            school_type="HIGH",
+        )
+
     def test_invalid_parent_child_headers_fail_closed_across_media_reads(self):
         unowned_student = self._create_unowned_student()
 
@@ -314,8 +340,14 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
 
     def test_invalid_parent_child_headers_reject_media_writes_without_mutation(self):
         unowned_student = self._create_unowned_student()
+        foreign_student = self._create_cross_tenant_student()
 
-        for raw_student_id in ("not-a-student-id", unowned_student.id, ""):
+        for raw_student_id in (
+            "not-a-student-id",
+            unowned_student.id,
+            foreign_student.id,
+            "",
+        ):
             with self.subTest(raw_student_id=raw_student_id):
                 responses = [
                     self._post_progress(
@@ -2446,7 +2478,7 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertFalse(VideoProgress.objects.filter(video=self.video).exists())
 
-    def test_parent_progress_echo_uses_child_video_enrollment_without_saving(self):
+    def test_parent_progress_persists_for_selected_child_and_survives_reload(self):
         response = self._post_progress(
             {"progress": 90, "last_position": 90, "completed": True},
             user=self.parent_user,
@@ -2457,7 +2489,27 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
         self.assertEqual(response.data["enrollment_id"], self.target_enrollment.id)
         self.assertEqual(response.data["progress_percent"], 90)
         self.assertTrue(response.data["completed"])
-        self.assertFalse(VideoProgress.objects.filter(video=self.video).exists())
+        progress = VideoProgress.objects.get(
+            video=self.video,
+            enrollment=self.target_enrollment,
+        )
+        self.assertEqual(progress.progress, 0.9)
+        self.assertTrue(progress.completed)
+        self.assertEqual(progress.last_position, 90)
+
+        reload_response = self._get_session_videos(
+            user=self.parent_user,
+            enrollment_id=self.target_enrollment.id,
+            selected_student_id=self.student.id,
+        )
+        self.assertEqual(reload_response.status_code, 200, reload_response.data)
+        reloaded = next(
+            row
+            for row in reload_response.data["items"]
+            if row["id"] == self.video.id
+        )
+        self.assertEqual(reloaded["progress"], 90)
+        self.assertTrue(reloaded["completed"])
 
     def test_parent_progress_echo_uses_domain_completion_threshold(self):
         response = self._post_progress(
@@ -2469,9 +2521,14 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(response.data["enrollment_id"], self.target_enrollment.id)
         self.assertTrue(response.data["completed"])
-        self.assertFalse(VideoProgress.objects.filter(video=self.video).exists())
+        progress = VideoProgress.objects.get(
+            video=self.video,
+            enrollment=self.target_enrollment,
+        )
+        self.assertEqual(progress.progress, 0.9)
+        self.assertFalse(progress.completed)
 
-    def test_parent_progress_echo_finds_child_enrollment_when_default_child_differs(self):
+    def test_parent_progress_requires_explicit_selected_child_when_multiple_children_exist(self):
         self._create_parent_child("002")
 
         response = self._post_progress(
@@ -2479,18 +2536,16 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
             user=self.parent_user,
         )
 
-        self.assertEqual(response.status_code, 200, response.data)
-        self.assertEqual(response.data["enrollment_id"], self.target_enrollment.id)
+        self.assertEqual(response.status_code, 403, response.data)
         self.assertFalse(VideoProgress.objects.filter(video=self.video).exists())
 
-    def test_parent_progress_echo_accepts_explicit_child_enrollment_without_saving(self):
+    def test_parent_progress_rejects_body_enrollment_without_selected_child_header(self):
         response = self._post_progress(
             {"enrollment_id": self.target_enrollment.id, "progress": 90, "completed": True},
             user=self.parent_user,
         )
 
-        self.assertEqual(response.status_code, 200, response.data)
-        self.assertEqual(response.data["enrollment_id"], self.target_enrollment.id)
+        self.assertEqual(response.status_code, 403, response.data)
         self.assertFalse(VideoProgress.objects.filter(video=self.video).exists())
 
     def test_parent_progress_echo_rejects_explicit_enrollment_for_different_selected_child(self):

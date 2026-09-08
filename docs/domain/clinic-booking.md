@@ -150,17 +150,22 @@ bulk 모두 `409`로 거부하고 요청 전체를 롤백한다. 일정 변경�
 
 - 패스카드와 같은 현재 유효·미해결 자동 `ClinicLink`가 없으면 마지막 예약도 취소할 수 있다.
 - 현재 필수 대상이면 취소할 예약의 `Session.date`가 속한 월요일~일요일에
-  `pending|booked` 예약을 최소 1개 남겨야 한다. 같은 주 활성 예약이 2개 이상일 때만
-  하나를 취소할 수 있으며 다른 주 예약은 이 수에 포함하지 않는다.
+  취소 대상 이외의 `pending|booked` 예약을 최소 1개 남겨야 한다. 남는 예약은 현재
+  시각에 아직 종료되지 않았고 `checked_out_at`·`completed_at`이 없는 활성 일정이어야
+  한다. 이미 끝난 session/time, 하원·완료 예약과 다른 주 예약은 이 수에 포함하지 않는다.
 - 해소된 링크, 원본 시험·과제가 차시에서 제거된 stale 링크, 비활성 수강 또는
   완료된 차시의 링크는 필수 대상으로 세지 않는다.
 - self-service 취소는 학생 row를 먼저 잠근 뒤 주간 활성 예약 수를 다시 읽으므로
   두 예약을 동시에 취소해도 하나만 성공하고 하나는 `409`로 끝난다. 차단된 요청은
   참가자·오늘 계획·미발송 리마인더·알림 outbox를 전혀 바꾸지 않는다.
-- 성공한 취소는 상태와 계획/리마인더 정리를 먼저 커밋하고, `clinic_cancelled` 알림톡을
-  학생과 학부모 각각에게 강제로 요청한다. 응답의 `notification.targets`가 두 대상의
-  접수 여부를 개별 표시한다. SMS/LMS 대체는 없으며 확정 실패 재시도는 기존 exact
-  log/outbox 기반 `retry-notification`을 사용해 같은 재시도 occurrence를 중복 생성하지 않는다.
+- 성공한 직접 취소는 참가자 상태·계획/리마인더 정리와 학생/학부모 각각의
+  `clinic_cancelled` durable outbox 두 행을 같은 DB transaction에 저장한다. 둘 중 하나라도
+  접수할 수 없으면 `503 clinic_notification_outbox_unavailable`로 전체를 롤백한다.
+  transaction commit 뒤 SQS/provider 경로가 실패하면 취소는 유지되고 outbox가
+  `pending`과 다음 재시도 시각을 보존하므로 조교의 정상 수동 개입을 요구하지 않는다.
+  같은 취소 PATCH 재시도는 `200`으로 현재 취소 상태를 반환하고 outbox를 중복 생성하지
+  않는다. 응답의 `notification.targets`가 최초 두 접수 또는 이미 접수된 재시도를
+  대상별로 표시한다. SMS/LMS 대체는 없다.
 - 림글리쉬도 같은 계약을 사용한다. 큐에는 공용 owner tenant와 승인된
   `clinic_change` template ID를 넣고, `source_tenant_id`와 서명으로 림글리쉬를 보존한다.
   worker는 provider 호출 직전에만 활성 channel binding과 `APPROVED`·동일 지문 template

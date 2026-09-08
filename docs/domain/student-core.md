@@ -464,8 +464,16 @@ still run before any submission row or object-store write.
 The resulting `Submission.user` is the selected student's User so grades, pending
 work, teacher review, and reload projections remain identical to a student-authored
 submission. When the authenticated actor is the parent, the submission metadata
-records `submitted_by_user_id`. Parent permissions remain read-only for profile,
-reported-score source, inventory, question, and counseling mutations.
+records `submitted_by_user_id`.
+
+The same exact selected-child rule applies to community question/counsel writes,
+student inventory and reported-score evidence, and video progress. These writes
+persist to the selected child's ordinary rows so the parent, student, and staff
+reload projections agree. Reported scores preserve the parent as `submitted_by`;
+community posts preserve `author_role=parent`. A parent video progress POST no
+longer returns an unsaved echo. Missing, stale, sibling-selected, unlinked, deleted,
+or cross-tenant child context fails before mutation. Profile, account identity,
+password, and administrator-only settings remain outside delegated learning access.
 
 ## 7. Minimum Change Gate
 

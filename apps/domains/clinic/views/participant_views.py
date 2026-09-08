@@ -424,7 +424,7 @@ class ParticipantViewSet(
             is_late=is_late,
         )
         obj = result.participant
-        notification_result = None
+        notification_result = result.notification_result
         if result.notification:
             notification_result = _send_clinic_notification(
                 getattr(request, "tenant", None),

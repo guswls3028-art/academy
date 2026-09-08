@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
+from django.apps import apps
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
@@ -15,6 +16,8 @@ from apps.domains.inventory.views import (
     FileDeleteView,
     FileUploadView,
     FolderCreateView,
+    FolderDeleteView,
+    InventoryListView,
     PresignView,
     QuotaView,
 )
@@ -22,6 +25,7 @@ from apps.domains.students.models import Student
 
 
 User = get_user_model()
+Parent = apps.get_model("parents", "Parent")
 
 
 class InventoryHardeningViewTests(TestCase):
@@ -46,6 +50,29 @@ class InventoryHardeningViewTests(TestCase):
             omr_code="12345678",
             name="학생",
         )
+        TenantMembership.ensure_active(
+            tenant=self.tenant,
+            user=self.student_user,
+            role="student",
+        )
+        self.parent_user = User.objects.create_user(
+            username="inv-hard-parent",
+            password="test1234",
+            tenant=self.tenant,
+        )
+        TenantMembership.ensure_active(
+            tenant=self.tenant,
+            user=self.parent_user,
+            role="parent",
+        )
+        self.parent = Parent.objects.create(
+            tenant=self.tenant,
+            user=self.parent_user,
+            name="학부모",
+            phone="01099998888",
+        )
+        self.student.parent = self.parent
+        self.student.save(update_fields=["parent"])
         self.other_student_user = User.objects.create_user(
             username="inv-hard-student-2",
             password="test1234",
@@ -71,6 +98,159 @@ class InventoryHardeningViewTests(TestCase):
 
     def _auth(self, user):
         return patch("apps.domains.inventory.views.JWTAuthentication.authenticate", return_value=(user, None))
+
+    def test_parent_selected_child_can_manage_inventory_and_staff_sees_same_projection(self):
+        create_request = self.factory.post(
+            "/storage/inventory/folders/",
+            data=json.dumps({
+                "scope": "student",
+                "student_ps": self.student.ps_number,
+                "name": "학부모 제출",
+            }),
+            content_type="application/json",
+            HTTP_X_STUDENT_ID=str(self.student.id),
+        )
+        create_request.tenant = self.tenant
+        with self._auth(self.parent_user):
+            created = FolderCreateView.as_view()(create_request)
+        self.assertEqual(created.status_code, 200, created.content)
+        folder_id = int(json.loads(created.content)["id"])
+
+        upload_request = self.factory.post(
+            "/storage/inventory/upload/",
+            data={
+                "scope": "student",
+                "student_ps": self.student.ps_number,
+                "folder_id": str(folder_id),
+                "file": SimpleUploadedFile(
+                    "parent-note.pdf",
+                    b"%PDF-parent-note",
+                    content_type="application/pdf",
+                ),
+            },
+            format="multipart",
+            HTTP_X_STUDENT_ID=str(self.student.id),
+        )
+        upload_request.tenant = self.tenant
+        with self._auth(self.parent_user), patch(
+            "apps.domains.inventory.views.upload_fileobj_to_r2_storage"
+        ) as upload_r2:
+            uploaded = FileUploadView.as_view()(upload_request)
+        self.assertEqual(uploaded.status_code, 200, uploaded.content)
+        upload_r2.assert_called_once()
+        file_id = int(json.loads(uploaded.content)["id"])
+
+        for user in (self.parent_user, self.staff):
+            list_request = self.factory.get(
+                "/storage/inventory/",
+                {"scope": "student", "student_ps": self.student.ps_number},
+                HTTP_X_STUDENT_ID=str(self.student.id),
+            )
+            list_request.tenant = self.tenant
+            with self._auth(user):
+                listed = InventoryListView.as_view()(list_request)
+            self.assertEqual(listed.status_code, 200, listed.content)
+            self.assertEqual([int(row["id"]) for row in json.loads(listed.content)["files"]], [file_id])
+
+        delete_file_request = self.factory.delete(
+            (
+                f"/storage/inventory/files/{file_id}/?scope=student"
+                f"&student_ps={self.student.ps_number}"
+            ),
+            HTTP_X_STUDENT_ID=str(self.student.id),
+        )
+        delete_file_request.tenant = self.tenant
+        with self._auth(self.parent_user), patch(
+            "apps.domains.inventory.views.delete_object_r2_storage"
+        ) as delete_r2:
+            deleted_file = FileDeleteView.as_view()(delete_file_request, file_id=file_id)
+        self.assertEqual(deleted_file.status_code, 204, deleted_file.content)
+        delete_r2.assert_called_once()
+
+        delete_folder_request = self.factory.delete(
+            (
+                f"/storage/inventory/folders/{folder_id}/?scope=student"
+                f"&student_ps={self.student.ps_number}"
+            ),
+            HTTP_X_STUDENT_ID=str(self.student.id),
+        )
+        delete_folder_request.tenant = self.tenant
+        with self._auth(self.parent_user):
+            deleted_folder = FolderDeleteView.as_view()(
+                delete_folder_request,
+                folder_id=folder_id,
+            )
+        self.assertEqual(deleted_folder.status_code, 204, deleted_folder.content)
+        self.assertFalse(InventoryFolder.objects.filter(id=folder_id).exists())
+
+    def test_parent_inventory_rejects_sibling_scope_without_storage_side_effect(self):
+        request = self.factory.post(
+            "/storage/inventory/upload/",
+            data={
+                "scope": "student",
+                "student_ps": self.other_student.ps_number,
+                "file": SimpleUploadedFile(
+                    "wrong-child.pdf",
+                    b"%PDF-wrong-child",
+                    content_type="application/pdf",
+                ),
+            },
+            format="multipart",
+            HTTP_X_STUDENT_ID=str(self.student.id),
+        )
+        request.tenant = self.tenant
+        with self._auth(self.parent_user), patch(
+            "apps.domains.inventory.views.upload_fileobj_to_r2_storage"
+        ) as upload_r2:
+            response = FileUploadView.as_view()(request)
+        self.assertEqual(response.status_code, 403, response.content)
+        upload_r2.assert_not_called()
+        self.assertFalse(InventoryFile.objects.filter(original_name="wrong-child.pdf").exists())
+
+    def test_parent_inventory_rejects_unowned_and_cross_tenant_selected_children(self):
+        foreign_tenant = Tenant.objects.create(
+            code="inv-hard-foreign",
+            name="Inventory Foreign",
+            is_active=True,
+        )
+        foreign_user = User.objects.create_user(
+            username="inv-hard-foreign-student",
+            password="test1234",
+            tenant=foreign_tenant,
+        )
+        foreign_student = Student.objects.create(
+            tenant=foreign_tenant,
+            user=foreign_user,
+            ps_number="FOREIGN-001",
+            omr_code="11223344",
+            name="타학원학생",
+        )
+
+        for selected_student in (self.other_student, foreign_student):
+            request = self.factory.post(
+                "/storage/inventory/upload/",
+                data={
+                    "scope": "student",
+                    "student_ps": selected_student.ps_number,
+                    "file": SimpleUploadedFile(
+                        "unowned-child.pdf",
+                        b"%PDF-unowned-child",
+                        content_type="application/pdf",
+                    ),
+                },
+                format="multipart",
+                HTTP_X_STUDENT_ID=str(selected_student.id),
+            )
+            request.tenant = self.tenant
+            with self._auth(self.parent_user), patch(
+                "apps.domains.inventory.views.upload_fileobj_to_r2_storage"
+            ) as upload_r2:
+                response = FileUploadView.as_view()(request)
+            self.assertEqual(response.status_code, 403, response.content)
+            upload_r2.assert_not_called()
+        self.assertFalse(
+            InventoryFile.objects.filter(original_name="unowned-child.pdf").exists()
+        )
 
     def test_presign_requires_inventory_file_for_raw_r2_key(self):
         request = self._json_request(
