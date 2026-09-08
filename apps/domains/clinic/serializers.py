@@ -1,6 +1,8 @@
 # PATH: apps/domains/clinic/serializers.py
 
 from datetime import datetime, timedelta
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from .models import Session, SessionParticipant, Test, Submission
 from .services.lifecycle import booking_availability_for_session
@@ -13,6 +15,7 @@ from apps.support.clinic.session_dependencies import (
     enrollments_for_clinic_tenant,
     lectures_for_tenant,
     sections_for_tenant,
+    student_has_current_required_clinic_target,
     storage_presigned_get_url,
 )
 
@@ -194,6 +197,8 @@ class ClinicSessionParticipantSerializer(serializers.ModelSerializer):
     session_location = serializers.SerializerMethodField()
     session_title = serializers.SerializerMethodField()
     planned_clinic_link_ids = serializers.SerializerMethodField()
+    can_self_cancel = serializers.SerializerMethodField()
+    self_cancel_reason = serializers.SerializerMethodField()
 
     # ✅ 파생 노출
     session_duration_minutes = serializers.SerializerMethodField()
@@ -249,6 +254,52 @@ class ClinicSessionParticipantSerializer(serializers.ModelSerializer):
             data.pop("completion_history", None)
             data.pop("recipient_contacts", None)
         return data
+
+    def _self_cancel_policy(self, obj):
+        from apps.domains.clinic.services import participant_self_cancel_policy
+
+        cache = self.context.setdefault("_clinic_self_cancel_policy", {})
+        if obj.pk not in cache:
+            required_cache = self.context.setdefault(
+                "_clinic_self_cancel_required_target",
+                {},
+            )
+            if obj.student_id not in required_cache:
+                required_cache[obj.student_id] = student_has_current_required_clinic_target(
+                    tenant=obj.tenant,
+                    student=obj.student,
+                )
+            cache[obj.pk] = participant_self_cancel_policy(
+                tenant=obj.tenant,
+                participant=obj,
+                has_current_required_target=required_cache[obj.student_id],
+            )
+        return cache[obj.pk]
+
+    def _self_cancel_is_staff_request(self):
+        cache_key = "_clinic_self_cancel_is_staff_request"
+        if cache_key not in self.context:
+            request = self.context.get("request")
+            self.context[cache_key] = bool(
+                request is not None
+                and is_effective_staff(
+                    getattr(request, "user", None),
+                    getattr(request, "tenant", None),
+                )
+            )
+        return self.context[cache_key]
+
+    @extend_schema_field(OpenApiTypes.BOOL)
+    def get_can_self_cancel(self, obj):
+        if self._self_cancel_is_staff_request():
+            return False
+        return self._self_cancel_policy(obj).allowed
+
+    @extend_schema_field(OpenApiTypes.STR)
+    def get_self_cancel_reason(self, obj):
+        if self._self_cancel_is_staff_request():
+            return "교직원은 클리닉 명단에서 취소할 수 있습니다."
+        return self._self_cancel_policy(obj).reason
 
     def get_recipient_contacts(self, obj: SessionParticipant) -> list[dict[str, str]]:
         student = obj.student
@@ -467,6 +518,12 @@ class ClinicSessionParticipantBulkCreateSerializer(serializers.Serializer):
         default=list,
         max_length=100,
     )
+    enrollment_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1),
+        required=False,
+        default=list,
+        max_length=100,
+    )
     student_request_memo = serializers.CharField(
         required=False,
         allow_blank=True,
@@ -487,6 +544,7 @@ class ClinicSessionParticipantBulkCreateSerializer(serializers.Serializer):
     def validate(self, attrs):
         session_ids = attrs["session_ids"]
         student_ids = attrs.get("student_ids", [])
+        enrollment_ids = attrs.get("enrollment_ids", [])
         if len(set(session_ids)) != len(session_ids):
             raise serializers.ValidationError(
                 {"session_ids": "같은 시간대를 중복해서 선택할 수 없습니다."}
@@ -495,7 +553,19 @@ class ClinicSessionParticipantBulkCreateSerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 {"student_ids": "같은 학생을 중복해서 선택할 수 없습니다."}
             )
-        participant_count = len(session_ids) * max(len(student_ids), 1)
+        if len(set(enrollment_ids)) != len(enrollment_ids):
+            raise serializers.ValidationError(
+                {"enrollment_ids": "같은 수강 대상을 중복해서 선택할 수 없습니다."}
+            )
+        if student_ids and enrollment_ids:
+            raise serializers.ValidationError(
+                {"detail": "student_ids와 enrollment_ids 중 하나만 선택해 주세요."}
+            )
+        participant_count = len(session_ids) * max(
+            len(student_ids),
+            len(enrollment_ids),
+            1,
+        )
         if participant_count > 500:
             raise serializers.ValidationError(
                 {"detail": "한 번에 만들 수 있는 클리닉 예약은 최대 500건입니다."}

@@ -217,14 +217,22 @@ def validate_student_score_submissions(
     user: Any,
     student_ps: str,
     payload: Mapping[str, Any],
+    student: Student | None = None,
 ) -> list[dict[str, Any]]:
     """Validate one report containing up to 20 subject rows with shared exam metadata."""
-    student = Student.objects.filter(
-        tenant=tenant,
-        user=user,
-        ps_number=student_ps,
-        deleted_at__isnull=True,
-    ).first()
+    if student is None:
+        student = Student.objects.filter(
+            tenant=tenant,
+            user=user,
+            ps_number=student_ps,
+            deleted_at__isnull=True,
+        ).first()
+    elif (
+        student.tenant_id != tenant.id
+        or student.ps_number != student_ps
+        or student.deleted_at is not None
+    ):
+        student = None
     if not student:
         raise ValueError("학생 본인만 자기 성적표를 제출할 수 있습니다.")
 
@@ -281,7 +289,10 @@ def _validate_evidence_link(*, evidence_file: Any, validated_rows: list[Mapping[
         or evidence_file.scope != "student"
         or evidence_file.student_ps != student.ps_number
         or submitted_by is None
-        or student.user_id != submitted_by.id
+        or (
+            student.user_id != submitted_by.id
+            and getattr(student.parent, "user_id", None) != submitted_by.id
+        )
         or any(
             row.get("tenant") != tenant
             or row.get("student") != student

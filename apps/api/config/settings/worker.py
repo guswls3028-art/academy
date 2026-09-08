@@ -190,6 +190,7 @@ SOLAPI_API_SECRET = os.getenv("SOLAPI_API_SECRET", "")
 SOLAPI_SENDER = os.getenv("SOLAPI_SENDER", "")
 SOLAPI_KAKAO_PF_ID = os.getenv("SOLAPI_KAKAO_PF_ID", "")
 SOLAPI_KAKAO_TEMPLATE_ID = os.getenv("SOLAPI_KAKAO_TEMPLATE_ID", "")
+OWNER_TENANT_ID = int(os.getenv("OWNER_TENANT_ID", "1"))
 
 # ==================================================
 # Worker → API 통신

@@ -134,7 +134,15 @@ def _get_request_student_for_clinic(request):
     return student
 
 
-def _send_clinic_notification(tenant, student, trigger, context=None, *, send_to="both"):
+def _send_clinic_notification(
+    tenant,
+    student,
+    trigger,
+    context=None,
+    *,
+    send_to="both",
+    include_target_results=False,
+):
     """Queue the exact approved clinic Alimtalk for selected recipients only."""
     event_context = dict(context or {})
     event_context.setdefault("_source_domain", "clinic")
@@ -142,6 +150,7 @@ def _send_clinic_notification(tenant, student, trigger, context=None, *, send_to
     targets = ("parent", "student") if send_to == "both" else (send_to,)
     requested = 0
     failed = 0
+    target_results = []
     for target in targets:
         try:
             queued = send_clinic_event_notification(
@@ -153,15 +162,24 @@ def _send_clinic_notification(tenant, student, trigger, context=None, *, send_to
             )
             requested += int(bool(queued))
             failed += int(not queued)
+            target_results.append({"target": target, "requested": bool(queued)})
         except Exception:
             failed += 1
+            target_results.append({"target": target, "requested": False})
             logger.exception(
                 "clinic notification failed: trigger=%s student=%s target=%s",
                 trigger,
                 getattr(student, "id", "?"),
                 target,
             )
-    return {"requested": requested, "failed": failed, "send_to": send_to}
+    result = {
+        "requested": requested,
+        "failed": failed,
+        "send_to": send_to,
+    }
+    if include_target_results:
+        result["targets"] = target_results
+    return result
 
 
 # ============================================================
@@ -368,11 +386,10 @@ class ParticipantViewSet(
         """
         PATCH /clinic/participants/{id}/set_status/
         - 상태 변경 + audit 기록
-        - 학생: 자신의 예약 신청(status="pending")만 취소 가능
+        - 학생/학부모: 자신의 pending/booked 예약 취소 가능. 필수 대상자는 같은 주 예약 1개 유지
         - 선생: 모든 상태 변경 가능
         """
         next_status = request.data.get("status")
-        send_to = _schedule_change_send_to(request, default="parent")
         try:
             is_late = serializers.BooleanField().run_validation(
                 request.data.get("is_late", False)
@@ -385,6 +402,12 @@ class ParticipantViewSet(
             )
 
         request_student = _get_request_student_for_clinic(request)
+        send_to = (
+            "both"
+            if request_student is not None
+            and next_status == SessionParticipant.Status.CANCELLED
+            else _schedule_change_send_to(request, default="parent")
+        )
         if request_student is None and not TenantResolvedAndStaff().has_permission(request, self):
             raise PermissionDenied("클리닉 상태 변경은 스태프만 가능합니다.")
         staff_memo = None
@@ -401,7 +424,7 @@ class ParticipantViewSet(
             is_late=is_late,
         )
         obj = result.participant
-        notification_result = None
+        notification_result = result.notification_result
         if result.notification:
             notification_result = _send_clinic_notification(
                 getattr(request, "tenant", None),
@@ -409,6 +432,7 @@ class ParticipantViewSet(
                 result.notification.trigger,
                 result.notification.context,
                 send_to=send_to,
+                include_target_results=request_student is not None,
             )
 
         out = ClinicSessionParticipantSerializer(

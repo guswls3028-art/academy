@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from django.db import transaction
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
@@ -14,6 +15,7 @@ from apps.core.permissions import (
 )
 from apps.domains.submissions.models import Submission, SubmissionMedia
 from apps.domains.submissions.services.homework_media import (
+    HomeworkMediaUploadFailed,
     homework_media_limits_payload,
     legacy_homework_media_removed_at,
     serialize_legacy_homework_media,
@@ -21,10 +23,11 @@ from apps.domains.submissions.services.homework_media import (
     store_homework_media,
 )
 from apps.infrastructure.storage.r2 import generate_presigned_get_url
+from apps.support.homework.review_lock import lock_homework_review_target
 from apps.support.submissions.dependencies import (
     enrollment_belongs_to_tenant,
     homework_submission_is_teacher_reviewed,
-    request_is_parent,
+    request_student,
     student_owns_enrollment,
     target_enrollment_assignment_exists,
 )
@@ -44,10 +47,7 @@ def _require_student_homework_access(request, *, homework_id: int, enrollment_id
     tenant = getattr(request, "tenant", None)
     if not tenant:
         raise PermissionDenied("학원 정보를 확인할 수 없습니다.")
-    is_parent = request_is_parent(request)
-    student = getattr(request.user, "student_profile", None)
-    if is_parent:
-        raise PermissionDenied("학부모 계정은 과제 파일을 변경할 수 없습니다.")
+    student = request_student(request)
     if not student:
         raise PermissionDenied("학생 계정으로 이용해 주세요.")
     if not enrollment_belongs_to_tenant(enrollment_id=enrollment_id, tenant=tenant):
@@ -65,7 +65,7 @@ def _require_student_homework_access(request, *, homework_id: int, enrollment_id
         tenant,
     ):
         raise PermissionDenied("현재 제출할 수 있는 과제가 아닙니다.")
-    return tenant
+    return tenant, student
 
 
 def _student_submission_parents(*, tenant, user, enrollment_id: int, homework_id: int):
@@ -87,6 +87,16 @@ def _student_submission_parents(*, tenant, user, enrollment_id: int, homework_id
     )
 
 
+def _reviewed_response() -> Response:
+    return Response(
+        {
+            "code": "HOMEWORK_MEDIA_REVIEWED",
+            "detail": "완료 또는 통과한 과제 파일은 변경할 수 없습니다. 보완이 필요하면 선생님에게 상태 변경을 요청해 주세요.",
+        },
+        status=status.HTTP_409_CONFLICT,
+    )
+
+
 class HomeworkSubmissionMediaCollectionView(APIView):
     permission_classes = [IsAuthenticated, TenantResolvedAndMember]
 
@@ -96,7 +106,7 @@ class HomeworkSubmissionMediaCollectionView(APIView):
             request.query_params.get("enrollment_id"),
             field_name="enrollment_id",
         )
-        tenant = _require_student_homework_access(
+        tenant, student = _require_student_homework_access(
             request,
             homework_id=int(homework_id),
             enrollment_id=enrollment_id,
@@ -104,7 +114,7 @@ class HomeworkSubmissionMediaCollectionView(APIView):
         files: list[dict] = []
         for parent in _student_submission_parents(
             tenant=tenant,
-            user=request.user,
+            user=student.user,
             enrollment_id=enrollment_id,
             homework_id=int(homework_id),
         ):
@@ -129,36 +139,47 @@ class HomeworkSubmissionMediaCollectionView(APIView):
             request.data.get("enrollment_id"),
             field_name="enrollment_id",
         )
-        tenant = _require_student_homework_access(
+        tenant, student = _require_student_homework_access(
             request,
             homework_id=int(homework_id),
             enrollment_id=enrollment_id,
         )
-        if homework_submission_is_teacher_reviewed(
-            tenant=tenant,
-            enrollment_id=enrollment_id,
-            homework_id=int(homework_id),
-        ):
-            return Response(
-                {
-                    "code": "HOMEWORK_MEDIA_REVIEWED",
-                    "detail": "완료 또는 통과한 과제 파일은 변경할 수 없습니다. 보완이 필요하면 선생님에게 상태 변경을 요청해 주세요.",
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
         upload_file = request.FILES.get("file")
         if not upload_file:
             raise ValidationError({"file": "파일을 선택해 주세요."})
-        media, deduplicated = store_homework_media(
-            tenant=tenant,
-            user=request.user,
-            enrollment_id=enrollment_id,
-            homework_id=int(homework_id),
-            upload_file=upload_file,
-            client_file_id=request.data.get("client_file_id"),
-            upload_batch_id=request.data.get("upload_batch_id"),
-            position=request.data.get("position"),
-        )
+        upload_failure = None
+        with transaction.atomic():
+            assignment = lock_homework_review_target(
+                tenant=tenant,
+                enrollment_id=enrollment_id,
+                homework_id=int(homework_id),
+            )
+            if assignment is None:
+                raise PermissionDenied("현재 제출할 수 있는 과제가 아닙니다.")
+            if homework_submission_is_teacher_reviewed(
+                tenant=tenant,
+                enrollment_id=enrollment_id,
+                homework_id=int(homework_id),
+            ):
+                return _reviewed_response()
+            try:
+                media, deduplicated = store_homework_media(
+                    tenant=tenant,
+                    user=student.user,
+                    submitted_by_user=request.user,
+                    enrollment_id=enrollment_id,
+                    homework_id=int(homework_id),
+                    upload_file=upload_file,
+                    client_file_id=request.data.get("client_file_id"),
+                    upload_batch_id=request.data.get("upload_batch_id"),
+                    position=request.data.get("position"),
+                )
+            except HomeworkMediaUploadFailed as exc:
+                # Commit the deterministic failed row so the same client identity
+                # can reconcile the object on a later retry.
+                upload_failure = exc
+        if upload_failure is not None:
+            raise upload_failure
         payload = serialize_homework_media(media)
         payload["deduplicated"] = deduplicated
         return Response(
@@ -167,8 +188,19 @@ class HomeworkSubmissionMediaCollectionView(APIView):
         )
 
 
-def _owned_submission(*, tenant, user, enrollment_id: int, homework_id: int, submission_id: int):
-    return Submission.objects.filter(
+def _owned_submission(
+    *,
+    tenant,
+    user,
+    enrollment_id: int,
+    homework_id: int,
+    submission_id: int,
+    for_update: bool = False,
+):
+    queryset = Submission.objects
+    if for_update:
+        queryset = queryset.select_for_update()
+    return queryset.filter(
         id=submission_id,
         tenant=tenant,
         user=user,
@@ -187,71 +219,74 @@ class HomeworkSubmissionMediaDetailView(APIView):
             request.data.get("enrollment_id"),
             field_name="enrollment_id",
         )
-        tenant = _require_student_homework_access(
+        tenant, student = _require_student_homework_access(
             request,
             homework_id=int(homework_id),
             enrollment_id=enrollment_id,
         )
-        if homework_submission_is_teacher_reviewed(
-            tenant=tenant,
-            enrollment_id=enrollment_id,
-            homework_id=int(homework_id),
-        ):
-            return Response(
-                {
-                    "code": "HOMEWORK_MEDIA_REVIEWED",
-                    "detail": "완료 또는 통과한 과제 파일은 변경할 수 없습니다. 보완이 필요하면 선생님에게 상태 변경을 요청해 주세요.",
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
-
-        if str(media_id).startswith("legacy-"):
-            submission_id = _parse_positive_int(
-                str(media_id).removeprefix("legacy-"),
-                field_name="media_id",
-            )
-            parent = _owned_submission(
+        with transaction.atomic():
+            assignment = lock_homework_review_target(
                 tenant=tenant,
-                user=request.user,
                 enrollment_id=enrollment_id,
                 homework_id=int(homework_id),
-                submission_id=submission_id,
             )
-            if not parent or not parent.file_key:
-                return Response(status=status.HTTP_404_NOT_FOUND)
-            meta = dict(parent.meta or {})
-            if not meta.get("homework_media_legacy_removed_at"):
-                meta["homework_media_legacy_removed_at"] = timezone.now().isoformat()
-                meta["homework_media_legacy_removed_by_id"] = int(request.user.id)
-                parent.meta = meta
-                parent.save(update_fields=["meta", "updated_at"])
-            return Response(status=status.HTTP_204_NO_CONTENT)
-
-        parsed_media_id = _parse_positive_int(media_id, field_name="media_id")
-        media = (
-            SubmissionMedia.objects.select_related("submission")
-            .filter(
-                id=parsed_media_id,
+            if assignment is None:
+                raise PermissionDenied("현재 제출할 수 있는 과제가 아닙니다.")
+            if homework_submission_is_teacher_reviewed(
                 tenant=tenant,
-                submission__tenant=tenant,
-                submission__user=request.user,
-                submission__enrollment_id=enrollment_id,
-                submission__target_type=Submission.TargetType.HOMEWORK,
-                submission__target_id=int(homework_id),
+                enrollment_id=enrollment_id,
+                homework_id=int(homework_id),
+            ):
+                return _reviewed_response()
+
+            if str(media_id).startswith("legacy-"):
+                submission_id = _parse_positive_int(
+                    str(media_id).removeprefix("legacy-"),
+                    field_name="media_id",
+                )
+                parent = _owned_submission(
+                    tenant=tenant,
+                    user=student.user,
+                    enrollment_id=enrollment_id,
+                    homework_id=int(homework_id),
+                    submission_id=submission_id,
+                    for_update=True,
+                )
+                if not parent or not parent.file_key:
+                    return Response(status=status.HTTP_404_NOT_FOUND)
+                meta = dict(parent.meta or {})
+                if not meta.get("homework_media_legacy_removed_at"):
+                    meta["homework_media_legacy_removed_at"] = timezone.now().isoformat()
+                    meta["homework_media_legacy_removed_by_id"] = int(request.user.id)
+                    parent.meta = meta
+                    parent.save(update_fields=["meta", "updated_at"])
+                return Response(status=status.HTTP_204_NO_CONTENT)
+
+            parsed_media_id = _parse_positive_int(media_id, field_name="media_id")
+            media = (
+                SubmissionMedia.objects.select_for_update()
+                .filter(
+                    id=parsed_media_id,
+                    tenant=tenant,
+                    submission__tenant=tenant,
+                    submission__user=student.user,
+                    submission__enrollment_id=enrollment_id,
+                    submission__target_type=Submission.TargetType.HOMEWORK,
+                    submission__target_id=int(homework_id),
+                )
+                .first()
             )
-            .first()
-        )
-        if not media:
-            return Response(status=status.HTTP_404_NOT_FOUND)
-        if media.removed_at is None:
-            now = timezone.now()
-            media.status = SubmissionMedia.Status.REMOVED
-            media.removed_at = now
-            media.removed_by = request.user
-            media.save(
-                update_fields=["status", "removed_at", "removed_by", "updated_at"]
-            )
-        return Response(status=status.HTTP_204_NO_CONTENT)
+            if not media:
+                return Response(status=status.HTTP_404_NOT_FOUND)
+            if media.removed_at is None:
+                now = timezone.now()
+                media.status = SubmissionMedia.Status.REMOVED
+                media.removed_at = now
+                media.removed_by = request.user
+                media.save(
+                    update_fields=["status", "removed_at", "removed_by", "updated_at"]
+                )
+            return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 def _preview_target(*, tenant, homework_id: int, media_id: str):
@@ -307,15 +342,14 @@ class HomeworkSubmissionMediaPreviewView(APIView):
             return Response(status=status.HTTP_404_NOT_FOUND)
         submission, object_key, media_payload = target
         is_staff = is_effective_staff(request.user, tenant)
-        is_owner = submission.user_id == request.user.id and getattr(request.user, "student_profile", None) is not None
         if not is_staff:
-            if not is_owner:
-                raise PermissionDenied("이 과제 파일을 볼 수 없습니다.")
-            _require_student_homework_access(
+            _, student = _require_student_homework_access(
                 request,
                 homework_id=int(homework_id),
                 enrollment_id=int(submission.enrollment_id or 0),
             )
+            if submission.user_id != student.user_id:
+                raise PermissionDenied("이 과제 파일을 볼 수 없습니다.")
         if not media_payload.get("legacy") and media_payload.get("status") != SubmissionMedia.Status.UPLOADED:
             return Response(
                 {"code": "HOMEWORK_MEDIA_NOT_READY", "detail": "업로드가 끝난 파일만 미리 볼 수 있습니다."},

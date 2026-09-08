@@ -453,6 +453,28 @@ active lecture. Historical grades and video progress use the separate readonly
 history selector and may include ended lectures; they must not return a playable
 session or media URL.
 
+### Parent-selected learning submissions
+
+A parent may submit an online exam or homework media only for the active linked
+student named by `X-Student-Id`. The server never guesses a child when that header
+is absent and never falls back after an invalid, unlinked, deleted, or cross-tenant
+student ID. Enrollment, active lecture, and exact exam/homework assignment checks
+still run before any submission row or object-store write.
+
+The resulting `Submission.user` is the selected student's User so grades, pending
+work, teacher review, and reload projections remain identical to a student-authored
+submission. When the authenticated actor is the parent, the submission metadata
+records `submitted_by_user_id`.
+
+The same exact selected-child rule applies to community question/counsel writes,
+student inventory and reported-score evidence, and video progress. These writes
+persist to the selected child's ordinary rows so the parent, student, and staff
+reload projections agree. Reported scores preserve the parent as `submitted_by`;
+community posts preserve `author_role=parent`. A parent video progress POST no
+longer returns an unsaved echo. Missing, stale, sibling-selected, unlinked, deleted,
+or cross-tenant child context fails before mutation. Profile, account identity,
+password, and administrator-only settings remain outside delegated learning access.
+
 ## 7. Minimum Change Gate
 
 When a change touches any of these surfaces, run the smallest focused set that
@@ -484,6 +506,24 @@ python -m pytest apps\domains\students\tests\test_student_support.py -v --tb=sho
 ```
 
 ### Student video playback controls
+
+Tenant-resolved staff can change the default `allow_skip`, `max_speed`, and
+`show_watermark` values through the ordinary video detail PATCH. An actual
+default-policy change locks the video row and increments `Video.policy_version`
+exactly once; title/order-only or no-op PATCH requests do not increment it. This
+lets the student's periodic access check reject a stale playback grant while
+avoiding needless interruption when the effective defaults did not change.
+
+For one session, staff can update skip and/or speed defaults for selected videos
+with `POST /api/v1/media/videos/bulk-policy/`. The JSON body contains the exact
+positive `session_id`, one to 500 unique positive `video_ids`, and at least one
+of `allow_skip` or `max_speed`. The action first locks the tenant-owned session
+and all active requested video rows in deterministic order. Every ID must be an
+active video in that exact tenant and session; a missing, deleted, duplicate,
+cross-session, or cross-tenant ID rejects the whole request with no writes.
+Only rows whose saved value changes are written, and each changed row increments
+`policy_version` once. Student-level `VideoAccess` overrides continue to take
+precedence over these video defaults.
 
 `FREE_REVIEW` and `PROCTORED_CLASS` decide whether monitored playback sessions
 and event writes are required. They do not erase the teacher's saved video

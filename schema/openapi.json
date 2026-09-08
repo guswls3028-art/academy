@@ -1380,6 +1380,10 @@
             "nullable": true,
             "type": "string"
           },
+          "can_self_cancel": {
+            "readOnly": true,
+            "type": "boolean"
+          },
           "checked_in_at": {
             "format": "date-time",
             "nullable": true,
@@ -1521,6 +1525,10 @@
             "nullable": true,
             "type": "string"
           },
+          "self_cancel_reason": {
+            "readOnly": true,
+            "type": "string"
+          },
           "session": {
             "nullable": true,
             "type": "integer"
@@ -1598,6 +1606,7 @@
           }
         },
         "required": [
+          "can_self_cancel",
           "checked_out_by_name",
           "completed_by_name",
           "completion_history",
@@ -1613,6 +1622,7 @@
           "preferred_start_time",
           "profile_photo_url",
           "recipient_contacts",
+          "self_cancel_reason",
           "session_date",
           "session_duration_minutes",
           "session_end_time",
@@ -1640,6 +1650,14 @@
             "format": "time",
             "nullable": true,
             "type": "string"
+          },
+          "enrollment_ids": {
+            "items": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "maxItems": 100,
+            "type": "array"
           },
           "memo": {
             "default": "",
@@ -17154,6 +17172,54 @@
         ],
         "type": "string"
       },
+      "VideoBulkPolicyRequest": {
+        "properties": {
+          "allow_skip": {
+            "type": "boolean"
+          },
+          "max_speed": {
+            "format": "double",
+            "maximum": 5.0,
+            "minimum": 0.25,
+            "type": "number"
+          },
+          "session_id": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "video_ids": {
+            "items": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "maxItems": 500,
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "session_id",
+          "video_ids"
+        ],
+        "type": "object"
+      },
+      "VideoBulkPolicyResponse": {
+        "properties": {
+          "changed": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "updated": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "changed",
+          "updated"
+        ],
+        "type": "object"
+      },
       "VisibilityEnum": {
         "description": "* `ENROLLED` - 수강생 전용\n* `PUBLIC` - 전체 공개",
         "enum": [
@@ -19087,7 +19153,7 @@
     },
     "/api/v1/clinic/participants/{id}/set_status/": {
       "patch": {
-        "description": "PATCH /clinic/participants/{id}/set_status/\n- 상태 변경 + audit 기록\n- 학생: 자신의 예약 신청(status=\"pending\")만 취소 가능\n- 선생: 모든 상태 변경 가능",
+        "description": "PATCH /clinic/participants/{id}/set_status/\n- 상태 변경 + audit 기록\n- 학생/학부모: 자신의 pending/booked 예약 취소 가능. 필수 대상자는 같은 주 예약 1개 유지\n- 선생: 모든 상태 변경 가능",
         "operationId": "clinic_participants_set_status_partial_update",
         "parameters": [
           {
@@ -21532,7 +21598,7 @@
     },
     "/api/v1/community/posts/{id}/": {
       "delete": {
-        "description": "학생은 본인 글만 삭제 가능. 학부모는 삭제 불가.",
+        "description": "학생/학부모는 현재 학생 컨텍스트의 본인 글만 삭제 가능.",
         "operationId": "community_posts_destroy",
         "parameters": [
           {
@@ -21658,7 +21724,7 @@
         ]
       },
       "put": {
-        "description": "학생은 본인 글만 수정 가능. 학부모는 수정 불가.",
+        "description": "학생/학부모는 현재 학생 컨텍스트의 본인 글만 수정 가능.",
         "operationId": "community_posts_update",
         "parameters": [
           {
@@ -35762,6 +35828,48 @@
         ]
       }
     },
+    "/api/v1/media/videos/bulk-policy/": {
+      "post": {
+        "description": "Atomically update playback defaults for videos in one tenant session.",
+        "operationId": "media_videos_bulk_policy_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VideoBulkPolicyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoBulkPolicyResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "description": "Invalid policy fields or a non-exact tenant/session/video target"
+          }
+        },
+        "security": [
+          {
+            "jwtAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "tags": [
+          "media"
+        ]
+      }
+    },
     "/api/v1/media/videos/comments/{comment_id}/": {
       "delete": {
         "description": "PATCH  /media/videos/comments/{comment_id}/  — 수정 (본인만)\nDELETE /media/videos/comments/{comment_id}/  — 삭제 (본인만)",
@@ -39335,7 +39443,7 @@
     },
     "/api/v1/results/admin/clinic-bookings/{id}/set_status/": {
       "patch": {
-        "description": "PATCH /clinic/participants/{id}/set_status/\n- 상태 변경 + audit 기록\n- 학생: 자신의 예약 신청(status=\"pending\")만 취소 가능\n- 선생: 모든 상태 변경 가능",
+        "description": "PATCH /clinic/participants/{id}/set_status/\n- 상태 변경 + audit 기록\n- 학생/학부모: 자신의 pending/booked 예약 취소 가능. 필수 대상자는 같은 주 예약 1개 유지\n- 선생: 모든 상태 변경 가능",
         "operationId": "results_admin_clinic_bookings_set_status_partial_update",
         "parameters": [
           {

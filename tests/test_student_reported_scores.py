@@ -22,6 +22,7 @@ from apps.domains.inventory.views import (
     FolderDeleteView,
     InventoryListView,
 )
+from apps.domains.parents.models import Parent
 from apps.domains.results.models import StudentReportedScore
 from apps.domains.students.models import Student
 from apps.domains.results.views.admin_student_performance_view import (
@@ -48,6 +49,24 @@ class StudentReportedScoreTest(TestCase, ClinicTestMixin):
             tenant=self.tenant,
         )
         TenantMembership.ensure_active(tenant=self.tenant, user=self.admin, role="admin")
+        self.parent_user = User.objects.create_user(
+            username="reported_score_parent",
+            password="test1234",
+            tenant=self.tenant,
+        )
+        TenantMembership.ensure_active(
+            tenant=self.tenant,
+            user=self.parent_user,
+            role="parent",
+        )
+        self.parent = Parent.objects.create(
+            tenant=self.tenant,
+            user=self.parent_user,
+            name="Reported Score Parent",
+            phone="01099998888",
+        )
+        self.student.parent = self.parent
+        self.student.save(update_fields=["parent"])
 
     def _student_upload(
         self,
@@ -106,6 +125,122 @@ class StudentReportedScoreTest(TestCase, ClinicTestMixin):
         ):
             response = FileUploadView.as_view()(request)
         return response, upload_r2
+
+    def _parent_upload(self, *, student=None, selected_student_id=None):
+        student = student or self.student
+        data = {
+            "scope": "student",
+            "student_ps": student.ps_number,
+            "score_submission": "true",
+            "score_source": "school_exam",
+            "academic_year": "2026",
+            "semester": "1",
+            "exam_round": "first",
+            "subject": "수학",
+            "score": "88",
+            "max_score": "100",
+            "exam_date": "2026-04-28",
+            "file": SimpleUploadedFile(
+                "parent-score.jpg",
+                b"\xff\xd8\xff\xe0parent-score",
+                content_type="image/jpeg",
+            ),
+        }
+        request = self.factory.post(
+            "/storage/inventory/upload/",
+            data=data,
+            format="multipart",
+            HTTP_X_STUDENT_ID=str(
+                selected_student_id if selected_student_id is not None else student.id
+            ),
+        )
+        request.tenant = self.tenant
+        with (
+            patch(
+                "apps.domains.inventory.views.JWTAuthentication.authenticate",
+                return_value=(self.parent_user, None),
+            ),
+            patch(
+                "apps.domains.inventory.views.Program.ensure_for_tenant",
+                return_value=SimpleNamespace(plan="pro"),
+            ),
+            patch("apps.domains.inventory.views.upload_fileobj_to_r2_storage") as upload_r2,
+        ):
+            response = FileUploadView.as_view()(request)
+        return response, upload_r2
+
+    def test_parent_selected_child_score_upload_persists_and_reloads_for_parent_and_staff(self):
+        response, upload_r2 = self._parent_upload()
+
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = json.loads(response.content)
+        upload_r2.assert_called_once()
+        score = StudentReportedScore.objects.get(id=payload["scoreSubmission"]["id"])
+        self.assertEqual(score.student_id, self.student.id)
+        self.assertEqual(score.submitted_by_id, self.parent_user.id)
+        self.assertEqual(score.evidence_file.student_ps, self.student.ps_number)
+
+        for user in (self.parent_user, self.admin):
+            request = self.factory.get(
+                "/storage/inventory/",
+                {"scope": "student", "student_ps": self.student.ps_number},
+                HTTP_X_STUDENT_ID=str(self.student.id),
+            )
+            request.tenant = self.tenant
+            with patch(
+                "apps.domains.inventory.views.JWTAuthentication.authenticate",
+                return_value=(user, None),
+            ):
+                listed = InventoryListView.as_view()(request)
+            self.assertEqual(listed.status_code, 200, listed.content)
+            listed_file = json.loads(listed.content)["files"][0]
+            self.assertEqual(listed_file["scoreSubmission"]["id"], score.id)
+
+    def test_parent_score_upload_rejects_unowned_and_cross_tenant_children_without_storage(self):
+        unowned_user = User.objects.create_user(
+            username="reported_score_unowned",
+            password="test1234",
+            tenant=self.tenant,
+        )
+        TenantMembership.ensure_active(
+            tenant=self.tenant,
+            user=unowned_user,
+            role="student",
+        )
+        unowned = Student.objects.create(
+            tenant=self.tenant,
+            user=unowned_user,
+            name="Unowned",
+            ps_number="RS-UNOWNED",
+            omr_code="77889900",
+        )
+        other_tenant = type(self.tenant).objects.create(
+            code="reported-score-other",
+            name="Reported Score Other",
+            is_active=True,
+        )
+        foreign_user = User.objects.create_user(
+            username="reported_score_foreign",
+            password="test1234",
+            tenant=other_tenant,
+        )
+        foreign = Student.objects.create(
+            tenant=other_tenant,
+            user=foreign_user,
+            name="Foreign",
+            ps_number="RS-FOREIGN",
+            omr_code="77889901",
+        )
+
+        for student in (unowned, foreign):
+            response, upload_r2 = self._parent_upload(
+                student=student,
+                selected_student_id=student.id,
+            )
+            self.assertEqual(response.status_code, 403, response.content)
+            upload_r2.assert_not_called()
+        self.assertFalse(InventoryFile.objects.filter(original_name="parent-score.jpg").exists())
+        self.assertFalse(StudentReportedScore.objects.exists())
 
     def _review(self, score_id, action="verify", *, tenant=None, user=None, extra=None):
         data = {"action": action}

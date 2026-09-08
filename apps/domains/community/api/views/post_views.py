@@ -33,6 +33,7 @@ from apps.support.community.post_dependencies import (
     dispatch_qna_matchup_search,
     get_reply_event_notifier,
     get_request_student,
+    get_request_student_for_write,
     student_activity_rank,
     visible_scope_node_ids_for_students,
 )
@@ -57,29 +58,31 @@ class PostViewSet(viewsets.ModelViewSet):
     STUDENT_UPDATE_FIELDS = {"title", "content", "category_label"}
 
     def update(self, request, *args, **kwargs):
-        """학생은 본인 글만 수정 가능. 학부모는 수정 불가."""
-        # 학부모 write 차단
-        if getattr(request.user, "parent_profile", None) is not None:
-            return Response(
-                {"detail": "학부모 계정은 글 수정이 제한됩니다.", "code": "parent_read_only"},
-                status=status.HTTP_403_FORBIDDEN,
-            )
+        """학생/학부모는 현재 학생 컨텍스트의 본인 글만 수정 가능."""
         instance = self.get_object()
-        request_student = get_request_student(request)
+        is_parent = getattr(request.user, "parent_profile", None) is not None
+        if is_parent and instance.post_type not in {"qna", "counsel"}:
+            return self._parent_read_only_response("글 수정")
+        request_student = (
+            get_request_student_for_write(request)
+            if is_parent
+            else get_request_student(request)
+        )
         if request_student is not None and getattr(instance, "created_by_id", None) != request_student.id:
             return Response({"detail": "권한이 없습니다."}, status=status.HTTP_403_FORBIDDEN)
         return super().update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
-        """학생은 본인 글만 삭제 가능. 학부모는 삭제 불가."""
-        # 학부모 write 차단
-        if getattr(request.user, "parent_profile", None) is not None:
-            return Response(
-                {"detail": "학부모 계정은 글 삭제가 제한됩니다.", "code": "parent_read_only"},
-                status=status.HTTP_403_FORBIDDEN,
-            )
+        """학생/학부모는 현재 학생 컨텍스트의 본인 글만 삭제 가능."""
         instance = self.get_object()
-        request_student = get_request_student(request)
+        is_parent = getattr(request.user, "parent_profile", None) is not None
+        if is_parent and instance.post_type not in {"qna", "counsel"}:
+            return self._parent_read_only_response("글 삭제")
+        request_student = (
+            get_request_student_for_write(request)
+            if is_parent
+            else get_request_student(request)
+        )
         if request_student is not None and getattr(instance, "created_by_id", None) != request_student.id:
             return Response({"detail": "권한이 없습니다."}, status=status.HTTP_403_FORBIDDEN)
         return super().destroy(request, *args, **kwargs)
@@ -466,16 +469,15 @@ class PostViewSet(viewsets.ModelViewSet):
         # 사용자 커뮤니티 차단 check(#49)
         if self._is_user_blocked(request):
             return Response({"detail": "학원 운영진에 의해 커뮤니티 작성이 제한되었습니다.", "code": "user_blocked"}, status=status.HTTP_403_FORBIDDEN)
-        # 학부모 write 차단 — 학부모는 읽기 전용
-        if getattr(request.user, "parent_profile", None) is not None:
-            return Response(
-                {"detail": "학부모 계정은 글 작성이 제한됩니다.", "code": "parent_read_only"},
-                status=status.HTTP_403_FORBIDDEN,
-            )
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         tenant = getattr(request, "tenant", None)
-        request_student = get_request_student(request)
+        is_parent = getattr(request.user, "parent_profile", None) is not None
+        request_student = (
+            get_request_student_for_write(request)
+            if is_parent
+            else get_request_student(request)
+        )
         if not tenant:
             return Response(
                 {"detail": "tenant required", "code": "tenant_required"},
@@ -505,9 +507,15 @@ class PostViewSet(viewsets.ModelViewSet):
             post_type = "board"
 
         if request_student is not None:
-            if post_type not in self.STUDENT_WRITABLE_POST_TYPES:
+            writable_types = {"qna", "counsel"} if is_parent else self.STUDENT_WRITABLE_POST_TYPES
+            if post_type not in writable_types:
+                detail = (
+                    "학부모 계정은 선택한 자녀의 질문과 상담 신청만 등록할 수 있습니다."
+                    if is_parent
+                    else "학생 계정은 자유게시판, 질문, 상담 신청만 등록할 수 있습니다."
+                )
                 return Response(
-                    {"detail": "학생 계정은 자유게시판, 질문, 상담 신청만 등록할 수 있습니다."},
+                    {"detail": detail},
                     status=status.HTTP_403_FORBIDDEN,
                 )
             if node_ids:
@@ -594,13 +602,14 @@ class PostViewSet(viewsets.ModelViewSet):
         return Response(self.get_serializer(post).data, status=status.HTTP_201_CREATED)
 
     def perform_update(self, serializer):
-        """PATCH /posts/:id/ — sanitize content on update, enforce parent read-only."""
+        """PATCH /posts/:id/ — sanitize content and retain student-field limits."""
         request = self.request
-        # 학부모 write 차단
-        if getattr(request.user, "parent_profile", None) is not None:
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied("학부모 계정은 수정이 제한됩니다.")
-        request_student = get_request_student(request)
+        is_parent = getattr(request.user, "parent_profile", None) is not None
+        request_student = (
+            get_request_student_for_write(request)
+            if is_parent
+            else get_request_student(request)
+        )
         if request_student is not None and not self._is_staff_request(request):
             forbidden = set(serializer.validated_data.keys()) - self.STUDENT_UPDATE_FIELDS
             if forbidden:
@@ -822,14 +831,19 @@ class PostViewSet(viewsets.ModelViewSet):
         tenant = _get_tenant_from_request(request)
         if not tenant:
             return Response({"detail": "tenant required"}, status=status.HTTP_403_FORBIDDEN)
-        if getattr(request.user, "parent_profile", None) is not None:
-            return self._parent_read_only_response("첨부파일 업로드")
         post = get_post_by_id(tenant, int(pk))
         if not post or not self._post_visible_to_request(request, post):
             return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        # 학생은 본인 글에만 첨부 가능
-        request_student = get_request_student(request)
+        is_parent = getattr(request.user, "parent_profile", None) is not None
+        if is_parent and post.post_type not in {"qna", "counsel"}:
+            return self._parent_read_only_response("첨부파일 업로드")
+        # 학생과 학부모는 현재 선택된 본인/자녀의 글에만 첨부 가능
+        request_student = (
+            get_request_student_for_write(request)
+            if is_parent
+            else get_request_student(request)
+        )
         if request_student is not None and post.created_by_id != request_student.id:
             return Response({"detail": "권한이 없습니다."}, status=status.HTTP_403_FORBIDDEN)
 
@@ -1033,14 +1047,19 @@ class PostViewSet(viewsets.ModelViewSet):
         tenant = _get_tenant_from_request(request)
         if not tenant:
             return Response({"detail": "tenant required"}, status=status.HTTP_403_FORBIDDEN)
-        if getattr(request.user, "parent_profile", None) is not None:
-            return self._parent_read_only_response("첨부파일 삭제")
         post = get_post_by_id(tenant, int(pk))
         if not post or not self._post_visible_to_request(request, post):
             return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        # 학생은 본인 글의 첨부파일만 삭제 가능
-        request_student = get_request_student(request)
+        is_parent = getattr(request.user, "parent_profile", None) is not None
+        if is_parent and post.post_type not in {"qna", "counsel"}:
+            return self._parent_read_only_response("첨부파일 삭제")
+        # 학생과 학부모는 현재 학생 컨텍스트의 본인 글 첨부만 삭제 가능
+        request_student = (
+            get_request_student_for_write(request)
+            if is_parent
+            else get_request_student(request)
+        )
         if request_student is not None and post.created_by_id != request_student.id:
             return Response({"detail": "권한이 없습니다."}, status=status.HTTP_403_FORBIDDEN)
 

@@ -69,6 +69,10 @@ Ymath는 `Program.feature_flags.assessment_status_display=wrong_completion`을
 완료**로 보이며, 대시보드의 미통과·제출 화면의 재제출 대상·과제 통과 통계에서는
 완료로 센다. 교사 메모는 학생/학부모 응답에 포함하지 않는다. 교사가 완료를 해제하면
 `teacher_resolved=false`와 현재 원자료의 `FAIL`/`NOT_SUBMITTED` 상태가 다시 표시된다.
+과제의 1차 성적·성취 이력과 파일 변경 가능성은 서로 다른 계약이다. 응답의
+`submission_media_locked=true`는 최신 재시도 통과 또는 점수 행 없는 교사 완료로
+과제 파일 POST/DELETE가 잠겼음을 뜻한다. 제출 화면은 이 값을 사용해 대상을 제외하며,
+`passed`는 계속 1차 성적을 나타낸다.
 
 ## 성장 그래프 구성
 

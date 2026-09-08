@@ -202,6 +202,10 @@ Inspect/Setup/Cleanup 출력은 tenant/user 수와 별도로 `outstanding_tokens
 않는다. process/listener 수는 원격 development API container 경계다. runner 로컬
 tunnel/process와 AWS Session tuple은 frontend 계약이 별도로 종료·증명한다. 이 변경은
 스키마나 기존 데이터 migration을 만들지 않는다.
+기존 QA tenant를 Inspect할 때도 tenant-scoped 감사·토큰 residue 조회는 하나의
+`transaction.atomic()` 안에서 실행한다. 따라서 PostgreSQL의 transaction-local tenant
+context가 조회 도중 풀리지 않으며, 외부 R2/process/listener readback은 DB transaction을
+끝낸 뒤 계속 수행한다.
 
 영상 분기를 켠 Setup은 별도 `video_state`에 `videos=1`,
 `video_accesses=2`, `proctored_video_accesses=2`를 반환하고 progress/session/event와

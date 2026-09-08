@@ -36,7 +36,7 @@ from apps.domains.results.views.session_scores_view import (
 )
 from apps.domains.results.views.admin_session_exams_summary_view import AdminSessionExamsSummaryView
 from apps.domains.students.models import Student
-from apps.domains.submissions.models import Submission
+from apps.domains.submissions.models import OMRStudentMatch, Submission
 from apps.domains.submissions.views.submission_view import SubmissionViewSet
 from apps.support.submissions.dependencies import validate_exam_enrollment_candidate
 
@@ -518,7 +518,7 @@ class SessionScoresRosterScopeTests(TestCase):
             [self.exam.id],
         )
 
-    def test_omr_manual_match_after_exam_close_registers_target_and_score(self):
+    def test_omr_incomplete_identifier_manual_match_after_exam_close_registers_target_and_score(self):
         ExamEnrollment.objects.filter(exam=self.exam).delete()
         self.exam.close_at = timezone.now() - datetime.timedelta(minutes=1)
         self.exam.save(update_fields=["close_at", "updated_at"])
@@ -535,7 +535,14 @@ class SessionScoresRosterScopeTests(TestCase):
             target_id=self.exam.id,
             source=Submission.Source.OMR_SCAN,
             status=Submission.Status.NEEDS_IDENTIFICATION,
-            meta={"manual_review": {"required": True, "reasons": ["NO_MATCH"]}},
+            meta={
+                "identifier_status": "incomplete",
+                "manual_review": {
+                    "required": True,
+                    "reasons": ["IDENTIFIER_INCOMPLETE"],
+                },
+                "omr": {"identifier": "01012??5678"},
+            },
         )
 
         request = self.factory.post(
@@ -559,6 +566,8 @@ class SessionScoresRosterScopeTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 200, response.data)
+        self.assertTrue(response.data["graded"], response.data)
+        self.assertEqual(response.data["enrollment_id"], self.active_enrollment.id)
         self.assertTrue(
             ExamEnrollment.objects.filter(
                 exam=self.exam,
@@ -572,6 +581,19 @@ class SessionScoresRosterScopeTests(TestCase):
         )
         self.assertEqual(float(result.total_score), 10.0)
 
+        submission.refresh_from_db()
+        self.assertEqual(submission.status, Submission.Status.DONE)
+        self.assertEqual(submission.enrollment_id, self.active_enrollment.id)
+        self.assertFalse(submission.meta["manual_review"]["required"])
+        self.assertEqual(submission.meta["identifier_status"], "matched")
+        current_match = OMRStudentMatch.objects.get(
+            submission=submission,
+            is_current=True,
+        )
+        self.assertEqual(current_match.enrollment_id, self.active_enrollment.id)
+        self.assertEqual(current_match.status, OMRStudentMatch.Status.CONFIRMED)
+        self.assertEqual(current_match.method, OMRStudentMatch.Method.MANUAL)
+
         score_request = self.factory.get(f"/api/v1/results/admin/sessions/{self.session.id}/scores/")
         score_request.tenant = self.tenant
         force_authenticate(score_request, user=self.admin)
@@ -582,6 +604,20 @@ class SessionScoresRosterScopeTests(TestCase):
         active_row = next(row for row in rows if row["enrollment_id"] == self.active_enrollment.id)
         self.assertEqual(len(active_row["exams"]), 1)
         self.assertEqual(active_row["exams"][0]["block"]["score"], 10.0)
+
+        detail_request = self.factory.get(
+            f"/api/v1/submissions/submissions/{submission.id}/manual-edit/"
+        )
+        detail_request.tenant = self.tenant
+        force_authenticate(detail_request, user=self.admin)
+        detail_response = SubmissionViewSet.as_view({"get": "manual_edit"})(
+            detail_request,
+            pk=submission.id,
+        )
+        self.assertEqual(detail_response.status_code, 200, detail_response.data)
+        self.assertEqual(detail_response.data["submission_status"], Submission.Status.DONE)
+        self.assertEqual(detail_response.data["enrollment_id"], self.active_enrollment.id)
+        self.assertEqual(detail_response.data["meta"]["identifier_status"], "matched")
 
     def test_session_scores_marks_omr_review_required_without_fail_score(self):
         Submission.objects.create(

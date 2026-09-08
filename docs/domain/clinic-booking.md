@@ -51,7 +51,13 @@
 
 - `session_ids`는 중복 없는 1–20개이며 모두 현재 테넌트의 같은 날짜여야 한다.
 - 학생 요청은 `student_ids`를 받지 않고 인증된 학생만 사용한다.
-- 교직원 요청은 중복 없는 활성 학생 1–100명을 명시한다.
+- 교직원 요청은 중복 없는 활성 학생 1–100명을 `student_ids`로 명시하거나,
+  대상자 목록에서 고른 정확한 활성 수강 1–100개를 `enrollment_ids`로 명시한다.
+  두 ID 배열은 서로 다른 식별자이므로 한 요청에 섞지 않는다. `enrollment_ids`를
+  사용하면 생성된 참가자의 수강과 미해결 시험·과제 사유도 그 수강 기준으로
+  보존한다. 현재 응시·제출 대상에서 빠진 원본 링크와 이미 완료된 차시는 사유
+  계산에서도 제외한다. 선택 수와 시간대 수가 늘어도 같은 사유를 참가자마다 다시
+  조회하지 않고 선택 전체를 한 번에 판정한다.
 - 한 요청의 학생 × 시간대 조합은 최대 500개다.
 - 학생 신청은 세션 대상 강의·학년·학교·정원 규칙을 기존 단일 예약과 동일하게
   적용한다. 교직원 추가도 기존 수동 추가 권한과 상태 규칙을 유지한다.
@@ -127,9 +133,45 @@ bulk 모두 `409`로 거부하고 요청 전체를 롤백한다. 일정 변경�
 `clinic_reservation_created` 이벤트로 요청하며, 승인된 알림톡 템플릿이 없으면
 기존 메시징 정책대로 실패 폐쇄한다.
 
+기존 세션의 교직원 **학생 추가** 화면은 bulk 실패의 `detail`을 사용자에게 그대로
+설명하고 선택 모달을 닫지 않는다. 따라서 `이미 해당 세션에 예약된 학생입니다.`,
+같은 날 단일 시간대 정책, 정원 마감 같은 충돌을 숫자만으로 숨기지 않으며, 서버가
+아무 행도 쓰지 않은 상태에서 선택을 확인하고 즉시 다시 시도할 수 있다.
+
 다중 예약은 기존 `SessionParticipant` 행들의 집합이므로 조회·출석·취소·패스카드
 규칙을 그대로 따른다. 학생 직접 예약 생성·일정 변경·취소 알림은 기존 계약대로
 학생과 학부모 모두에게 보내며, 교직원 수신자 선택 규칙은 변경하지 않는다.
+
+### 학생·학부모 직접 취소
+
+학생과 선택된 자녀를 이용하는 학부모는 자신의 `pending` 또는 `booked` 예약을
+**내 일정**에서 직접 취소한다. 취소 가능 여부는 API의 `can_self_cancel`과
+`self_cancel_reason`이 소유하며 화면이 미통과 항목이나 예약 수를 다시 추측하지 않는다.
+
+- 패스카드와 같은 현재 유효·미해결 자동 `ClinicLink`가 없으면 마지막 예약도 취소할 수 있다.
+- 현재 필수 대상이면 취소할 예약의 `Session.date`가 속한 월요일~일요일에
+  취소 대상 이외의 `pending|booked` 예약을 최소 1개 남겨야 한다. 남는 예약은 현재
+  시각에 아직 종료되지 않았고 `checked_out_at`·`completed_at`이 없는 활성 일정이어야
+  한다. 이미 끝난 session/time, 하원·완료 예약과 다른 주 예약은 이 수에 포함하지 않는다.
+- 해소된 링크, 원본 시험·과제가 차시에서 제거된 stale 링크, 비활성 수강 또는
+  완료된 차시의 링크는 필수 대상으로 세지 않는다.
+- self-service 취소는 학생 row를 먼저 잠근 뒤 주간 활성 예약 수를 다시 읽으므로
+  두 예약을 동시에 취소해도 하나만 성공하고 하나는 `409`로 끝난다. 차단된 요청은
+  참가자·오늘 계획·미발송 리마인더·알림 outbox를 전혀 바꾸지 않는다.
+- 성공한 직접 취소는 참가자 상태·계획/리마인더 정리와 학생/학부모 각각의
+  `clinic_cancelled` durable outbox 두 행을 같은 DB transaction에 저장한다. 둘 중 하나라도
+  접수할 수 없으면 `503 clinic_notification_outbox_unavailable`로 전체를 롤백한다.
+  transaction commit 뒤 SQS/provider 경로가 실패하면 취소는 유지되고 outbox가
+  `pending`과 다음 재시도 시각을 보존하므로 조교의 정상 수동 개입을 요구하지 않는다.
+  같은 취소 PATCH 재시도는 `200`으로 현재 취소 상태를 반환하고 outbox를 중복 생성하지
+  않는다. 응답의 `notification.targets`가 최초 두 접수 또는 이미 접수된 재시도를
+  대상별로 표시한다. SMS/LMS 대체는 없다.
+- 림글리쉬도 같은 계약을 사용한다. 큐에는 공용 owner tenant와 승인된
+  `clinic_change` template ID를 넣고, `source_tenant_id`와 서명으로 림글리쉬를 보존한다.
+  worker는 provider 호출 직전에만 활성 channel binding과 `APPROVED`·동일 지문 template
+  binding을 림글리쉬 채널/템플릿으로 치환한다. 합성 QA는 두 수신자 enqueue·서명·라우팅만
+  확인하고 provider 실수신과 SMS/LMS를 발생시키지 않는다.
+- 교직원의 행정 취소 권한과 교직원 수신자 선택은 유지한다.
 
 ### 자동 시작 리마인더
 
@@ -200,6 +242,8 @@ bulk 모두 `409`로 거부하고 요청 전체를 롤백한다. 일정 변경�
 - API 액션·커밋 후 알림: `apps/domains/clinic/views/participant_views.py`
 - tenant/session 정책: `apps/core/models/tenant.py`, `apps/domains/clinic/models.py`
 - 집중 API 회귀: `tests/test_clinic_multi_slot_booking_api.py`
+- 직접 취소·부작용 0·학생/학부모·PostgreSQL 동시성 회귀:
+  `tests/test_clinic_self_cancellation.py`
 - 시간 범위·권한·연락처·알림 이력 회귀: `tests/test_clinic_time_range_policy_api.py`
 - 하원·등원 독립 회귀: `tests/test_clinic_operations_workflow_api.py`
 - 상태 소유권·오늘 계획·패스카드·완료 감사 회귀:

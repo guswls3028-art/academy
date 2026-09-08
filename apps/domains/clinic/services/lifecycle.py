@@ -20,8 +20,12 @@ from apps.support.clinic.session_dependencies import (
     cancel_pending_clinic_participant_reminders,
     clinic_enrollment_for_tenant,
     clinic_reason_for_unresolved_auto_links,
+    clinic_reasons_for_unresolved_auto_links,
+    enrollments_for_clinic_tenant,
     locked_clinic_links_for_participant_plan,
     preferred_active_enrollment_id_for_student_session,
+    send_clinic_event_notification,
+    student_has_current_required_clinic_target,
 )
 
 
@@ -29,6 +33,12 @@ class Conflict(APIException):
     status_code = 409
     default_detail = "요청이 현재 데이터 상태와 충돌합니다."
     default_code = "conflict"
+
+
+class ClinicNotificationOutboxUnavailable(APIException):
+    status_code = 503
+    default_detail = "취소 안내 접수를 완료하지 못했습니다. 잠시 후 다시 시도해 주세요."
+    default_code = "clinic_notification_outbox_unavailable"
 
 
 def cancel_active_participants_for_student(*, tenant, student, changed_at) -> int:
@@ -50,6 +60,7 @@ class ClinicNotificationEvent:
 class ParticipantTransitionResult:
     participant: SessionParticipant
     notification: ClinicNotificationEvent | None = None
+    notification_result: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -91,12 +102,109 @@ STUDENT_STATUS_TRANSITIONS = {
     SessionParticipant.Status.PENDING: {
         SessionParticipant.Status.CANCELLED,
     },
-    SessionParticipant.Status.BOOKED: set(),
+    SessionParticipant.Status.BOOKED: {
+        SessionParticipant.Status.CANCELLED,
+    },
     SessionParticipant.Status.ATTENDED: set(),
     SessionParticipant.Status.NO_SHOW: set(),
     SessionParticipant.Status.REJECTED: set(),
     SessionParticipant.Status.CANCELLED: set(),
 }
+
+SELF_CANCEL_ACTIVE_STATUSES = (
+    SessionParticipant.Status.PENDING,
+    SessionParticipant.Status.BOOKED,
+)
+
+
+@dataclass(frozen=True)
+class ParticipantSelfCancelPolicy:
+    allowed: bool
+    reason: str
+
+
+def _participant_booking_end_at(participant: SessionParticipant) -> datetime.datetime:
+    session = participant.session
+    session_start = datetime.datetime.combine(session.date, session.start_time)
+    if participant.booking_end_time is not None:
+        end_at = datetime.datetime.combine(session.date, participant.booking_end_time)
+        booking_start = participant.booking_start_time or session.start_time
+        if participant.booking_end_time <= booking_start:
+            end_at += datetime.timedelta(days=1)
+    else:
+        end_at = session_start + datetime.timedelta(
+            minutes=int(session.duration_minutes or 0)
+        )
+    if timezone.is_naive(end_at):
+        end_at = timezone.make_aware(end_at, timezone.get_current_timezone())
+    return end_at
+
+
+def _has_remaining_active_week_booking(
+    *,
+    tenant,
+    participant: SessionParticipant,
+    at: datetime.datetime,
+) -> bool:
+    session_date = participant.session.date
+    week_start = session_date - datetime.timedelta(days=session_date.weekday())
+    week_end = week_start + datetime.timedelta(days=6)
+    candidates = SessionParticipant.objects.filter(
+        tenant=tenant,
+        student=participant.student,
+        student__deleted_at__isnull=True,
+        session__tenant=tenant,
+        session__date__range=(week_start, week_end),
+        status__in=SELF_CANCEL_ACTIVE_STATUSES,
+        checked_out_at__isnull=True,
+        completed_at__isnull=True,
+    ).exclude(pk=participant.pk).select_related("session")
+    return any(_participant_booking_end_at(candidate) > at for candidate in candidates)
+
+
+def participant_self_cancel_policy(
+    *,
+    tenant,
+    participant: SessionParticipant,
+    has_current_required_target: bool | None = None,
+) -> ParticipantSelfCancelPolicy:
+    if participant.status not in SELF_CANCEL_ACTIVE_STATUSES:
+        return ParticipantSelfCancelPolicy(
+            allowed=False,
+            reason="이미 종료된 예약은 취소할 수 없습니다.",
+        )
+    if not participant.session_id:
+        return ParticipantSelfCancelPolicy(
+            allowed=True,
+            reason="아직 확정 일정이 없는 예약 신청은 직접 취소할 수 있습니다.",
+        )
+    if has_current_required_target is None:
+        has_current_required_target = student_has_current_required_clinic_target(
+            tenant=tenant,
+            student=participant.student,
+        )
+    if not has_current_required_target:
+        return ParticipantSelfCancelPolicy(
+            allowed=True,
+            reason="직접 취소할 수 있습니다. 취소 시 학생과 학부모님께 안내됩니다.",
+        )
+
+    if _has_remaining_active_week_booking(
+        tenant=tenant,
+        participant=participant,
+        at=timezone.now(),
+    ):
+        return ParticipantSelfCancelPolicy(
+            allowed=True,
+            reason="같은 주의 다른 예약을 남기고 이 예약을 취소할 수 있습니다.",
+        )
+    return ParticipantSelfCancelPolicy(
+        allowed=False,
+        reason=(
+            "필수 클리닉 대상자는 같은 주에 예약을 최소 1개 유지해야 합니다. "
+            "다른 일정을 먼저 예약하면 이 예약을 취소할 수 있습니다."
+        ),
+    )
 
 COMPLETE_ALLOWED_STATUSES = {
     SessionParticipant.Status.ATTENDED,
@@ -493,6 +601,49 @@ def _status_notification(
     )
 
 
+def _persist_self_cancel_notification_outboxes(
+    *,
+    tenant,
+    event: ClinicNotificationEvent,
+) -> dict[str, Any]:
+    context = dict(event.context)
+    context.setdefault("_source_domain", "clinic")
+    context.setdefault("_source_use_case", "clinic.clinic_cancelled")
+    targets = []
+    for target in ("parent", "student"):
+        try:
+            requested = send_clinic_event_notification(
+                tenant=tenant,
+                trigger="clinic_cancelled",
+                student=event.student,
+                send_to=target,
+                context=context,
+            )
+        except Exception as exc:
+            raise ClinicNotificationOutboxUnavailable() from exc
+        if not requested:
+            raise ClinicNotificationOutboxUnavailable()
+        targets.append({"target": target, "requested": True})
+    return {
+        "requested": 2,
+        "failed": 0,
+        "send_to": "both",
+        "targets": targets,
+    }
+
+
+def _already_cancelled_notification_result() -> dict[str, Any]:
+    return {
+        "requested": 0,
+        "failed": 0,
+        "send_to": "both",
+        "targets": [
+            {"target": target, "requested": False, "already_requested": True}
+            for target in ("parent", "student")
+        ],
+    }
+
+
 def _complete_notification(participant: SessionParticipant) -> ClinicNotificationEvent:
     session = participant.session
     now = timezone.now()
@@ -551,7 +702,24 @@ def change_participant_status(
     if next_status not in allowed_statuses:
         raise ValidationError({"detail": f"Invalid status: {next_status}"})
 
+    if request_student:
+        request_student = (
+            active_students_for_clinic_tenant(tenant)
+            .select_for_update()
+            .get(pk=request_student.pk)
+        )
     participant = _locked_participant(tenant=tenant, participant_id=participant_id)
+    if request_student and participant.student_id != request_student.id:
+        raise PermissionDenied("다른 학생의 예약을 수정할 수 없습니다.")
+    if (
+        request_student
+        and next_status == SessionParticipant.Status.CANCELLED
+        and participant.status == SessionParticipant.Status.CANCELLED
+    ):
+        return ParticipantTransitionResult(
+            participant=participant,
+            notification_result=_already_cancelled_notification_result(),
+        )
     if participant.checked_out_at is not None:
         raise ValidationError({"detail": "하원 처리된 참가자의 등원 상태는 변경할 수 없습니다."})
     transitions = STUDENT_STATUS_TRANSITIONS if request_student else STAFF_STATUS_TRANSITIONS
@@ -562,12 +730,14 @@ def change_participant_status(
         )
 
     if request_student:
-        if participant.student_id != request_student.id:
-            raise PermissionDenied("다른 학생의 예약을 수정할 수 없습니다.")
-        if participant.status != SessionParticipant.Status.PENDING:
-            raise PermissionDenied("승인 대기 중인 예약만 취소할 수 있습니다.")
         if next_status != SessionParticipant.Status.CANCELLED:
             raise PermissionDenied("학생은 예약 취소만 가능합니다.")
+        cancel_policy = participant_self_cancel_policy(
+            tenant=tenant,
+            participant=participant,
+        )
+        if not cancel_policy.allowed:
+            raise Conflict(cancel_policy.reason)
 
     changed_at = timezone.now()
     participant.status = next_status
@@ -613,9 +783,20 @@ def change_participant_status(
             reason=f"booking_{next_status}",
             removed_at=changed_at,
         )
+    notification = _status_notification(participant, next_status, actor=actor)
+    if request_student and next_status == SessionParticipant.Status.CANCELLED:
+        if notification is None:
+            raise ClinicNotificationOutboxUnavailable()
+        return ParticipantTransitionResult(
+            participant=participant,
+            notification_result=_persist_self_cancel_notification_outboxes(
+                tenant=tenant,
+                event=notification,
+            ),
+        )
     return ParticipantTransitionResult(
         participant=participant,
-        notification=_status_notification(participant, next_status, actor=actor),
+        notification=notification,
     )
 
 
@@ -1201,9 +1382,13 @@ def create_participant(
             session=session,
         )
 
-    clinic_reason = validated_data.get("clinic_reason") or _clinic_reason_for_enrollment(
-        tenant=tenant,
-        enrollment_id=enrollment_id,
+    clinic_reason = (
+        validated_data["clinic_reason"]
+        if "clinic_reason" in validated_data
+        else _clinic_reason_for_enrollment(
+            tenant=tenant,
+            enrollment_id=enrollment_id,
+        )
     )
 
     if not requested_status:
@@ -1249,7 +1434,8 @@ def create_participants_bulk(
     *,
     tenant,
     session_ids: list[int],
-    student_ids: list[int],
+    student_ids: list[int] | None = None,
+    enrollment_ids: list[int] | None = None,
     request_student=None,
     student_request_memo: str = "",
     memo: str = "",
@@ -1260,27 +1446,71 @@ def create_participants_bulk(
 ) -> ParticipantBulkWriteResult:
     """Create the complete same-day session/student selection or create nothing."""
     requested_session_ids = [int(session_id) for session_id in session_ids]
+    requested_student_ids = [int(student_id) for student_id in (student_ids or [])]
+    requested_enrollment_ids = [
+        int(enrollment_id) for enrollment_id in (enrollment_ids or [])
+    ]
     if request_student is not None:
-        if student_ids:
+        if requested_student_ids or requested_enrollment_ids:
             raise PermissionDenied("다른 학생의 클리닉 예약을 신청할 수 없습니다.")
-        students = [
+        booking_targets = [(
             _lock_active_student_for_booking(
                 tenant=tenant,
                 student=request_student,
-            )
-        ]
+            ),
+            None,
+        )]
     else:
-        if not student_ids:
+        if requested_student_ids and requested_enrollment_ids:
+            raise ValidationError(
+                {"detail": "student_ids와 enrollment_ids 중 하나만 선택해 주세요."}
+            )
+        if not requested_student_ids and not requested_enrollment_ids:
             raise ValidationError({"student_ids": "추가할 학생을 한 명 이상 선택해 주세요."})
-        requested_student_ids = [int(student_id) for student_id in student_ids]
-        students = list(
-            active_students_for_clinic_tenant(tenant)
-            .filter(id__in=requested_student_ids)
-            .select_for_update()
-            .order_by("id")
-        )
-        if len(students) != len(requested_student_ids):
-            raise NotFound("선택한 학생을 찾을 수 없습니다.")
+        if requested_enrollment_ids:
+            enrollments = list(
+                enrollments_for_clinic_tenant(tenant)
+                .filter(id__in=requested_enrollment_ids, status="ACTIVE")
+                .select_for_update()
+                .order_by("id")
+            )
+            if len(enrollments) != len(requested_enrollment_ids):
+                raise NotFound("선택한 수강 대상을 찾을 수 없습니다.")
+            if len({enrollment.student_id for enrollment in enrollments}) != len(enrollments):
+                raise ValidationError(
+                    {"enrollment_ids": "같은 학생의 수강 대상은 한 번만 선택해 주세요."}
+                )
+            students = list(
+                active_students_for_clinic_tenant(tenant)
+                .filter(id__in=[enrollment.student_id for enrollment in enrollments])
+                .select_for_update()
+                .order_by("id")
+            )
+            if len(students) != len(enrollments):
+                raise NotFound("선택한 수강 대상의 학생을 찾을 수 없습니다.")
+            student_by_id = {student.id: student for student in students}
+            enrollment_by_id = {enrollment.id: enrollment for enrollment in enrollments}
+            booking_targets = [
+                (
+                    student_by_id[enrollment_by_id[enrollment_id].student_id],
+                    enrollment_by_id[enrollment_id],
+                )
+                for enrollment_id in requested_enrollment_ids
+            ]
+        else:
+            students = list(
+                active_students_for_clinic_tenant(tenant)
+                .filter(id__in=requested_student_ids)
+                .select_for_update()
+                .order_by("id")
+            )
+            if len(students) != len(requested_student_ids):
+                raise NotFound("선택한 학생을 찾을 수 없습니다.")
+            student_by_id = {student.id: student for student in students}
+            booking_targets = [
+                (student_by_id[student_id], None)
+                for student_id in requested_student_ids
+            ]
 
     sessions = list(
         Session.objects
@@ -1319,11 +1549,16 @@ def create_participants_bulk(
 
     participants: list[SessionParticipant] = []
     notifications: list[ClinicNotificationEvent] = []
-    for student in students:
+    exact_enrollment_reasons = clinic_reasons_for_unresolved_auto_links(
+        tenant,
+        [enrollment.id for _, enrollment in booking_targets if enrollment is not None],
+    )
+    for student, enrollment in booking_targets:
         for session in sessions:
             validated_data = {
                 "session": session,
                 "student": student,
+                "enrollment": enrollment,
                 "student_request_memo": student_request_memo,
                 "memo": memo,
                 "preferred_start_time": preferred_start_time,
@@ -1331,6 +1566,10 @@ def create_participants_bulk(
                 "booking_start_time": booking_start_time,
                 "booking_end_time": booking_end_time,
             }
+            if enrollment is not None:
+                validated_data["clinic_reason"] = exact_enrollment_reasons.get(
+                    enrollment.id
+                )
             result = create_participant(
                 tenant=tenant,
                 validated_data=validated_data,

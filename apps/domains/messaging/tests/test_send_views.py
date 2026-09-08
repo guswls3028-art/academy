@@ -91,7 +91,7 @@ class SendMessageViewTests(TestCase):
             name=f"학생{suffix}",
             phone=phone,
             parent_phone=parent_phone,
-            omr_code=f"99{suffix}",
+            omr_code=phone[-8:],
         )
         TenantMembership.ensure_active(
             tenant=self.tenant,
@@ -309,6 +309,105 @@ class SendMessageViewTests(TestCase):
         self.assertEqual(enqueue_alimtalk.call_args.kwargs["to"], "01011112222")
         self.assertEqual(enqueue_alimtalk.call_args.kwargs["target_type"], "student")
         self.assertEqual(enqueue_alimtalk.call_args.kwargs["target_id"], self.student.id)
+
+    def test_scheduled_grade_message_to_student_persists_exact_tenant_recipient_without_provider_send(self):
+        sibling = self._create_student(
+            "S-GRADE-SIBLING",
+            phone="01022223333",
+            parent_phone=self.student.parent_phone,
+        )
+        other_tenant = Tenant.objects.create(
+            code="msg-grade-other",
+            name="Other Grade Tenant",
+            is_active=True,
+        )
+        other_user = User.objects.create_user(
+            username=user_internal_username(other_tenant, "S-GRADE-OTHER"),
+            password="test1234",
+            tenant=other_tenant,
+            phone="01099998888",
+            name="타원생",
+        )
+        other_student = Student.objects.create(
+            tenant=other_tenant,
+            user=other_user,
+            ps_number="S-GRADE-OTHER",
+            name="타원생",
+            phone="01099998888",
+            parent_phone=self.student.parent_phone,
+            omr_code="99887766",
+        )
+        TenantMembership.ensure_active(
+            tenant=other_tenant,
+            user=other_user,
+            role="student",
+        )
+
+        body = "단원평가 85/100"
+        request = self.factory.post(
+            "/api/v1/messaging/send/",
+            data={
+                "send_to": "student",
+                "student_ids": [self.student.id, other_student.id, self.student.id],
+                "raw_body": body,
+                "block_category": "grades",
+                "alimtalk_extra_vars": {
+                    "강의명": "중2 수학",
+                    "차시명": "1차시",
+                },
+                "alimtalk_extra_vars_per_student": {
+                    str(self.student.id): {"_body_subst": body},
+                },
+                "scheduled_send_at": (timezone.now() + timedelta(hours=1)).isoformat(),
+            },
+            format="json",
+        )
+        force_authenticate(request, user=self.admin)
+        request.user = self.admin
+        request.tenant = self.tenant
+
+        with (
+            patch(
+                "apps.domains.messaging.services.get_tenant_site_url",
+                return_value="https://example.test",
+            ),
+            patch(
+                "apps.domains.messaging.services.enqueue_alimtalk",
+            ) as enqueue_alimtalk,
+            patch(
+                "apps.domains.messaging.policy.send_alimtalk_via_owner",
+            ) as provider_send,
+        ):
+            response = self._send(request)
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["enqueued"], 0)
+        self.assertEqual(response.data["scheduled"], 1)
+        enqueue_alimtalk.assert_not_called()
+        provider_send.assert_not_called()
+
+        scheduled = ScheduledNotification.objects.get(tenant=self.tenant)
+        scheduled.refresh_from_db()
+        self.assertEqual(scheduled.trigger, "manual_send")
+        self.assertEqual(scheduled.status, ScheduledNotification.Status.PENDING)
+        self.assertEqual(scheduled.payload["message_mode"], "alimtalk")
+        self.assertEqual(scheduled.payload["target_type"], "student")
+        self.assertEqual(scheduled.payload["target_id"], self.student.id)
+        self.assertEqual(scheduled.payload["to"], self.student.phone)
+        self.assertFalse(
+            ScheduledNotification.objects.filter(
+                tenant=self.tenant,
+                payload__target_id=sibling.id,
+            ).exists()
+        )
+        self.assertFalse(
+            ScheduledNotification.objects.filter(
+                tenant=other_tenant,
+            ).exists()
+        )
+        self.assertFalse(
+            NotificationLog.objects.filter(message_mode__in=["sms", "lms"]).exists()
+        )
 
     def test_grade_message_rejects_incomplete_per_student_bodies(self):
         second_student = self._create_student(

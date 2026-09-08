@@ -1,8 +1,8 @@
 # 학부모 계정 SSOT
 
 **상태:** Active
-**최종 점검:** 2026-08-22
-**코드 기준:** `apps/domains/parents/services/__init__.py`, `apps/domains/parents/models.py`, `apps/api/common/auth_jwt.py`
+**최종 점검:** 2026-09-07
+**코드 기준:** `apps/domains/parents/services/__init__.py`, `apps/domains/parents/models.py`, `apps/domains/student_app/permissions.py`, `apps/domains/submissions/views/homework_submission_media_view.py`, `apps/api/common/auth_jwt.py`
 
 ## 1. 계정 생성 규칙
 
@@ -65,6 +65,29 @@
 
 학생 생성 경로의 Parent/User/Student/Membership 계정 그래프는
 [student-creation.md](student-creation.md)가 정본이다.
+
+### 2.1 선택 자녀 학습 대리행위
+
+학부모는 학생 앱에서 활성 연결 자녀를 명시적으로 선택한 뒤 그 자녀의 온라인 시험
+답안과 과제 사진·영상을 제출할 수 있다. 요청은 항상 `X-Student-Id`를 포함해야 하며,
+서버는 해당 자녀가 현재 테넌트에서 이 학부모에게 연결돼 있는지와 활성 수강·시험 또는
+과제 배정을 모두 다시 검증한다. 헤더 누락, 연결되지 않은 학생, 다른 테넌트 학생,
+다른 자녀의 수강 ID는 다른 자녀로 보정하지 않고 쓰기 전에 거절한다.
+
+대리 제출의 `Submission.user`는 학부모가 아니라 선택 자녀의 로그인 User다. 따라서
+성적·미제출 상태·교사 검수함 같은 후속 투영은 학생 본인 제출과 동일하게 이어진다.
+실제 요청자가 자녀 User와 다르면 `Submission.meta.submitted_by_user_id`에 학부모 User
+ID를 남긴다. 학생이 먼저 만든 기존 과제 제출에 학부모가 파일을 추가하는 경우에도
+같은 메타데이터를 보완한다. 과제 파일 삭제의 `removed_by`도 실제 요청자를 기록한다. 완료·통과 후
+변경 잠금과 파일 형식·용량·중복·재시도 규칙은 학생 제출과 동일하다.
+
+선택 자녀의 질문·상담 작성·수정·삭제와 첨부 관리, 학생 인벤토리 폴더/파일 관리,
+성적표 제출, 영상 진행률 저장도 같은 `X-Student-Id` 검증을 사용한다. 생성된 글·파일·
+성적·영상 진행률은 자녀 데이터로 조회되며 실제 학부모 작성 글은 `author_role=parent`,
+성적표는 `submitted_by` 학부모를 보존한다. 누락·미소유·삭제·다른 tenant 자녀나 payload의
+다른 학생 식별자는 쓰기 전에 실패 폐쇄한다. 자녀 프로필은 읽기 전용이며 학부모
+비밀번호 변경은 학부모 자신의 계정에만 적용한다. 학생 비밀번호·아이디·프로필 및
+관리자 설정은 위임 범위가 아니다.
 
 `ensure_parent_for_student()`는 기존 호출부 호환용 facade다. 알림톡·운영 안내처럼
 비밀번호 안내 문구가 필요한 신규 경로는 반드시 `ensure_parent_account_for_student()`

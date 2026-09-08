@@ -67,8 +67,10 @@ from apps.support.results.exam_policy_dependencies import (
     exam_pass_score_overrides,
 )
 from apps.support.results.assessment_correction_dependencies import (
+    homework_media_set_fingerprint,
     set_teacher_assessment_resolution,
 )
+from apps.support.homework.review_lock import lock_homework_review_target
 from apps.support.results.session_scores_dependencies import (
     AssessmentCorrection,
     ClinicLink,
@@ -1063,6 +1065,7 @@ class SessionScoreCorrectionView(APIView):
         serializer = AssessmentCorrectionUpdateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         payload = serializer.validated_data
+        completed = bool(payload["completed"])
 
         session = get_object_or_404(
             Session.objects.select_related("lecture"),
@@ -1136,17 +1139,11 @@ class SessionScoreCorrectionView(APIView):
             )
             homework_assignment = None
             if homework is not None:
-                homework_assignment = (
-                    HomeworkAssignment.objects
-                    .select_for_update()
-                    .only("id")
-                    .filter(
-                        tenant=tenant,
-                        session=session,
-                        homework_id=source_id,
-                        enrollment_id=enrollment_id,
-                    )
-                    .first()
+                homework_assignment = lock_homework_review_target(
+                    tenant=tenant,
+                    session_id=int(session.id),
+                    homework_id=source_id,
+                    enrollment_id=enrollment_id,
                 )
             if homework is None or homework_assignment is None:
                 raise ValidationError(
@@ -1167,6 +1164,12 @@ class SessionScoreCorrectionView(APIView):
                 score = _float_or_none(homework_score.score)
                 max_score = _float_or_none(homework_score.max_score)
                 source_updated_at = homework_score.updated_at
+            if completed:
+                source_fingerprint = homework_media_set_fingerprint(
+                    tenant=tenant,
+                    enrollment_id=enrollment_id,
+                    homework_id=source_id,
+                )
 
         if source_type == AssessmentCorrection.SourceType.EXAM:
             if score is None or max_score is None or max_score <= 0:
@@ -1178,7 +1181,6 @@ class SessionScoreCorrectionView(APIView):
                     {"source_id": "오답이 없는 만점 결과는 확인 완료로 자동 처리됩니다."}
                 )
 
-        completed = bool(payload["completed"])
         existing_correction = (
             AssessmentCorrection.objects
             .select_for_update()
