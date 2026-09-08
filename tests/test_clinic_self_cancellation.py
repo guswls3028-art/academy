@@ -1,21 +1,28 @@
 import datetime
 import threading
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from django.db import close_old_connections, connection
-from django.test import TransactionTestCase
+from django.test import TransactionTestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
+from apps.core.models import Tenant, TenantMembership
 from apps.domains.clinic.models import SessionParticipant, SessionParticipantPlanItem
 from apps.domains.clinic.services import change_participant_status
 from apps.domains.clinic.services.lifecycle import Conflict
 from apps.domains.clinic.tests import ClinicAPITestMixin, ClinicTestMixin
 from apps.domains.exams.models import Exam
-from apps.domains.messaging.models import ScheduledNotification
+from apps.domains.messaging.alimtalk_content_builders import SOLAPI_CLINIC_CHANGE
+from apps.domains.messaging.models import (
+    AlimtalkChannelBinding,
+    AlimtalkTemplateBinding,
+    ScheduledNotification,
+)
+from apps.domains.messaging.security import verify_tenant_binding_signature
 from apps.domains.parents.models import Parent
 from apps.domains.progress.models import SessionProgress
-from apps.core.models import TenantMembership
 
 
 class ClinicSelfCancellationAPITest(APITestCase, ClinicAPITestMixin):
@@ -247,6 +254,149 @@ class ClinicSelfCancellationAPITest(APITestCase, ClinicAPITestMixin):
             {"target": "parent", "requested": True},
             {"target": "student", "requested": False},
         ])
+
+    def test_limglish_both_target_notifications_keep_verified_alimtalk_route_without_provider_send(self):
+        from apps.domains.clinic.views.participant_views import _send_clinic_notification
+        from apps.domains.messaging.sqs_queue import MessagingSQSQueue
+        from apps.worker.messaging_worker.sqs_main import (
+            _allowed_common_template_ids,
+            _resolve_tenant_delivery_context,
+            _worker_tenant_binding_error,
+        )
+
+        self.tenant.code = "limglish"
+        self.tenant.name = "Limglish"
+        self.tenant.save(update_fields=["code", "name"])
+        self.student.phone = "01011112222"
+        self.student.parent_phone = "01033334444"
+        self.student.save(update_fields=["phone", "parent_phone"])
+        owner = Tenant.objects.create(code="alimtalk-owner", name="Alimtalk Owner")
+
+        now = timezone.now()
+        channel = AlimtalkChannelBinding.objects.create(
+            tenant=self.tenant,
+            channel_id="VERIFIED-LIMGLISH-CHANNEL",
+            status=AlimtalkChannelBinding.Status.ACTIVE,
+            verified_at=now,
+            last_synced_at=now,
+        )
+        mapping = AlimtalkTemplateBinding.objects.create(
+            channel=channel,
+            source_template_id=SOLAPI_CLINIC_CHANGE,
+            channel_template_id="APPROVED-LIMGLISH-CLINIC-CHANGE",
+            status="APPROVED",
+            source_fingerprint="same-clinic-change-fingerprint",
+            channel_fingerprint="same-clinic-change-fingerprint",
+            last_synced_at=now,
+        )
+        source_template = SimpleNamespace(
+            tenant_id=self.tenant.id,
+            body="클리닉 예약 취소 안내",
+            name="클리닉 예약 취소 안내",
+            solapi_template_id="",
+            solapi_status="",
+        )
+        source_config = SimpleNamespace(
+            enabled=True,
+            message_mode="alimtalk",
+            template=source_template,
+            show_actual_time=False,
+            delay_mode="immediate",
+            delay_value=None,
+        )
+        dispatched = []
+
+        def get_config(tenant_id, trigger):
+            self.assertEqual(trigger, "clinic_cancelled")
+            return source_config if int(tenant_id) == self.tenant.id else None
+
+        def capture_dispatch(*, tenant_id, trigger, payload):
+            dispatched.append({
+                "tenant_id": tenant_id,
+                "trigger": trigger,
+                "payload": dict(payload),
+            })
+            return SimpleNamespace(status=ScheduledNotification.Status.PENDING)
+
+        fake_queue = MagicMock()
+        fake_queue.send_message.return_value = True
+        settings_override = override_settings(
+            OWNER_TENANT_ID=owner.id,
+            SOLAPI_KAKAO_PF_ID="COMMON-OWNER-CHANNEL",
+            MESSAGING_TENANT_BINDING_KEY="limglish-clinic-contract-key",
+        )
+        with settings_override, patch(
+            "apps.domains.messaging.selectors.get_auto_send_config",
+            side_effect=get_config,
+        ), patch(
+            "apps.domains.messaging.scheduled.dispatch_notification_now",
+            side_effect=capture_dispatch,
+        ), patch(
+            "apps.domains.messaging.sqs_queue.get_queue_client",
+            return_value=fake_queue,
+        ), patch(
+            "apps.worker.messaging_worker.sqs_main.send_one_alimtalk",
+        ) as provider_send:
+            result = _send_clinic_notification(
+                self.tenant,
+                self.student,
+                "clinic_cancelled",
+                {"_domain_object_id": "clinic_participant:77:clinic_cancelled:1"},
+                send_to="both",
+                include_target_results=True,
+            )
+            queue = MessagingSQSQueue(wake_messaging_workers=False)
+            for item in dispatched:
+                self.assertEqual(item["tenant_id"], self.tenant.id)
+                self.assertEqual(item["trigger"], "clinic_cancelled")
+                self.assertTrue(queue.enqueue(**item["payload"]))
+
+            route = _resolve_tenant_delivery_context(
+                owner.id,
+                self.tenant.id,
+                SOLAPI_CLINIC_CHANGE,
+            )
+            provider_send.assert_not_called()
+
+        self.assertEqual(result, {
+            "requested": 2,
+            "failed": 0,
+            "send_to": "both",
+            "targets": [
+                {"target": "parent", "requested": True},
+                {"target": "student", "requested": True},
+            ],
+        })
+        self.assertEqual(mapping.status, "APPROVED")
+        self.assertEqual(_allowed_common_template_ids("clinic_cancelled"), {SOLAPI_CLINIC_CHANGE})
+        self.assertEqual(route["billing_tenant_id"], self.tenant.id)
+        self.assertEqual(route["channel_source"], "tenant_verified")
+        self.assertEqual(route["channel"]["pf_id"], "VERIFIED-LIMGLISH-CHANNEL")
+        self.assertEqual(route["template_id"], "APPROVED-LIMGLISH-CLINIC-CHANGE")
+
+        messages = [call.kwargs["message"] for call in fake_queue.send_message.call_args_list]
+        self.assertEqual(len(messages), 2)
+        self.assertCountEqual(
+            [message["target_type"] for message in messages],
+            ["parent", "student"],
+        )
+        with override_settings(
+            MESSAGING_TENANT_BINDING_KEY="limglish-clinic-contract-key",
+        ):
+            for message in messages:
+                self.assertEqual(message["tenant_id"], owner.id)
+                self.assertEqual(message["source_tenant_id"], self.tenant.id)
+                self.assertEqual(message["event_type"], "clinic_cancelled")
+                self.assertEqual(message["message_mode"], "alimtalk")
+                self.assertEqual(message["template_id"], SOLAPI_CLINIC_CHANGE)
+                self.assertIsNone(message["sender"])
+                self.assertEqual(_worker_tenant_binding_error(message), "")
+                self.assertTrue(verify_tenant_binding_signature(
+                    signature=message["tenant_binding_signature"],
+                    tenant_id=message["tenant_id"],
+                    source_tenant_id=message["source_tenant_id"],
+                    business_idempotency_key=message["business_idempotency_key"],
+                ))
 
     def test_resolved_stale_and_completed_links_do_not_block_final_booking(self):
         cases = []

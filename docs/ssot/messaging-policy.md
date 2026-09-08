@@ -141,6 +141,12 @@ preview→confirm 경로에서 선생이 명시적으로 확인한 경우에만 
 - 이 스크립트는 API 인스턴스에서 `messaging_verify_common_alimtalk`을 실행하며, 수신번호는 통제번호 `01031217466` 하나만 허용한다.
 - 검증 트리거는 owner exact approved template(`password_reset_student` 기본)을 사용한다. SMS/LMS, tenant별 PFID/provider, 템플릿 fallback을 쓰지 않는다.
 - 성공 판정은 SQS enqueue가 아니라 워커가 만든 `NotificationLog.status=sent`, `message_mode=alimtalk`, `tenant_id=OWNER_TENANT_ID`, `provider_message_id` 기록까지다.
+- 림글리쉬 클리닉 취소 배포 readback은 개인정보 없이 `limglish` binding 활성 상태,
+  공용 `clinic_change` ID에 대응하는 `APPROVED`·동일 지문 template binding, API/worker의
+  동일 owner/binding 설정, queue·DLQ 깊이를 확인한다. 합성 QA에서는 학생·학부모 양쪽의
+  서명된 `clinic_cancelled` payload와 `tenant_verified` route 준비까지만 검증하고 provider
+  호출·실수신·SMS/LMS는 0으로 유지한다. 실제 `sent` 확인은 승인된 실사용 취소 이벤트가
+  발생한 뒤 recipient 원문 없이 business key·target type·provider 상태로만 수행한다.
 - 제품 메시징 사고는 `python manage.py diagnose_messaging_incident --tenant-id <id> --recipient <번호> [--origin-id <job-id>] [--since-hours 72] [--provider]`로 조회한다. 출력은 상태/트리거/연결 건수와 공급자 type/status 집계만 포함하고 번호·본문·비밀번호·provider ID·입력한 origin ID를 출력하지 않는다.
 - 잔액 충전/자동충전 뒤 audited recovery가 기존 이력을 보존하며 `sent`와 provider id까지 닫혔는지 확인한다. `ambiguous`는 접수 여부가 불명확하므로 자동 재발송하지 않고 공급자 대사 후 수동 조치한다.
 
