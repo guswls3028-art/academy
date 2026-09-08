@@ -131,6 +131,27 @@ bulk 모두 `409`로 거부하고 요청 전체를 롤백한다. 일정 변경�
 규칙을 그대로 따른다. 학생 직접 예약 생성·일정 변경·취소 알림은 기존 계약대로
 학생과 학부모 모두에게 보내며, 교직원 수신자 선택 규칙은 변경하지 않는다.
 
+### 학생·학부모 직접 취소
+
+학생과 선택된 자녀를 이용하는 학부모는 자신의 `pending` 또는 `booked` 예약을
+**내 일정**에서 직접 취소한다. 취소 가능 여부는 API의 `can_self_cancel`과
+`self_cancel_reason`이 소유하며 화면이 미통과 항목이나 예약 수를 다시 추측하지 않는다.
+
+- 패스카드와 같은 현재 유효·미해결 자동 `ClinicLink`가 없으면 마지막 예약도 취소할 수 있다.
+- 현재 필수 대상이면 취소할 예약의 `Session.date`가 속한 월요일~일요일에
+  `pending|booked` 예약을 최소 1개 남겨야 한다. 같은 주 활성 예약이 2개 이상일 때만
+  하나를 취소할 수 있으며 다른 주 예약은 이 수에 포함하지 않는다.
+- 해소된 링크, 원본 시험·과제가 차시에서 제거된 stale 링크, 비활성 수강 또는
+  완료된 차시의 링크는 필수 대상으로 세지 않는다.
+- self-service 취소는 학생 row를 먼저 잠근 뒤 주간 활성 예약 수를 다시 읽으므로
+  두 예약을 동시에 취소해도 하나만 성공하고 하나는 `409`로 끝난다. 차단된 요청은
+  참가자·오늘 계획·미발송 리마인더·알림 outbox를 전혀 바꾸지 않는다.
+- 성공한 취소는 상태와 계획/리마인더 정리를 먼저 커밋하고, `clinic_cancelled` 알림톡을
+  학생과 학부모 각각에게 강제로 요청한다. 응답의 `notification.targets`가 두 대상의
+  접수 여부를 개별 표시한다. SMS/LMS 대체는 없으며 확정 실패 재시도는 기존 exact
+  log/outbox 기반 `retry-notification`을 사용해 같은 재시도 occurrence를 중복 생성하지 않는다.
+- 교직원의 행정 취소 권한과 교직원 수신자 선택은 유지한다.
+
 ### 자동 시작 리마인더
 
 `send_clinic_reminders`는 기존 tenant의 `clinic_reminder` enabled 및
@@ -200,6 +221,8 @@ bulk 모두 `409`로 거부하고 요청 전체를 롤백한다. 일정 변경�
 - API 액션·커밋 후 알림: `apps/domains/clinic/views/participant_views.py`
 - tenant/session 정책: `apps/core/models/tenant.py`, `apps/domains/clinic/models.py`
 - 집중 API 회귀: `tests/test_clinic_multi_slot_booking_api.py`
+- 직접 취소·부작용 0·학생/학부모·PostgreSQL 동시성 회귀:
+  `tests/test_clinic_self_cancellation.py`
 - 시간 범위·권한·연락처·알림 이력 회귀: `tests/test_clinic_time_range_policy_api.py`
 - 하원·등원 독립 회귀: `tests/test_clinic_operations_workflow_api.py`
 - 상태 소유권·오늘 계획·패스카드·완료 감사 회귀:

@@ -22,6 +22,7 @@ from apps.support.clinic.session_dependencies import (
     clinic_reason_for_unresolved_auto_links,
     locked_clinic_links_for_participant_plan,
     preferred_active_enrollment_id_for_student_session,
+    student_has_current_required_clinic_target,
 )
 
 
@@ -91,12 +92,77 @@ STUDENT_STATUS_TRANSITIONS = {
     SessionParticipant.Status.PENDING: {
         SessionParticipant.Status.CANCELLED,
     },
-    SessionParticipant.Status.BOOKED: set(),
+    SessionParticipant.Status.BOOKED: {
+        SessionParticipant.Status.CANCELLED,
+    },
     SessionParticipant.Status.ATTENDED: set(),
     SessionParticipant.Status.NO_SHOW: set(),
     SessionParticipant.Status.REJECTED: set(),
     SessionParticipant.Status.CANCELLED: set(),
 }
+
+SELF_CANCEL_ACTIVE_STATUSES = (
+    SessionParticipant.Status.PENDING,
+    SessionParticipant.Status.BOOKED,
+)
+
+
+@dataclass(frozen=True)
+class ParticipantSelfCancelPolicy:
+    allowed: bool
+    reason: str
+
+
+def participant_self_cancel_policy(
+    *,
+    tenant,
+    participant: SessionParticipant,
+    has_current_required_target: bool | None = None,
+) -> ParticipantSelfCancelPolicy:
+    if participant.status not in SELF_CANCEL_ACTIVE_STATUSES:
+        return ParticipantSelfCancelPolicy(
+            allowed=False,
+            reason="이미 종료된 예약은 취소할 수 없습니다.",
+        )
+    if not participant.session_id:
+        return ParticipantSelfCancelPolicy(
+            allowed=True,
+            reason="아직 확정 일정이 없는 예약 신청은 직접 취소할 수 있습니다.",
+        )
+    if has_current_required_target is None:
+        has_current_required_target = student_has_current_required_clinic_target(
+            tenant=tenant,
+            student=participant.student,
+        )
+    if not has_current_required_target:
+        return ParticipantSelfCancelPolicy(
+            allowed=True,
+            reason="직접 취소할 수 있습니다. 취소 시 학생과 학부모님께 안내됩니다.",
+        )
+
+    session_date = participant.session.date
+    week_start = session_date - datetime.timedelta(days=session_date.weekday())
+    week_end = week_start + datetime.timedelta(days=6)
+    active_booking_count = SessionParticipant.objects.filter(
+        tenant=tenant,
+        student=participant.student,
+        student__deleted_at__isnull=True,
+        session__tenant=tenant,
+        session__date__range=(week_start, week_end),
+        status__in=SELF_CANCEL_ACTIVE_STATUSES,
+    ).count()
+    if active_booking_count >= 2:
+        return ParticipantSelfCancelPolicy(
+            allowed=True,
+            reason="같은 주의 다른 예약을 남기고 이 예약을 취소할 수 있습니다.",
+        )
+    return ParticipantSelfCancelPolicy(
+        allowed=False,
+        reason=(
+            "필수 클리닉 대상자는 같은 주에 예약을 최소 1개 유지해야 합니다. "
+            "다른 일정을 먼저 예약하면 이 예약을 취소할 수 있습니다."
+        ),
+    )
 
 COMPLETE_ALLOWED_STATUSES = {
     SessionParticipant.Status.ATTENDED,
@@ -551,6 +617,12 @@ def change_participant_status(
     if next_status not in allowed_statuses:
         raise ValidationError({"detail": f"Invalid status: {next_status}"})
 
+    if request_student:
+        request_student = (
+            active_students_for_clinic_tenant(tenant)
+            .select_for_update()
+            .get(pk=request_student.pk)
+        )
     participant = _locked_participant(tenant=tenant, participant_id=participant_id)
     if participant.checked_out_at is not None:
         raise ValidationError({"detail": "하원 처리된 참가자의 등원 상태는 변경할 수 없습니다."})
@@ -564,10 +636,14 @@ def change_participant_status(
     if request_student:
         if participant.student_id != request_student.id:
             raise PermissionDenied("다른 학생의 예약을 수정할 수 없습니다.")
-        if participant.status != SessionParticipant.Status.PENDING:
-            raise PermissionDenied("승인 대기 중인 예약만 취소할 수 있습니다.")
         if next_status != SessionParticipant.Status.CANCELLED:
             raise PermissionDenied("학생은 예약 취소만 가능합니다.")
+        cancel_policy = participant_self_cancel_policy(
+            tenant=tenant,
+            participant=participant,
+        )
+        if not cancel_policy.allowed:
+            raise Conflict(cancel_policy.reason)
 
     changed_at = timezone.now()
     participant.status = next_status
