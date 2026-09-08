@@ -2,7 +2,7 @@ import datetime
 import threading
 from unittest.mock import patch
 
-from django.db import close_old_connections
+from django.db import close_old_connections, connection
 from django.test import TransactionTestCase
 from django.utils import timezone
 from rest_framework.test import APITestCase
@@ -230,6 +230,7 @@ class ClinicSelfCancellationAPITest(APITestCase, ClinicAPITestMixin):
                 "clinic_cancelled",
                 {"_domain_object_id": "clinic_participant:1:clinic_cancelled:1"},
                 send_to="both",
+                include_target_results=True,
             )
 
         self.assertEqual(
@@ -395,6 +396,8 @@ class ClinicSelfCancellationConcurrencyTest(TransactionTestCase, ClinicTestMixin
         ]
 
     def test_two_simultaneous_cancellations_leave_exactly_one_active_booking(self):
+        if connection.vendor != "postgresql":
+            self.skipTest("select_for_update concurrency contract requires PostgreSQL")
         barrier = threading.Barrier(2)
         outcomes = []
         outcome_lock = threading.Lock()

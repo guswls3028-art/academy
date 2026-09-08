@@ -134,7 +134,15 @@ def _get_request_student_for_clinic(request):
     return student
 
 
-def _send_clinic_notification(tenant, student, trigger, context=None, *, send_to="both"):
+def _send_clinic_notification(
+    tenant,
+    student,
+    trigger,
+    context=None,
+    *,
+    send_to="both",
+    include_target_results=False,
+):
     """Queue the exact approved clinic Alimtalk for selected recipients only."""
     event_context = dict(context or {})
     event_context.setdefault("_source_domain", "clinic")
@@ -164,12 +172,14 @@ def _send_clinic_notification(tenant, student, trigger, context=None, *, send_to
                 getattr(student, "id", "?"),
                 target,
             )
-    return {
+    result = {
         "requested": requested,
         "failed": failed,
         "send_to": send_to,
-        "targets": target_results,
     }
+    if include_target_results:
+        result["targets"] = target_results
+    return result
 
 
 # ============================================================
@@ -422,6 +432,7 @@ class ParticipantViewSet(
                 result.notification.trigger,
                 result.notification.context,
                 send_to=send_to,
+                include_target_results=request_student is not None,
             )
 
         out = ClinicSessionParticipantSerializer(
