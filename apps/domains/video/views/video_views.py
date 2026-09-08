@@ -9,7 +9,8 @@ from django.db import models, transaction
 from django.db.utils import IntegrityError
 from django.utils import timezone
 
-from rest_framework import status
+from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
+from rest_framework import serializers, status
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.filters import SearchFilter
@@ -438,6 +439,38 @@ class VideoViewSet(VideoPlaybackMixin, ModelViewSet):
         return Response({"updated": len(video_ids)}, status=status.HTTP_200_OK)
 
     @transaction.atomic
+    @extend_schema(
+        request=inline_serializer(
+            name="VideoBulkPolicy",
+            fields={
+                "session_id": serializers.IntegerField(min_value=1),
+                "video_ids": serializers.ListField(
+                    child=serializers.IntegerField(min_value=1),
+                    allow_empty=False,
+                    min_length=1,
+                    max_length=500,
+                ),
+                "allow_skip": serializers.BooleanField(required=False),
+                "max_speed": serializers.FloatField(
+                    required=False,
+                    min_value=0.25,
+                    max_value=5.0,
+                ),
+            },
+        ),
+        responses={
+            200: inline_serializer(
+                name="VideoBulkPolicyResponse",
+                fields={
+                    "updated": serializers.IntegerField(min_value=0),
+                    "changed": serializers.IntegerField(min_value=0),
+                },
+            ),
+            400: OpenApiResponse(
+                description="Invalid policy fields or a non-exact tenant/session/video target",
+            ),
+        },
+    )
     @action(detail=False, methods=["post"], url_path="bulk-policy")
     def bulk_policy(self, request):
         """Atomically update playback defaults for videos in one tenant session."""

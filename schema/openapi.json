@@ -17154,6 +17154,54 @@
         ],
         "type": "string"
       },
+      "VideoBulkPolicyRequest": {
+        "properties": {
+          "allow_skip": {
+            "type": "boolean"
+          },
+          "max_speed": {
+            "format": "double",
+            "maximum": 5.0,
+            "minimum": 0.25,
+            "type": "number"
+          },
+          "session_id": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "video_ids": {
+            "items": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "maxItems": 500,
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "session_id",
+          "video_ids"
+        ],
+        "type": "object"
+      },
+      "VideoBulkPolicyResponse": {
+        "properties": {
+          "changed": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "updated": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "changed",
+          "updated"
+        ],
+        "type": "object"
+      },
       "VisibilityEnum": {
         "description": "* `ENROLLED` - 수강생 전용\n* `PUBLIC` - 전체 공개",
         "enum": [
@@ -35747,6 +35795,48 @@
               }
             },
             "description": ""
+          }
+        },
+        "security": [
+          {
+            "jwtAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "tags": [
+          "media"
+        ]
+      }
+    },
+    "/api/v1/media/videos/bulk-policy/": {
+      "post": {
+        "description": "Atomically update playback defaults for videos in one tenant session.",
+        "operationId": "media_videos_bulk_policy_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VideoBulkPolicyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoBulkPolicyResponse"
+                }
+              }
+            },
+            "description": ""
+          },
+          "400": {
+            "description": "Invalid policy fields or a non-exact tenant/session/video target"
           }
         },
         "security": [
