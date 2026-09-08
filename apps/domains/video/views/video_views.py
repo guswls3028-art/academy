@@ -219,8 +219,9 @@ class VideoViewSet(VideoPlaybackMixin, ModelViewSet):
         return super().update(request, *args, **kwargs)
 
     def perform_update(self, serializer):
-        locked = self.get_queryset().select_for_update().get(
+        locked = Video.objects.select_for_update().get(
             pk=serializer.instance.pk,
+            tenant=self.request.tenant,
         )
         serializer.instance = locked
         policy_changed = any(
