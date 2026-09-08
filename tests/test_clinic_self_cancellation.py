@@ -1,5 +1,6 @@
 import datetime
 import json
+import logging
 import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -468,6 +469,10 @@ class ClinicSelfCancellationAPITest(APITestCase, ClinicAPITestMixin):
         )
         fake_queue = MagicMock()
         fake_queue.send_message.return_value = True
+        existing_django_logger = logging.getLogger(
+            "apps.domains.student_app.media.views"
+        )
+        self.assertFalse(existing_django_logger.disabled)
         settings_override = override_settings(
             OWNER_TENANT_ID=owner.id,
             SOLAPI_KAKAO_PF_ID="COMMON-OWNER-CHANNEL",
@@ -547,6 +552,7 @@ class ClinicSelfCancellationAPITest(APITestCase, ClinicAPITestMixin):
                     "_record_progress",
                 ), patch.object(sqs_main.signal, "signal"):
                     self.assertEqual(sqs_main.main(), 0)
+                    self.assertFalse(existing_django_logger.disabled)
             finally:
                 sqs_main._shutdown = False
 

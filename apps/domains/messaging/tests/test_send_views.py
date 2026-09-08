@@ -91,7 +91,7 @@ class SendMessageViewTests(TestCase):
             name=f"학생{suffix}",
             phone=phone,
             parent_phone=parent_phone,
-            omr_code=f"99{suffix}",
+            omr_code=phone[-8:],
         )
         TenantMembership.ensure_active(
             tenant=self.tenant,

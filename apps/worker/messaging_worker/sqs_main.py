@@ -662,7 +662,10 @@ def main() -> int:
     # Django context: 예약/유저 등 DB 조회가 필요할 때 ORM 사용 가능하도록
     if os.environ.get("DJANGO_SETTINGS_MODULE"):
         import django
-        django.setup()
+        from django.apps import apps as django_apps
+
+        if not django_apps.ready:
+            django.setup()
         logger.info("Django setup done (ORM available)")
 
         # DB 연결 검증 (startup validation): 연결 불가 시 즉시 종료

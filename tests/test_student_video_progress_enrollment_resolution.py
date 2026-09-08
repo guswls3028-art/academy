@@ -294,7 +294,7 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
             user=child_user,
             name="Foreign Video Student",
             ps_number="SVP-FOREIGN",
-            omr_code="SVFOREIGN",
+            omr_code="SVFOREI1",
             parent_phone="01012345678",
             school_type="HIGH",
         )

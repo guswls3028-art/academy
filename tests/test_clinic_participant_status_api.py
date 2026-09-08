@@ -198,8 +198,8 @@ class ParticipantPendingStatusTransitionAPITest(APITestCase, ClinicAPITestMixin)
         )
 
         with patch(
-            "apps.domains.clinic.views.participant_views._send_clinic_notification",
-            return_value={"requested": 2, "failed": 0, "send_to": "both"},
+            "apps.domains.clinic.services.lifecycle.send_clinic_event_notification",
+            return_value=True,
         ) as notify:
             resp = self.client.patch(
                 f"/api/v1/clinic/participants/{participant.id}/set_status/",
@@ -212,6 +212,12 @@ class ParticipantPendingStatusTransitionAPITest(APITestCase, ClinicAPITestMixin)
         participant.refresh_from_db()
         self.assertEqual(participant.status, "cancelled")
         self.assertEqual(participant.status_changed_by_id, self.student.user_id)
-        notify.assert_called_once()
-        self.assertEqual(notify.call_args.args[2], "clinic_cancelled")
-        self.assertEqual(notify.call_args.kwargs["send_to"], "both")
+        self.assertEqual(notify.call_count, 2)
+        self.assertEqual(
+            [captured.kwargs["send_to"] for captured in notify.call_args_list],
+            ["parent", "student"],
+        )
+        for captured in notify.call_args_list:
+            self.assertEqual(captured.kwargs["tenant"], self.tenant)
+            self.assertEqual(captured.kwargs["trigger"], "clinic_cancelled")
+            self.assertEqual(captured.kwargs["student"], self.student)
