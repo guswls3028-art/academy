@@ -1,6 +1,8 @@
 # PATH: apps/domains/clinic/serializers.py
 
 from datetime import datetime, timedelta
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from .models import Session, SessionParticipant, Test, Submission
 from .services.lifecycle import booking_availability_for_session
@@ -287,11 +289,13 @@ class ClinicSessionParticipantSerializer(serializers.ModelSerializer):
             )
         return self.context[cache_key]
 
+    @extend_schema_field(OpenApiTypes.BOOL)
     def get_can_self_cancel(self, obj):
         if self._self_cancel_is_staff_request():
             return False
         return self._self_cancel_policy(obj).allowed
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_self_cancel_reason(self, obj):
         if self._self_cancel_is_staff_request():
             return "교직원은 클리닉 명단에서 취소할 수 있습니다."

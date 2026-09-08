@@ -1380,6 +1380,10 @@
             "nullable": true,
             "type": "string"
           },
+          "can_self_cancel": {
+            "readOnly": true,
+            "type": "boolean"
+          },
           "checked_in_at": {
             "format": "date-time",
             "nullable": true,
@@ -1521,6 +1525,10 @@
             "nullable": true,
             "type": "string"
           },
+          "self_cancel_reason": {
+            "readOnly": true,
+            "type": "string"
+          },
           "session": {
             "nullable": true,
             "type": "integer"
@@ -1598,6 +1606,7 @@
           }
         },
         "required": [
+          "can_self_cancel",
           "checked_out_by_name",
           "completed_by_name",
           "completion_history",
@@ -1613,6 +1622,7 @@
           "preferred_start_time",
           "profile_photo_url",
           "recipient_contacts",
+          "self_cancel_reason",
           "session_date",
           "session_duration_minutes",
           "session_end_time",
@@ -19143,7 +19153,7 @@
     },
     "/api/v1/clinic/participants/{id}/set_status/": {
       "patch": {
-        "description": "PATCH /clinic/participants/{id}/set_status/\n- 상태 변경 + audit 기록\n- 학생: 자신의 예약 신청(status=\"pending\")만 취소 가능\n- 선생: 모든 상태 변경 가능",
+        "description": "PATCH /clinic/participants/{id}/set_status/\n- 상태 변경 + audit 기록\n- 학생/학부모: 자신의 pending/booked 예약 취소 가능. 필수 대상자는 같은 주 예약 1개 유지\n- 선생: 모든 상태 변경 가능",
         "operationId": "clinic_participants_set_status_partial_update",
         "parameters": [
           {
@@ -39433,7 +39443,7 @@
     },
     "/api/v1/results/admin/clinic-bookings/{id}/set_status/": {
       "patch": {
-        "description": "PATCH /clinic/participants/{id}/set_status/\n- 상태 변경 + audit 기록\n- 학생: 자신의 예약 신청(status=\"pending\")만 취소 가능\n- 선생: 모든 상태 변경 가능",
+        "description": "PATCH /clinic/participants/{id}/set_status/\n- 상태 변경 + audit 기록\n- 학생/학부모: 자신의 pending/booked 예약 취소 가능. 필수 대상자는 같은 주 예약 1개 유지\n- 선생: 모든 상태 변경 가능",
         "operationId": "results_admin_clinic_bookings_set_status_partial_update",
         "parameters": [
           {
