@@ -255,6 +255,31 @@ class HomeworkSubmissionMediaTests(TestCase):
         upload_fileobj_to_r2.assert_called_once()
 
     @patch("apps.domains.submissions.services.homework_media.upload_fileobj_to_r2")
+    def test_parent_followup_upload_records_actor_on_existing_child_submission(
+        self,
+        upload_fileobj_to_r2,
+    ):
+        self._link_parent()
+        student_upload = self._post(
+            file=_jpeg("student-proof.jpg", body=b"student-proof"),
+            position=0,
+        )
+        parent_upload = self._post(
+            file=_jpeg("parent-followup.jpg", body=b"parent-followup-proof"),
+            position=1,
+            user=self.parent_user,
+            student_id=self.student.id,
+        )
+
+        self.assertEqual(student_upload.status_code, 201, student_upload.data)
+        self.assertEqual(parent_upload.status_code, 201, parent_upload.data)
+        self.assertEqual(Submission.objects.count(), 1)
+        submission = Submission.objects.get()
+        self.assertEqual(submission.user_id, self.student_user.id)
+        self.assertEqual(submission.meta["submitted_by_user_id"], self.parent_user.id)
+        self.assertEqual(upload_fileobj_to_r2.call_count, 2)
+
+    @patch("apps.domains.submissions.services.homework_media.upload_fileobj_to_r2")
     def test_parent_cannot_upload_without_explicit_selected_child(
         self,
         upload_fileobj_to_r2,

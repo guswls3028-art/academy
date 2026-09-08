@@ -201,6 +201,12 @@ def _ensure_parent_submission(
         .first()
     )
     if parent:
+        if getattr(user, "id", None) != getattr(submitted_by_user, "id", None):
+            meta = dict(parent.meta or {})
+            if meta.get("submitted_by_user_id") != submitted_by_user.id:
+                meta["submitted_by_user_id"] = submitted_by_user.id
+                parent.meta = meta
+                parent.save(update_fields=["meta", "updated_at"])
         return parent
 
     try:
@@ -238,6 +244,12 @@ def _ensure_parent_submission(
                 code="HOMEWORK_MEDIA_PARENT_CONFLICT",
                 detail="현재 제출 정보를 다시 불러온 뒤 시도해 주세요.",
             )
+        if getattr(user, "id", None) != getattr(submitted_by_user, "id", None):
+            meta = dict(parent.meta or {})
+            if meta.get("submitted_by_user_id") != submitted_by_user.id:
+                meta["submitted_by_user_id"] = submitted_by_user.id
+                parent.meta = meta
+                parent.save(update_fields=["meta", "updated_at"])
         return parent
 
 
