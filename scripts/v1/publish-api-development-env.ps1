@@ -124,6 +124,30 @@ if ($r2Bucket -in $productionBucketNames) {
     throw "Development R2 bucket must not overlap any production R2 bucket."
 }
 
+$productionCdnSigningSecret = ([string]$production.CDN_HLS_SIGNING_SECRET).Trim()
+if (
+    ([string]$production.CDN_HLS_BASE_URL).Trim().TrimEnd("/") -ne "https://cdn.hakwonplus.com" -or
+    $productionCdnSigningSecret.Length -lt 32 -or
+    ([string]$production.CDN_HLS_SIGNING_KEY_ID).Trim() -ne "v1"
+) {
+    throw "Production source env does not contain the canonical signed video contract."
+}
+$cdnSigningSecretBytes = New-Object byte[] 32
+try {
+    [System.Security.Cryptography.RandomNumberGenerator]::Fill($cdnSigningSecretBytes)
+    $script:ApiDevelopmentCdnSigningSecret = [Convert]::ToBase64String(
+        $cdnSigningSecretBytes
+    )
+} finally {
+    [Array]::Clear($cdnSigningSecretBytes, 0, $cdnSigningSecretBytes.Length)
+}
+if (
+    $script:ApiDevelopmentCdnSigningSecret.Length -lt 32 -or
+    $script:ApiDevelopmentCdnSigningSecret -eq $productionCdnSigningSecret
+) {
+    throw "Development video signing secret generation did not preserve isolation."
+}
+
 function Set-IsolatedDevelopmentValues {
     param(
         [object]$Target,
@@ -174,6 +198,9 @@ function Set-IsolatedDevelopmentValues {
         SECRET_KEY = $djangoSecret
         MESSAGING_TENANT_BINDING_KEY = $bindingSecret
         MESSAGING_TENANT_BINDING_FALLBACK_KEYS = ""
+        CDN_HLS_BASE_URL = "https://cdn.hakwonplus.com"
+        CDN_HLS_SIGNING_SECRET = $script:ApiDevelopmentCdnSigningSecret
+        CDN_HLS_SIGNING_KEY_ID = "v1"
         DB_NAME = $developmentDatabaseName
         DB_USER = $credentialUser
         DB_PASSWORD = $credentialPassword
@@ -280,6 +307,9 @@ if (
     [string]$actual.DB_PASSWORD -ne $credentialPassword -or
     [string]$actual.DJANGO_SETTINGS_MODULE -ne "apps.api.config.settings.development" -or
     [string]$actual.ACADEMY_RUNTIME_ENV -ne "development" -or
+    [string]$actual.CDN_HLS_BASE_URL -ne "https://cdn.hakwonplus.com" -or
+    [string]$actual.CDN_HLS_SIGNING_SECRET -ne $script:ApiDevelopmentCdnSigningSecret -or
+    [string]$actual.CDN_HLS_SIGNING_KEY_ID -ne "v1" -or
     [string]$actual.TOOLS_SQS_QUEUE_NAME -ne $script:ApiDevelopmentToolsQueueName -or
     [string]$actual.VIDEO_BATCH_JOB_QUEUE -ne "" -or
     [string]$actual.VIDEO_BATCH_JOB_DEFINITION -ne "" -or
@@ -310,6 +340,9 @@ if (
     [string]$actualWorkers.DB_NAME -ne $developmentDatabaseName -or
     [string]$actualWorkers.DB_USER -ne $developmentDatabaseUser -or
     [string]$actualWorkers.DJANGO_SETTINGS_MODULE -ne "apps.api.config.settings.worker" -or
+    [string]$actualWorkers.CDN_HLS_BASE_URL -ne "https://cdn.hakwonplus.com" -or
+    [string]$actualWorkers.CDN_HLS_SIGNING_SECRET -ne $script:ApiDevelopmentCdnSigningSecret -or
+    [string]$actualWorkers.CDN_HLS_SIGNING_KEY_ID -ne "v1" -or
     [string]$actualWorkers.TOOLS_SQS_QUEUE_NAME -ne $script:ApiDevelopmentToolsQueueName -or
     [string]$actualWorkers.VIDEO_BATCH_JOB_QUEUE -ne "" -or
     [string]$actualWorkers.VIDEO_BATCH_JOB_DEFINITION -ne "" -or

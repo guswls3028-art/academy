@@ -92,6 +92,18 @@ if os.getenv("R2_REGION", "") != "auto":
     raise ImproperlyConfigured("Development object storage must use R2 region auto.")
 if not os.getenv("R2_ACCESS_KEY") or not os.getenv("R2_SECRET_KEY"):
     raise ImproperlyConfigured("Development R2 credentials must be dedicated and explicit.")
+if CDN_HLS_BASE_URL.rstrip("/") != "https://cdn.hakwonplus.com":  # noqa: F405
+    raise ImproperlyConfigured(
+        "Development video playback must use the canonical protected CDN URL."
+    )
+if len((CDN_HLS_SIGNING_SECRET or "").strip()) < 32:  # noqa: F405
+    raise ImproperlyConfigured(
+        "Development video playback requires an isolated signing secret."
+    )
+if CDN_HLS_SIGNING_KEY_ID != "v1":  # noqa: F405
+    raise ImproperlyConfigured(
+        "Development video playback requires the active v1 signing key ID."
+    )
 if os.getenv("SOLAPI_MOCK", "").strip().lower() not in {"1", "true", "yes"}:
     raise ImproperlyConfigured("Development messaging must be mock-only.")
 if os.getenv("TOSS_AUTO_BILLING_ENABLED", "").strip().lower() in {
