@@ -340,6 +340,9 @@ assert settings.MESSAGING_SQS_QUEUE_NAME == "__MESSAGING_QUEUE__"
 assert settings.R2_STORAGE_BUCKET == "__BUCKET__"
 assert settings.R2_ENDPOINT.endswith(".r2.cloudflarestorage.com")
 assert settings.R2_ACCESS_KEY and settings.R2_SECRET_KEY
+assert settings.CDN_HLS_BASE_URL.rstrip("/") == "https://cdn.hakwonplus.com"
+assert len(settings.CDN_HLS_SIGNING_SECRET.strip()) >= 32
+assert settings.CDN_HLS_SIGNING_KEY_ID == "v1"
 assert not settings.VIDEO_BATCH_JOB_QUEUE
 assert not settings.VIDEO_BATCH_JOB_DEFINITION
 
@@ -387,6 +390,16 @@ PY
 docker exec -i academy-api python manage.py shell </tmp/academy_development_verify.py |
   grep -q DEVELOPMENT_BOUNDARY_PASS
 rm -f /tmp/academy_development_verify.py
+
+cdn_fingerprint_code='import hashlib; from django.conf import settings; secret=settings.CDN_HLS_SIGNING_SECRET.strip(); assert settings.CDN_HLS_BASE_URL.rstrip("/") == "https://cdn.hakwonplus.com"; assert len(secret) >= 32; assert settings.CDN_HLS_SIGNING_KEY_ID == "v1"; print(hashlib.sha256(secret.encode()).hexdigest())'
+api_cdn_signing_fingerprint=$(docker exec academy-api python -c "$cdn_fingerprint_code")
+for container in academy-tools-development academy-ai-development; do
+  worker_cdn_signing_fingerprint=$(docker exec "$container" python -c "$cdn_fingerprint_code")
+  [ "$worker_cdn_signing_fingerprint" = "$api_cdn_signing_fingerprint" ] || {
+    echo "DEVELOPMENT_FAIL container=$container video_signing_mismatch=true" >&2
+    exit 1
+  }
+done
 
 curl -fsS --max-time 10 http://127.0.0.1:8000/healthz >/dev/null
 curl -fsS --max-time 10 http://127.0.0.1:8000/health >/dev/null

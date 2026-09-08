@@ -31,6 +31,15 @@
   `VIDEO_BATCH_JOB_QUEUE`와 `VIDEO_BATCH_JOB_DEFINITION`은 빈 값으로 고정하고 settings와
   배포 readback에서도 이를 강제한다. 따라서 업로드 완료 후 Batch 제출은 누락 설정 오류로
   실패 폐쇄하며 운영 `academy-v1-video-batch-*` 큐·job definition으로 흘러가지 않는다.
+- 운영 `CDN_HLS_SIGNING_SECRET`은 개발 env에 복사하거나 다른 개발 credential에서 파생하지
+  않는다. env publication은 매 릴리스마다 암호학적 난수 32바이트로 개발 전용 키를 만들고,
+  운영 키와 다름을 확인한 뒤 API와 worker에 같은 `CDN_HLS_SIGNING_SECRET`과 key id `v1`을
+  넣는다. 두 versioned parameter의 exact equality는 값 노출 없이 readback한다. 이 키는 운영
+  CDN에서 신뢰되지 않으며, frontend 실사용 카나리는 playback/session 응답으로 받은 exact
+  signed URL만 메모리 HLS·poster fixture에 연결한다. 누락되면 unsigned URL을 허용하지 않고
+  릴리스를 실패시킨다. API와 worker settings가 각각 canonical CDN·키 길이·key id를
+  fail-closed로 검사하고, 개발 배포는 API·Tools·AI 컨테이너의 키 fingerprint가 모두 같은지도
+  값 노출 없이 확인한다.
 - 알림톡은 mock/dry-run, 자동 결제와 외부 알림 발송은 비활성화한다.
 
 ### SSM parameter 권한 경계

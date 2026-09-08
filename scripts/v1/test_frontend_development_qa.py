@@ -1086,5 +1086,37 @@ class FrontendDocumentPlanTests(unittest.TestCase):
                                 for case in rows), key)
 
 
+class DevelopmentVideoSigningContractTests(unittest.TestCase):
+    def test_published_development_env_uses_an_isolated_video_signing_secret(self):
+        source = (ROOT / "scripts/v1/publish-api-development-env.ps1").read_text()
+
+        self.assertIn("New-Object byte[] 32", source)
+        self.assertIn(
+            "[System.Security.Cryptography.RandomNumberGenerator]::Fill($cdnSigningSecretBytes)",
+            source,
+        )
+        self.assertNotIn("academy-development-cdn-signing:$credentialPassword", source)
+        self.assertIn('CDN_HLS_BASE_URL = "https://cdn.hakwonplus.com"', source)
+        self.assertRegex(
+            source,
+            r"CDN_HLS_SIGNING_SECRET\s*=\s*\$script:ApiDevelopmentCdnSigningSecret",
+        )
+        self.assertRegex(source, r'CDN_HLS_SIGNING_KEY_ID\s*=\s*"v1"')
+        self.assertGreaterEqual(
+            source.count('[string]$actual.CDN_HLS_SIGNING_SECRET -ne $script:ApiDevelopmentCdnSigningSecret'),
+            1,
+        )
+        self.assertGreaterEqual(
+            source.count('[string]$actualWorkers.CDN_HLS_SIGNING_SECRET -ne $script:ApiDevelopmentCdnSigningSecret'),
+            1,
+        )
+        self.assertIn('[string]$actual.CDN_HLS_SIGNING_KEY_ID -ne "v1"', source)
+        self.assertIn('[string]$actualWorkers.CDN_HLS_SIGNING_KEY_ID -ne "v1"', source)
+        self.assertIn(
+            "$script:ApiDevelopmentCdnSigningSecret -eq $productionCdnSigningSecret",
+            source,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
