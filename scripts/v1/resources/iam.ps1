@@ -208,6 +208,7 @@ function Ensure-ApiDevelopmentIAM {
                 Resource = @(
                     "arn:aws:ecr:$($script:Region):$($script:AccountId):repository/$($script:EcrApiRepo)",
                     "arn:aws:ecr:$($script:Region):$($script:AccountId):repository/$($script:EcrAiRepo)",
+                    "arn:aws:ecr:$($script:Region):$($script:AccountId):repository/$($script:EcrMessagingRepo)",
                     "arn:aws:ecr:$($script:Region):$($script:AccountId):repository/$($script:EcrToolsRepo)"
                 )
             },

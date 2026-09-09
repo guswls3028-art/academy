@@ -54,7 +54,7 @@ def _job_block(source: str, name: str) -> str:
     return block if next_job is None else block[: next_job.start()]
 
 
-def test_development_and_production_keep_tools_and_ai_workers_warm() -> None:
+def test_development_and_production_keep_workers_warm() -> None:
     params = yaml.safe_load(PARAMS.read_text(encoding="utf-8"))
     ai = params["aiWorker"]
     tools = params["toolsWorker"]
@@ -70,8 +70,10 @@ def test_development_and_production_keep_tools_and_ai_workers_warm() -> None:
     assert tools["maxSize"] == 2
     assert "academy-tools-development" in deploy
     assert "academy-ai-development" in deploy
+    assert "academy-messaging-development" in deploy
     assert "Development Tools worker stays a separate container/process" in deploy
     assert "Development AI worker stays a separate container/process" in deploy
+    assert "Development Messaging worker consumes only the dedicated development queue" in deploy
     assert "AI_WORKER_IDLE_SCALE_IN_ENABLED=0" in deploy
 
 
@@ -252,6 +254,7 @@ def test_development_settings_fail_closed_on_external_write_targets() -> None:
         "ApiDevelopmentR2BucketName",
         "R2_ENDPOINT = $r2Endpoint",
         'SOLAPI_MOCK = "true"',
+        'SOLAPI_KAKAO_PF_ID = "development-mock-pfid"',
         'TOSS_AUTO_BILLING_ENABLED = "false"',
         'VIDEO_BATCH_JOB_QUEUE = ""',
         'VIDEO_BATCH_JOB_DEFINITION = ""',
@@ -401,6 +404,7 @@ def test_development_role_cannot_read_production_env_or_touch_prod_queues() -> N
 
     assert "$script:EcrToolsRepo" in block
     assert "$script:EcrAiRepo" in block
+    assert "$script:EcrMessagingRepo" in block
     assert "EcrToolsWorkerRepo" not in block
     assert "EcrToolsWorkerRepo" not in INITIALIZE.read_text(encoding="utf-8-sig")
     assert "/academy/api/development/env" in block
@@ -473,6 +477,9 @@ def test_blue_green_development_deploy_preserves_old_instance_on_failure() -> No
     assert "DEVELOPMENT_RUNTIME_PASS" in source
     assert "__AI_IMAGE__" in source
     assert "academy-ai-development" in source
+    assert "__MESSAGING_IMAGE__" in source
+    assert "academy-messaging-development" in source
+    assert "development-mock-pfid" in source
     assert "start-instance-refresh" not in source
     assert "register-targets" not in source
     assert "academy-v1-api-asg" not in source
@@ -499,6 +506,7 @@ def test_workflow_enforces_development_then_preprod_then_production() -> None:
     assert "build-and-push" in development
     assert "publish-api-development-env.ps1" in development
     assert "deploy-api-development.ps1" in development
+    assert "-MessagingImageUri" in development
     assert "verify-api-development" in preprod
     assert "verify-api-preprod" in migrations
     assert "verify-api-preprod" in production_api

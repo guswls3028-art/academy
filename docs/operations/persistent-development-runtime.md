@@ -177,6 +177,15 @@ command나 shell 인자를 전달하는 parameter는 없고 기존 고정 parame
 부재를 확인하며 원래 scenario 명령을 reset 없이 사용한다. 생성과 같은 DB transaction에
 `OpsAuditLog(action=development.qa.setup)` 1행으로 exact tenant ID/code와 256-bit
 run capability의 SHA-256 digest를 기록한다. 감사 기록 실패도 전체 생성 rollback이다.
+
+계정·첫 수강 흐름도 운영과 같은 fail-closed 알림톡 계약을 사용한다. 개발 환경은
+외부 발송이 불가능한 `development-mock-pfid`와 `SOLAPI_MOCK=true`를 함께 고정하고,
+scenario Setup은 owner의 학생/학부모 가입 안내 및 비밀번호 복구 4개 설정에 exact
+APPROVED mock 템플릿을 보장한다. 이미 유효한 개발 템플릿은 보존한다. 이 공용 mock
+템플릿은 개발 런타임의 기준 데이터이므로 QA tenant cleanup 대상이 아니며 수신번호,
+자격 증명, 운영 provider 식별자를 저장하지 않는다. 전용 개발 messaging worker가
+개발 큐를 소비해 mock provider receipt를 영속화해야 계정 복구 실사용 검증이 통과한다.
+
 Cleanup은 같은 advisory lock/transaction 아래 exact tenant에 연결된 성공 소유권 행이
 정확히 1개이고 요청 capability digest가 일치할 때만 같은 명령의 destroy를 호출한다.
 누락·중복·다른 run capability·다른 tenant ID는 거부한다. 이미 부재하면 numeric

@@ -14,6 +14,9 @@ param(
     [ValidatePattern('^[0-9]+\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/academy-ai-worker-cpu@sha256:[0-9a-fA-F]{64}$')]
     [string]$AiImageUri,
     [Parameter(Mandatory = $true)]
+    [ValidatePattern('^[0-9]+\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/academy-messaging-worker@sha256:[0-9a-fA-F]{64}$')]
+    [string]$MessagingImageUri,
+    [Parameter(Mandatory = $true)]
     [ValidateRange(1, 100000)]
     [int]$ExpectedEnvVersion,
     [Parameter(Mandatory = $true)]
@@ -63,6 +66,7 @@ if (-not $script:ApiDevelopmentMatchProductionCompute) {
 Assert-ImmutableEcrImageUri -ImageUri $ApiImageUri
 Assert-ImmutableEcrImageUri -ImageUri $ToolsImageUri
 Assert-ImmutableEcrImageUri -ImageUri $AiImageUri
+Assert-ImmutableEcrImageUri -ImageUri $MessagingImageUri
 
 $profile = Invoke-AwsJson @(
     "iam", "get-instance-profile",
@@ -208,6 +212,26 @@ $toolsBootstrap = $toolsBootstrap.Replace("__DATABASE__", $script:ApiDevelopment
 $toolsBootstrap = $toolsBootstrap.Replace("__TOOLS_QUEUE__", $script:ApiDevelopmentToolsQueueName)
 $toolsBootstrap = $toolsBootstrap.Replace("__AI_QUEUE__", $script:ApiDevelopmentAiQueueName)
 $userData = "$userData`n$toolsBootstrap"
+
+$messagingBootstrap = @'
+
+# Development Messaging worker consumes only the dedicated development queue
+# and uses the mock provider boundary, so no external message can be sent.
+MESSAGING_IMAGE="__MESSAGING_IMAGE__"
+if ! docker pull "$MESSAGING_IMAGE" 2>>"$LOG"; then
+  log "Development messaging image pull failed: $MESSAGING_IMAGE"
+  exit 1
+fi
+docker stop academy-messaging-development 2>/dev/null || true
+docker rm academy-messaging-development 2>/dev/null || true
+docker run -d --restart unless-stopped --network host \
+  --name academy-messaging-development \
+  --env-file /opt/workers-development.env \
+  -e DJANGO_SETTINGS_MODULE=apps.api.config.settings.worker \
+  "$MESSAGING_IMAGE"
+'@
+$messagingBootstrap = $messagingBootstrap.Replace("__MESSAGING_IMAGE__", $MessagingImageUri)
+$userData = "$userData`n$messagingBootstrap"
 
 $aiBootstrap = @'
 
@@ -393,7 +417,7 @@ rm -f /tmp/academy_development_verify.py
 
 cdn_fingerprint_code='import hashlib; from django.conf import settings; secret=settings.CDN_HLS_SIGNING_SECRET.strip(); assert settings.CDN_HLS_BASE_URL.rstrip("/") == "https://cdn.hakwonplus.com"; assert len(secret) >= 32; assert settings.CDN_HLS_SIGNING_KEY_ID == "v1"; print(hashlib.sha256(secret.encode()).hexdigest())'
 api_cdn_signing_fingerprint=$(docker exec academy-api python -c "$cdn_fingerprint_code")
-for container in academy-tools-development academy-ai-development; do
+for container in academy-tools-development academy-ai-development academy-messaging-development; do
   worker_cdn_signing_fingerprint=$(docker exec "$container" python -c "$cdn_fingerprint_code")
   [ "$worker_cdn_signing_fingerprint" = "$api_cdn_signing_fingerprint" ] || {
     echo "DEVELOPMENT_FAIL container=$container video_signing_mismatch=true" >&2
@@ -401,14 +425,20 @@ for container in academy-tools-development academy-ai-development; do
   }
 done
 
+messaging_contract_code='import os; assert os.environ.get("ACADEMY_RUNTIME_ENV") == "development"; assert os.environ.get("SOLAPI_MOCK", "").lower() == "true"; assert os.environ.get("SOLAPI_KAKAO_PF_ID") == "development-mock-pfid"'
+docker exec academy-api python -c "$messaging_contract_code"
+docker exec academy-messaging-development python -c "$messaging_contract_code"
+
 curl -fsS --max-time 10 http://127.0.0.1:8000/healthz >/dev/null
 curl -fsS --max-time 10 http://127.0.0.1:8000/health >/dev/null
 api_image=$(docker inspect -f '{{.Config.Image}}' academy-api)
 tools_image=$(docker inspect -f '{{.Config.Image}}' academy-tools-development)
 ai_image=$(docker inspect -f '{{.Config.Image}}' academy-ai-development)
+messaging_image=$(docker inspect -f '{{.Config.Image}}' academy-messaging-development)
 [ "$api_image" = "__API_IMAGE__" ]
 [ "$tools_image" = "__TOOLS_IMAGE__" ]
 [ "$ai_image" = "__AI_IMAGE__" ]
+[ "$messaging_image" = "__MESSAGING_IMAGE__" ]
 (docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' academy-ai-development | grep -qx 'ACADEMY_RUNTIME_ENV=development')
 (docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' academy-ai-development | grep -qx 'AI_WORKER_IDLE_SCALE_IN_ENABLED=0')
 (redis6-cli ping 2>/dev/null || valkey-cli ping 2>/dev/null || redis-cli ping) | grep -q PONG
@@ -425,6 +455,7 @@ echo DEVELOPMENT_RUNTIME_PASS
     $remote = $remote.Replace("__API_IMAGE__", $ApiImageUri)
     $remote = $remote.Replace("__TOOLS_IMAGE__", $ToolsImageUri)
     $remote = $remote.Replace("__AI_IMAGE__", $AiImageUri)
+    $remote = $remote.Replace("__MESSAGING_IMAGE__", $MessagingImageUri)
     $remote = $remote.Replace("`r", "")
     $remoteB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($remote))
     $command = "echo '$remoteB64' | base64 -d | bash"

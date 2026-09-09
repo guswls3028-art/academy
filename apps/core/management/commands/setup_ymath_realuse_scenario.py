@@ -38,6 +38,31 @@ DEVELOPMENT_SETTINGS_MODULE = "apps.api.config.settings.development"
 DEVELOPMENT_DATABASE_NAME = "academy_api_development"
 DEVELOPMENT_DATABASE_USER = "academy_api_development_app"
 DEVELOPMENT_R2_BUCKET = "academy-development-artifacts"
+DEVELOPMENT_MOCK_ALIMTALK_PF_ID = "development-mock-pfid"
+DEVELOPMENT_MOCK_ACCOUNT_TEMPLATE_DEFINITIONS = {
+    "password_reset_student": {
+        "name": "[DEVELOPMENT QA] 학생 비밀번호 재설정",
+        "subject": "학생 비밀번호가 변경되었습니다",
+        "body": (
+            "#{학생이름}학생님, 비밀번호가 변경되었습니다.\n"
+            "아이디: #{아이디}\n"
+            "임시 비밀번호: #{임시비밀번호}\n"
+            "#{비밀번호안내}\n"
+            "#{사이트링크}"
+        ),
+    },
+    "password_reset_parent": {
+        "name": "[DEVELOPMENT QA] 학부모 비밀번호 재설정",
+        "subject": "학부모 비밀번호가 변경되었습니다",
+        "body": (
+            "#{학생이름}학생 학부모님, 비밀번호가 변경되었습니다.\n"
+            "아이디: #{아이디}\n"
+            "임시 비밀번호: #{임시비밀번호}\n"
+            "#{비밀번호안내}\n"
+            "#{사이트링크}"
+        ),
+    },
+}
 LOGIN_UAT_RESERVED_USERNAME_PREFIXES = (
     "ymath-qa-student-",
     "ymath-qa-staff-",
@@ -112,6 +137,98 @@ def _ymath_program_contract() -> tuple[dict, dict]:
             ui_config.update(source.ui_config)
     feature_flags.update(YMATH_FEATURE_FLAGS)
     return feature_flags, ui_config
+
+
+def _is_persistent_development_runtime() -> bool:
+    database = settings.DATABASES.get("default", {})
+    return (
+        str(os.environ.get("DJANGO_SETTINGS_MODULE") or "") == DEVELOPMENT_SETTINGS_MODULE
+        and str(database.get("NAME") or "") == DEVELOPMENT_DATABASE_NAME
+        and str(database.get("USER") or "") == DEVELOPMENT_DATABASE_USER
+    )
+
+
+def ensure_development_messaging_baseline() -> None:
+    """Converge exact owner templates needed by mock-only account real-use QA."""
+
+    if not _is_persistent_development_runtime():
+        raise CommandError("Development messaging fixtures require the persistent development runtime.")
+    if str(os.environ.get("SOLAPI_MOCK") or "").strip().lower() not in {"1", "true", "yes"}:
+        raise CommandError("Development messaging fixtures require SOLAPI_MOCK=true.")
+    if str(getattr(settings, "SOLAPI_KAKAO_PF_ID", "") or "").strip() != DEVELOPMENT_MOCK_ALIMTALK_PF_ID:
+        raise CommandError("Development messaging fixtures require the exact mock Alimtalk PFID.")
+
+    from apps.domains.messaging.default_templates import get_default_templates
+    from apps.domains.messaging.models import AutoSendConfig, MessageTemplate
+
+    owner_id = int(getattr(settings, "OWNER_TENANT_ID", 1))
+    owner = Tenant.objects.select_for_update().filter(pk=owner_id, is_active=True).first()
+    if owner is None:
+        raise CommandError("Development messaging owner tenant is missing or inactive.")
+
+    defaults = get_default_templates(owner.name)
+    definitions = {
+        trigger: {
+            "name": defaults[trigger]["name"],
+            "subject": defaults[trigger]["subject"],
+            "body": defaults[trigger]["body"],
+        }
+        for trigger in ("registration_approved_student", "registration_approved_parent")
+    }
+    definitions.update(DEVELOPMENT_MOCK_ACCOUNT_TEMPLATE_DEFINITIONS)
+
+    for trigger, definition in definitions.items():
+        config = (
+            AutoSendConfig.objects.select_for_update()
+            .filter(tenant=owner, trigger=trigger)
+            .first()
+        )
+        configured_template = config.template if config else None
+        if (
+            configured_template is not None
+            and configured_template.tenant_id == owner.id
+            and str(configured_template.solapi_template_id or "").strip()
+            and configured_template.solapi_status == "APPROVED"
+        ):
+            config.enabled = True
+            config.message_mode = "alimtalk"
+            config.minutes_before = None
+            config.delay_mode = "immediate"
+            config.delay_value = None
+            config.full_clean()
+            config.save()
+            continue
+
+        mock_template_id = f"development-mock-{trigger}"
+        fixtures = list(
+            MessageTemplate.objects.select_for_update()
+            .filter(tenant=owner, solapi_template_id=mock_template_id)
+            .order_by("id")[:2]
+        )
+        if len(fixtures) > 1:
+            raise CommandError(f"Ambiguous development mock template for {trigger}.")
+        template = fixtures[0] if fixtures else MessageTemplate(tenant=owner)
+        template.category = MessageTemplate.Category.SIGNUP
+        template.name = definition["name"]
+        template.subject = definition["subject"]
+        template.body = definition["body"]
+        template.solapi_template_id = mock_template_id
+        template.solapi_status = "APPROVED"
+        template.is_system = True
+        template.is_user_default = False
+        template.full_clean()
+        template.save()
+
+        if config is None:
+            config = AutoSendConfig(tenant=owner, trigger=trigger)
+        config.template = template
+        config.enabled = True
+        config.message_mode = "alimtalk"
+        config.minutes_before = None
+        config.delay_mode = "immediate"
+        config.delay_value = None
+        config.full_clean()
+        config.save()
 
 
 class Command(BaseCommand):
@@ -248,6 +365,8 @@ class Command(BaseCommand):
         synthetic_long_video_payload = None
         with transaction.atomic():
             self._lock_tenant_code(tenant_code)
+            if _is_persistent_development_runtime():
+                ensure_development_messaging_baseline()
             existing = self._exact_tenant_or_fail_on_case_variant(tenant_code)
             if login_uat and existing is not None and not options["reset"]:
                 raise CommandError("--login-uat requires --reset when the tenant already exists.")

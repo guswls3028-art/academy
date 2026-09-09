@@ -49,7 +49,7 @@ function Load-SSOT {
     $script:ApiDevelopmentSecurityGroupName='development'; $script:VpcId='vpc-fixture'
     $script:SecurityGroupData='sg-data'; $script:ApiDevelopmentAiQueueName='dev-ai'
     $script:ApiDevelopmentToolsQueueName='dev-tools'; $script:ApiDevelopmentMessagingQueueName='dev-messaging'
-    $script:EcrApiRepo='academy-api'; $script:EcrToolsRepo='academy-tools-worker'; $script:EcrAiRepo='academy-ai-worker-cpu'
+    $script:EcrApiRepo='academy-api'; $script:EcrToolsRepo='academy-tools-worker'; $script:EcrAiRepo='academy-ai-worker-cpu'; $script:EcrMessagingRepo='academy-messaging-worker'
 }
 """,
             "resources/worker_userdata.ps1": "function Get-ReleaseManifestImage { return @{GitSha=('a'*40);Digest=('sha256:'+('b'*64))} }",
@@ -61,8 +61,8 @@ $global:events.Add('child:publish')
 Set-Content -LiteralPath $GithubOutputPath -Value "parameter_version=1`nworkers_parameter_version=2`nproduction_database_name=production"
 """,
             "deploy-api-development.ps1": """
-param($ApiImageUri,$ToolsImageUri,$AiImageUri,$ExpectedEnvVersion,$ExpectedWorkersEnvVersion,$ExpectedReleaseId,$ExpectedProductionDatabaseName,$TimeoutSec,$AwsProfile)
-if ($ExpectedEnvVersion -ne 1 -or $ExpectedWorkersEnvVersion -ne 2 -or $ExpectedProductionDatabaseName -ne 'production' -or $ApiImageUri -notmatch '@sha256:') { throw 'initializer argument regression' }
+param($ApiImageUri,$ToolsImageUri,$AiImageUri,$MessagingImageUri,$ExpectedEnvVersion,$ExpectedWorkersEnvVersion,$ExpectedReleaseId,$ExpectedProductionDatabaseName,$TimeoutSec,$AwsProfile)
+if ($ExpectedEnvVersion -ne 1 -or $ExpectedWorkersEnvVersion -ne 2 -or $ExpectedProductionDatabaseName -ne 'production' -or $ApiImageUri -notmatch '@sha256:' -or $MessagingImageUri -notmatch 'academy-messaging-worker@sha256:') { throw 'initializer argument regression' }
 $global:events.Add('child:deploy')
 """,
         }

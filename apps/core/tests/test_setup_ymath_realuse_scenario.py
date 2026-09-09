@@ -17,10 +17,14 @@ from rest_framework_simplejwt.token_blacklist.models import OutstandingToken
 from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
 from apps.api.common.auth_jwt import TenantAwareTokenObtainPairSerializer
-from apps.core.management.commands.setup_ymath_realuse_scenario import Command
+from apps.core.management.commands.setup_ymath_realuse_scenario import (
+    Command,
+    ensure_development_messaging_baseline,
+)
 from apps.core.models import OpsAuditLog, Program, Tenant, TenantMembership
 from apps.core.models.user import user_display_username
 from apps.domains.parents.models import Parent
+from apps.domains.messaging.models import AutoSendConfig, MessageTemplate
 from apps.domains.staffs.models import Staff
 from apps.domains.video.models import (
     AccessMode,
@@ -93,6 +97,66 @@ class SetupYmathRealuseScenarioTests(TestCase):
         student = User.objects.get(username=f"t{tenant.id}_ymath-qa-student-01")
         self.assertTrue(student.check_password("scenario-test-password"))
         self.assertFalse(Video.objects.filter(tenant=tenant).exists())
+
+    def test_development_messaging_baseline_is_idempotent_and_preserves_approved_config(self):
+        owner = Tenant.objects.create(code="development-owner", name="Development Owner", is_active=True)
+        approved = MessageTemplate.objects.create(
+            tenant=owner,
+            category=MessageTemplate.Category.SIGNUP,
+            name="Existing approved student registration",
+            body="#{학생이름}",
+            solapi_template_id="existing-approved-registration",
+            solapi_status="APPROVED",
+            is_system=True,
+        )
+        existing_config = AutoSendConfig.objects.create(
+            tenant=owner,
+            trigger="registration_approved_student",
+            template=approved,
+            enabled=False,
+            message_mode="sms",
+        )
+
+        with (
+            override_settings(
+                OWNER_TENANT_ID=owner.id,
+                SOLAPI_KAKAO_PF_ID="development-mock-pfid",
+            ),
+            patch(
+                "apps.core.management.commands.setup_ymath_realuse_scenario._is_persistent_development_runtime",
+                return_value=True,
+            ),
+            patch.dict(os.environ, {"SOLAPI_MOCK": "true"}),
+        ):
+            ensure_development_messaging_baseline()
+            ensure_development_messaging_baseline()
+
+        existing_config.refresh_from_db()
+        self.assertEqual(existing_config.template_id, approved.id)
+        self.assertTrue(existing_config.enabled)
+        self.assertEqual(existing_config.message_mode, "alimtalk")
+        configs = AutoSendConfig.objects.filter(
+            tenant=owner,
+            trigger__in={
+                "registration_approved_student",
+                "registration_approved_parent",
+                "password_reset_student",
+                "password_reset_parent",
+            },
+        ).select_related("template")
+        self.assertEqual(configs.count(), 4)
+        for config in configs:
+            self.assertTrue(config.enabled)
+            self.assertEqual(config.message_mode, "alimtalk")
+            self.assertEqual(config.template.solapi_status, "APPROVED")
+            self.assertTrue(config.template.solapi_template_id)
+        self.assertEqual(
+            MessageTemplate.objects.filter(
+                tenant=owner,
+                solapi_template_id__startswith="development-mock-",
+            ).count(),
+            3,
+        )
 
     def test_explicit_long_video_fixture_creates_two_proctored_accesses_only(self):
         payload = json.loads(self._call_command(synthetic_long_video=True).splitlines()[-1])

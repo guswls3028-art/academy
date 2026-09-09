@@ -1098,6 +1098,7 @@ jobs:
           $apiDigest = [string]$candidate.images.'academy-api'.digest
           $toolsDigest = [string]$candidate.images.'academy-tools-worker'.digest
           $aiDigest = [string]$candidate.images.'academy-ai-worker-cpu'.digest
+          $messagingDigest = [string]$candidate.images.'academy-messaging-worker'.digest
           if ($apiDigest -notmatch '^sha256:[0-9a-f]{64}$') {
             throw "Invalid API digest in release candidate: $apiDigest"
           }
@@ -1107,10 +1108,14 @@ jobs:
           if ($aiDigest -notmatch '^sha256:[0-9a-f]{64}$') {
             throw "Invalid AI digest in release candidate: $aiDigest"
           }
+          if ($messagingDigest -notmatch '^sha256:[0-9a-f]{64}$') {
+            throw "Invalid Messaging digest in release candidate: $messagingDigest"
+          }
           ./scripts/v1/deploy-api-development.ps1 `
             -ApiImageUri "${{ env.ECR_REGISTRY }}/academy-api@$apiDigest" `
             -ToolsImageUri "${{ env.ECR_REGISTRY }}/academy-tools-worker@$toolsDigest" `
             -AiImageUri "${{ env.ECR_REGISTRY }}/academy-ai-worker-cpu@$aiDigest" `
+            -MessagingImageUri "${{ env.ECR_REGISTRY }}/academy-messaging-worker@$messagingDigest" `
             -ExpectedEnvVersion "${{ steps.development-env.outputs.parameter_version }}" `
             -ExpectedWorkersEnvVersion "${{ steps.development-env.outputs.workers_parameter_version }}" `
             -ExpectedReleaseId "${{ steps.development-env.outputs.release_id }}" `

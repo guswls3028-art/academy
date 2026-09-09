@@ -120,7 +120,8 @@ function Invoke-ManualApiDevelopmentGate {
     param(
         [Parameter(Mandatory = $true)][string]$ApiImageUri,
         [Parameter(Mandatory = $true)][string]$ToolsImageUri,
-        [Parameter(Mandatory = $true)][string]$AiImageUri
+        [Parameter(Mandatory = $true)][string]$AiImageUri,
+        [Parameter(Mandatory = $true)][string]$MessagingImageUri
     )
     if ($ApiImageUri -notmatch '@sha256:(?<digest>[0-9a-f]{64})$') {
         throw "API development candidate image is not digest-pinned."
@@ -128,6 +129,7 @@ function Invoke-ManualApiDevelopmentGate {
     $apiDigest = $matches["digest"]
     Assert-ImmutableEcrImageUri -ImageUri $ToolsImageUri
     Assert-ImmutableEcrImageUri -ImageUri $AiImageUri
+    Assert-ImmutableEcrImageUri -ImageUri $MessagingImageUri
     $releaseId = "manual-sha256-$apiDigest"
     $outputPath = [IO.Path]::GetTempFileName()
     try {
@@ -156,6 +158,7 @@ function Invoke-ManualApiDevelopmentGate {
             -ApiImageUri $ApiImageUri `
             -ToolsImageUri $ToolsImageUri `
             -AiImageUri $AiImageUri `
+            -MessagingImageUri $MessagingImageUri `
             -ExpectedEnvVersion ([int]$outputs["parameter_version"]) `
             -ExpectedWorkersEnvVersion ([int]$outputs["workers_parameter_version"]) `
             -ExpectedReleaseId $outputs["release_id"] `
@@ -305,10 +308,15 @@ try {
         if (-not $aiCanaryImage) {
             throw "AI development candidate could not resolve an immutable image."
         }
+        $messagingCanaryImage = Get-LatestWorkerImageUri -RepoName $script:EcrMessagingRepo
+        if (-not $messagingCanaryImage) {
+            throw "Messaging development candidate could not resolve an immutable image."
+        }
         Invoke-ManualApiDevelopmentGate `
             -ApiImageUri $apiCanaryImage `
             -ToolsImageUri $toolsCanaryImage `
-            -AiImageUri $aiCanaryImage
+            -AiImageUri $aiCanaryImage `
+            -MessagingImageUri $messagingCanaryImage
         $apiCanaryEnv = Publish-ApiPreprodEnvCandidate -ReleaseId $apiCanaryReleaseId
         & (Join-Path $ScriptRoot "run-api-preprod-canary.ps1") `
             -ImageUri $apiCanaryImage `
