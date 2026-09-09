@@ -391,6 +391,9 @@ pwsh scripts/v1/connect-api-development.ps1 -AwsProfile <profile>
 실행하고 API proxy를 위 loopback tunnel로 지정한다. 검수용 tenant·교사·학생은
 `setup_ymath_realuse_scenario`처럼 production DB/R2에서 실행을 거부하는 명령으로만
 만든다. 실제 학생·학부모·성적·연락처와 운영 비밀값은 복제하지 않는다.
+이 명령은 `SOLAPI_MOCK=true`인 상시 개발 런타임에서만 `clinic_cancelled`의 승인된
+공용 봉투 매핑을 확인하고, 일회용 QA tenant에 tenant-owned content template과 활성
+알림톡 config를 만든다. 학생+학부모 취소 접수 검증에는 합성 학생 연락처만 사용한다.
 
 검수는 desktop과 390px에서 로그인, 대상 화면 DOM, 상호작용, 새로고침 후 상태,
 가로 overflow와 콘솔/API 오류를 확인한다. 종료 시 같은 명령의 `--destroy`로 정확한
