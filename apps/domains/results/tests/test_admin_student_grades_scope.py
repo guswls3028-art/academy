@@ -672,11 +672,14 @@ class AdminStudentGradesScopeTest(TestCase, ClinicTestMixin):
         score_model = self.data["enrollments"][0].homework_scores.model
         homework_model = score_model._meta.get_field("homework").remote_field.model
         session_model = self.data["lec_session"].__class__
+        self.data["lec_session"].date = date(2026, 7, 1)
+        self.data["lec_session"].save(update_fields=["date"])
         supplement = session_model.objects.create(
             lecture=self.data["lecture"],
-            order=2,
+            order=9,
             session_type="SUPPLEMENT",
             title="주말 보강",
+            date=date(2026, 7, 8),
         )
         latest_regular = session_model.objects.create(
             lecture=self.data["lecture"],
@@ -684,6 +687,7 @@ class AdminStudentGradesScopeTest(TestCase, ClinicTestMixin):
             regular_order=2,
             session_type="REGULAR",
             title="2차시",
+            date=date(2026, 7, 15),
         )
         for session, title in (
             (self.data["lec_session"], "첫 과제"),
@@ -714,6 +718,9 @@ class AdminStudentGradesScopeTest(TestCase, ClinicTestMixin):
         rows = {row["title"]: row for row in response.data["homeworks"]}
         self.assertEqual(rows["최근 과제"]["session_regular_order"], 2)
         self.assertEqual(rows["최근 과제"]["session_type"], "REGULAR")
+        self.assertEqual(rows["최근 과제"]["session_date"], "2026-07-15")
+        self.assertEqual(rows["보강 과제"]["session_date"], "2026-07-08")
+        self.assertEqual(rows["첫 과제"]["session_date"], "2026-07-01")
         self.assertIsNone(rows["보강 과제"]["session_regular_order"])
         self.assertEqual(rows["보강 과제"]["session_type"], "SUPPLEMENT")
 

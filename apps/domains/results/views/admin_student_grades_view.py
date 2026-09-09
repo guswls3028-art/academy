@@ -345,6 +345,7 @@ class AdminStudentGradesView(APIView):
             session_order_hw = None
             session_regular_order_hw = None
             session_type_hw = None
+            session_date_hw = None
             lecture_id_hw = None
             lecture_title = None
             lecture_color = None
@@ -359,6 +360,7 @@ class AdminStudentGradesView(APIView):
                     else None
                 )
                 session_type_hw = getattr(session, "session_type", None)
+                session_date_hw = getattr(session, "date", None)
                 if hasattr(session, "lecture") and session.lecture:
                     lecture_id_hw = session.lecture_id
                     lecture_title = getattr(session.lecture, "title", None)
@@ -408,6 +410,7 @@ class AdminStudentGradesView(APIView):
                 "session_order": session_order_hw,
                 "session_regular_order": session_regular_order_hw,
                 "session_type": session_type_hw,
+                "session_date": session_date_hw.isoformat() if session_date_hw else None,
                 "lecture_id": lecture_id_hw,
                 "lecture_title": lecture_title,
                 "lecture_color": lecture_color,
@@ -415,9 +418,11 @@ class AdminStudentGradesView(APIView):
             })
 
         homework_list.sort(key=lambda row: (
-            (row.get("lecture_title") or "").casefold(),
+            row.get("session_date") is None,
+            -int(row["session_date"].replace("-", "")) if row.get("session_date") else 0,
             row.get("session_order") is None,
             -(int(row["session_order"]) if row.get("session_order") is not None else 0),
+            (row.get("lecture_title") or "").casefold(),
             int(row.get("display_order") or 0),
             -int(row["homework_id"]),
         ))
