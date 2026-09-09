@@ -223,6 +223,30 @@ class SetupYmathRealuseScenarioTests(TestCase):
         self.assertTrue(Tenant.objects.filter(pk=other.pk, code=other.code).exists())
         self.assertFalse(AutoSendConfig.objects.exists())
 
+    def test_development_messaging_baseline_rejects_owner_code_at_other_id(self):
+        other = Tenant.objects.create(
+            pk=2,
+            code="academy-development-owner",
+            name="Academy Development Owner",
+        )
+        with (
+            override_settings(
+                OWNER_TENANT_ID=1,
+                SOLAPI_KAKAO_PF_ID="development-mock-pfid",
+            ),
+            patch(
+                "apps.core.management.commands.setup_ymath_realuse_scenario._is_persistent_development_runtime",
+                return_value=True,
+            ),
+            patch.dict(os.environ, {"SOLAPI_MOCK": "true"}),
+            self.assertRaisesMessage(CommandError, "unexpected tenant ID"),
+        ):
+            ensure_development_messaging_baseline()
+
+        self.assertFalse(Tenant.objects.filter(pk=1).exists())
+        self.assertTrue(Tenant.objects.filter(pk=other.pk, code=other.code).exists())
+        self.assertFalse(AutoSendConfig.objects.exists())
+
     def test_explicit_long_video_fixture_creates_two_proctored_accesses_only(self):
         payload = json.loads(self._call_command(synthetic_long_video=True).splitlines()[-1])
 
