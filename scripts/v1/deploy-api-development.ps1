@@ -425,7 +425,7 @@ for container in academy-tools-development academy-ai-development academy-messag
   }
 done
 
-messaging_contract_code='import os; assert os.environ.get("ACADEMY_RUNTIME_ENV") == "development"; assert os.environ.get("SOLAPI_MOCK", "").lower() == "true"; assert os.environ.get("SOLAPI_KAKAO_PF_ID") == "development-mock-pfid"'
+messaging_contract_code='import os; assert os.environ.get("ACADEMY_RUNTIME_ENV") == "development"; assert os.environ.get("SOLAPI_MOCK", "").lower() == "true"; assert os.environ.get("SOLAPI_KAKAO_PF_ID") == "development-mock-pfid"; assert os.environ.get("MESSAGING_DRY_RUN_TRIGGERS", "").strip() == ""'
 docker exec academy-api python -c "$messaging_contract_code"
 docker exec academy-messaging-development python -c "$messaging_contract_code"
 

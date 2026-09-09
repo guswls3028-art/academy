@@ -170,7 +170,9 @@ bulk 모두 `409`로 거부하고 요청 전체를 롤백한다. 일정 변경�
   `clinic_change` template ID를 넣고, `source_tenant_id`와 서명으로 림글리쉬를 보존한다.
   worker는 provider 호출 직전에만 활성 channel binding과 `APPROVED`·동일 지문 template
   binding을 림글리쉬 채널/템플릿으로 치환한다. 합성 QA는 두 수신자 enqueue·서명·라우팅만
-  확인하고 provider 실수신과 SMS/LMS를 발생시키지 않는다.
+  확인하고 provider 실수신과 SMS/LMS를 발생시키지 않는다. persistent development는
+  `MESSAGING_DRY_RUN_TRIGGERS`를 비워 outbox 생명주기를 실제로 통과시키되 API와 전용
+  Messaging worker 모두 `SOLAPI_MOCK=true`를 강제해 외부 공급자 호출과 비용을 막는다.
 - 교직원의 행정 취소 권한과 교직원 수신자 선택은 유지한다.
 
 ### 자동 시작 리마인더

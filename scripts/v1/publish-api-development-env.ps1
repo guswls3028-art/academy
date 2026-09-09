@@ -231,7 +231,7 @@ function Set-IsolatedDevelopmentValues {
         SOLAPI_SENDER = ""
         SOLAPI_KAKAO_PF_ID = "development-mock-pfid"
         SOLAPI_KAKAO_TEMPLATE_ID = ""
-        MESSAGING_DRY_RUN_TRIGGERS = "*"
+        MESSAGING_DRY_RUN_TRIGGERS = ""
         TOSS_AUTO_BILLING_ENABLED = "false"
         TOSS_PAYMENTS_CLIENT_KEY = ""
         TOSS_PAYMENTS_SECRET_KEY = ""
@@ -310,6 +310,9 @@ if (
     [string]$actual.CDN_HLS_BASE_URL -ne "https://cdn.hakwonplus.com" -or
     [string]$actual.CDN_HLS_SIGNING_SECRET -ne $script:ApiDevelopmentCdnSigningSecret -or
     [string]$actual.CDN_HLS_SIGNING_KEY_ID -ne "v1" -or
+    [string]$actual.SOLAPI_MOCK -ne "true" -or
+    [string]$actual.SOLAPI_KAKAO_PF_ID -ne "development-mock-pfid" -or
+    [string]$actual.MESSAGING_DRY_RUN_TRIGGERS -ne "" -or
     [string]$actual.TOOLS_SQS_QUEUE_NAME -ne $script:ApiDevelopmentToolsQueueName -or
     [string]$actual.VIDEO_BATCH_JOB_QUEUE -ne "" -or
     [string]$actual.VIDEO_BATCH_JOB_DEFINITION -ne "" -or
@@ -343,6 +346,9 @@ if (
     [string]$actualWorkers.CDN_HLS_BASE_URL -ne "https://cdn.hakwonplus.com" -or
     [string]$actualWorkers.CDN_HLS_SIGNING_SECRET -ne $script:ApiDevelopmentCdnSigningSecret -or
     [string]$actualWorkers.CDN_HLS_SIGNING_KEY_ID -ne "v1" -or
+    [string]$actualWorkers.SOLAPI_MOCK -ne "true" -or
+    [string]$actualWorkers.SOLAPI_KAKAO_PF_ID -ne "development-mock-pfid" -or
+    [string]$actualWorkers.MESSAGING_DRY_RUN_TRIGGERS -ne "" -or
     [string]$actualWorkers.TOOLS_SQS_QUEUE_NAME -ne $script:ApiDevelopmentToolsQueueName -or
     [string]$actualWorkers.VIDEO_BATCH_JOB_QUEUE -ne "" -or
     [string]$actualWorkers.VIDEO_BATCH_JOB_DEFINITION -ne "" -or

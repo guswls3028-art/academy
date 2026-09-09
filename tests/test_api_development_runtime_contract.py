@@ -255,6 +255,7 @@ def test_development_settings_fail_closed_on_external_write_targets() -> None:
         "R2_ENDPOINT = $r2Endpoint",
         'SOLAPI_MOCK = "true"',
         'SOLAPI_KAKAO_PF_ID = "development-mock-pfid"',
+        'MESSAGING_DRY_RUN_TRIGGERS = ""',
         'TOSS_AUTO_BILLING_ENABLED = "false"',
         'VIDEO_BATCH_JOB_QUEUE = ""',
         'VIDEO_BATCH_JOB_DEFINITION = ""',
@@ -281,6 +282,15 @@ def test_development_settings_fail_closed_on_external_write_targets() -> None:
     assert 'settings.CDN_HLS_BASE_URL.rstrip("/") == "https://cdn.hakwonplus.com"' in deploy
     assert "len(settings.CDN_HLS_SIGNING_SECRET.strip()) >= 32" in deploy
     assert 'settings.CDN_HLS_SIGNING_KEY_ID == "v1"' in deploy
+    assert 'os.environ.get("MESSAGING_DRY_RUN_TRIGGERS", "").strip() == ""' in deploy
+    assert deploy.count('docker exec academy-api python -c "$messaging_contract_code"') == 1
+    assert deploy.count(
+        'docker exec academy-messaging-development python -c "$messaging_contract_code"'
+    ) == 1
+    assert publish.count('[string]$actual.MESSAGING_DRY_RUN_TRIGGERS -ne ""') == 1
+    assert publish.count('[string]$actualWorkers.MESSAGING_DRY_RUN_TRIGGERS -ne ""') == 1
+    assert publish.count('[string]$actual.SOLAPI_MOCK -ne "true"') == 1
+    assert publish.count('[string]$actualWorkers.SOLAPI_MOCK -ne "true"') == 1
     assert "api_cdn_signing_fingerprint=" in deploy
     assert "worker_cdn_signing_fingerprint=" in deploy
     assert "d.get('VIDEO_BATCH_JOB_QUEUE') == ''" in deploy
@@ -316,6 +326,7 @@ def _import_development_settings(
             "R2_ACCESS_KEY": "a" * 16,
             "R2_SECRET_KEY": "a" * 32,
             "SOLAPI_MOCK": "true",
+            "MESSAGING_DRY_RUN_TRIGGERS": "",
             "TOSS_AUTO_BILLING_ENABLED": "false",
             "VIDEO_BATCH_JOB_QUEUE": "",
             "VIDEO_BATCH_JOB_DEFINITION": "",
@@ -346,6 +357,15 @@ def test_development_settings_require_isolated_signed_video_urls() -> None:
         rejected = _import_development_settings(overrides)
         assert rejected.returncode != 0
         assert message in rejected.stderr
+
+
+def test_development_settings_require_durable_mock_messaging_outboxes() -> None:
+    accepted = _import_development_settings({"MESSAGING_DRY_RUN_TRIGGERS": ""})
+    assert accepted.returncode == 0, accepted.stderr
+
+    rejected = _import_development_settings({"MESSAGING_DRY_RUN_TRIGGERS": "*"})
+    assert rejected.returncode != 0
+    assert "persist durable outboxes" in rejected.stderr
 
 
 def test_worker_settings_use_development_storage_bucket_from_env() -> None:
