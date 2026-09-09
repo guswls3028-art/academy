@@ -404,6 +404,7 @@ def test_development_role_cannot_read_production_env_or_touch_prod_queues() -> N
 
     assert "$script:EcrToolsRepo" in block
     assert "$script:EcrAiRepo" in block
+    assert "$script:EcrMessagingRepo" in block
     assert "EcrToolsWorkerRepo" not in block
     assert "EcrToolsWorkerRepo" not in INITIALIZE.read_text(encoding="utf-8-sig")
     assert "/academy/api/development/env" in block
