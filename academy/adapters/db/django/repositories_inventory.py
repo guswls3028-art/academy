@@ -32,6 +32,15 @@ def inventory_folder_get(tenant, folder_id):
     return InventoryFolder.objects.filter(tenant=tenant, id=folder_id).first()
 
 
+def inventory_folder_lock(tenant, folder_id):
+    from apps.domains.inventory.models import InventoryFolder
+    return (
+        InventoryFolder.objects.select_for_update()
+        .filter(tenant=tenant, id=folder_id)
+        .first()
+    )
+
+
 def inventory_folder_create(tenant, parent_id, name, scope, student_ps=""):
     from apps.domains.inventory.models import InventoryFolder
     parent = (

@@ -216,15 +216,149 @@ class TestPsNumberUsernameSyncOnSave(TestCase):
             ps_numbers=("CREATE01",),
         )
 
-    def test_del_prefix_ps_does_not_cascade_inventory(self):
-        """_del_ 접두사 ps_number 변경은 인벤토리 업데이트 안 함 (삭제 시)."""
-        InventoryFolder.objects.create(
+    def test_del_prefix_ps_cascades_inventory_into_tombstone_namespace(self):
+        """Soft-delete PS changes quarantine inventory away from future students."""
+        folder = InventoryFolder.objects.create(
             tenant=self.tenant, student_ps="A12345", name="root"
         )
+        inventory_file = InventoryFile.objects.create(
+            tenant=self.tenant,
+            scope="student",
+            student_ps="A12345",
+            folder=folder,
+            display_name="private.pdf",
+            r2_key=f"tenants/{self.tenant.id}/students/A12345/inventory/private.pdf",
+            original_name="private.pdf",
+            size_bytes=47,
+            content_type="application/pdf",
+        )
+        tombstone_ps = f"_del_{self.student.id}_A12345"
         self.student.ps_number = f"_del_{self.student.id}_A12345"
         self.student.save(update_fields=["ps_number"])
-        folder = InventoryFolder.objects.get(tenant=self.tenant, student_ps="A12345")
-        self.assertEqual(folder.student_ps, "A12345")  # 변경 안 됨
+        folder.refresh_from_db()
+        inventory_file.refresh_from_db()
+        self.assertEqual(folder.student_ps, tombstone_ps)
+        self.assertEqual(inventory_file.student_ps, tombstone_ps)
+
+    def test_new_claim_quarantines_one_exact_legacy_predecessor_namespace(self):
+        original_ps = self.student.ps_number
+        tombstone_ps = f"_del_{self.student.id}_{original_ps}"
+        Student.objects.filter(pk=self.student.pk).update(
+            ps_number=tombstone_ps,
+            deleted_at=timezone.now(),
+        )
+        User.objects.filter(pk=self.student.user_id).update(
+            username=user_internal_username(self.tenant, tombstone_ps)
+        )
+        folder = InventoryFolder.objects.create(
+            tenant=self.tenant,
+            scope="student",
+            student_ps=original_ps,
+            name="legacy-private",
+        )
+        inventory_file = InventoryFile.objects.create(
+            tenant=self.tenant,
+            scope="student",
+            student_ps=original_ps,
+            folder=folder,
+            display_name="legacy.pdf",
+            r2_key=f"tenants/{self.tenant.id}/students/{original_ps}/inventory/legacy.pdf",
+            original_name="legacy.pdf",
+            size_bytes=47,
+            content_type="application/pdf",
+        )
+        replacement_user = User.objects.create_user(
+            username=user_internal_username(self.tenant, original_ps),
+            password="test1234",
+            tenant=self.tenant,
+        )
+
+        replacement = Student.objects.create(
+            tenant=self.tenant,
+            user=replacement_user,
+            ps_number=original_ps,
+            name="replacement",
+            omr_code="88000002",
+        )
+
+        self.assertIsNotNone(replacement.pk)
+        folder.refresh_from_db()
+        inventory_file.refresh_from_db()
+        self.assertEqual(folder.student_ps, tombstone_ps)
+        self.assertEqual(inventory_file.student_ps, tombstone_ps)
+
+    def test_new_claim_rejects_ambiguous_legacy_inventory_namespace(self):
+        original_ps = "AMBIGUOUS"
+        for index in range(2):
+            predecessor = _create_student(
+                self.tenant,
+                original_ps,
+                name=f"predecessor-{index}",
+                phone=f"0107000000{index}",
+                parent_phone=f"0108000000{index}",
+            )
+            Student.objects.filter(pk=predecessor.pk).update(
+                ps_number=f"_del_{predecessor.id}_{original_ps}",
+                deleted_at=timezone.now(),
+            )
+            User.objects.filter(pk=predecessor.user_id).update(
+                username=user_internal_username(
+                    self.tenant,
+                    f"_del_{predecessor.id}_{original_ps}",
+                )
+            )
+        InventoryFolder.objects.create(
+            tenant=self.tenant,
+            scope="student",
+            student_ps=original_ps,
+            name="ambiguous-private",
+        )
+        replacement_user = User.objects.create_user(
+            username=user_internal_username(self.tenant, original_ps),
+            password="test1234",
+            tenant=self.tenant,
+        )
+
+        with self.assertRaisesRegex(ValueError, "storage namespace"):
+            Student.objects.create(
+                tenant=self.tenant,
+                user=replacement_user,
+                ps_number=original_ps,
+                name="blocked replacement",
+                omr_code="88000003",
+            )
+
+    def test_existing_rename_quarantines_one_legacy_target_namespace(self):
+        target_ps = "LEGACY-TARGET"
+        predecessor = _create_student(
+            self.tenant,
+            target_ps,
+            name="previous owner",
+            phone="01070000111",
+            parent_phone="01080000111",
+        )
+        tombstone_ps = f"_del_{predecessor.id}_{target_ps}"
+        Student.objects.filter(pk=predecessor.pk).update(
+            ps_number=tombstone_ps,
+            deleted_at=timezone.now(),
+        )
+        User.objects.filter(pk=predecessor.user_id).update(
+            username=user_internal_username(self.tenant, tombstone_ps)
+        )
+        legacy_folder = InventoryFolder.objects.create(
+            tenant=self.tenant,
+            scope="student",
+            student_ps=target_ps,
+            name="previous private",
+        )
+
+        self.student.ps_number = target_ps
+        self.student.save(update_fields=["ps_number"])
+
+        self.student.refresh_from_db()
+        legacy_folder.refresh_from_db()
+        self.assertEqual(self.student.ps_number, target_ps)
+        self.assertEqual(legacy_folder.student_ps, tombstone_ps)
 
     def test_display_username_matches_ps_number(self):
         """user_display_username(user) == ps_number (SSOT)."""
@@ -289,6 +423,93 @@ class StudentIdentityConcurrencyPostgresTests(TransactionTestCase):
         self.assertIn(student.ps_number, {"RACE01", "RACE02"})
         self.assertEqual(user_display_username(student.user), student.ps_number)
         self.assertEqual(folder.student_ps, student.ps_number)
+
+    def test_soft_delete_serializes_reuse_and_quarantines_old_inventory(self):
+        tenant = _create_tenant(name="Soft Delete Reuse", code="soft-delete-reuse")
+        student = _create_student(tenant, "REUSE01")
+        folder = InventoryFolder.objects.create(
+            tenant=tenant,
+            scope="student",
+            student_ps="REUSE01",
+            name="private",
+        )
+        replacement_user = User.objects.create_user(
+            username="soft-delete-reuse-pending-user",
+            password="test1234",
+            tenant=tenant,
+        )
+        update_started = threading.Event()
+        release_update = threading.Event()
+        create_started = threading.Event()
+        create_finished = threading.Event()
+        errors = []
+        created_ids = []
+        from apps.support.students.lifecycle_dependencies import (
+            update_inventory_student_ps as real_update_inventory_student_ps,
+        )
+
+        def blocking_update(*args, **kwargs):
+            update_started.set()
+            if not release_update.wait(timeout=10):
+                raise TimeoutError("inventory quarantine release timed out")
+            return real_update_inventory_student_ps(*args, **kwargs)
+
+        def soft_delete_worker():
+            close_old_connections()
+            try:
+                soft_delete_student(Student.objects.get(pk=student.pk), tenant=tenant)
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        def create_worker():
+            close_old_connections()
+            try:
+                create_started.set()
+                replacement = Student.objects.create(
+                    tenant=tenant,
+                    user_id=replacement_user.id,
+                    ps_number="REUSE01",
+                    name="replacement",
+                    omr_code="99000001",
+                )
+                created_ids.append(replacement.id)
+                create_finished.set()
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        with patch(
+            "apps.domains.students.models.update_inventory_student_ps",
+            side_effect=blocking_update,
+        ):
+            delete_thread = threading.Thread(target=soft_delete_worker)
+            delete_thread.start()
+            self.assertTrue(update_started.wait(timeout=5))
+            create_thread = threading.Thread(target=create_worker)
+            create_thread.start()
+            self.assertTrue(create_started.wait(timeout=5))
+            self.assertFalse(create_finished.wait(timeout=1))
+            release_update.set()
+            delete_thread.join(timeout=10)
+            create_thread.join(timeout=10)
+
+        self.assertFalse(delete_thread.is_alive())
+        self.assertFalse(create_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(created_ids), 1)
+        student.refresh_from_db()
+        folder.refresh_from_db()
+        self.assertEqual(folder.student_ps, student.ps_number)
+        self.assertTrue(student.ps_number.startswith(f"_del_{student.id}_REUSE01"))
+        self.assertTrue(
+            Student.objects.filter(pk=created_ids[0], ps_number="REUSE01").exists()
+        )
+        self.assertFalse(
+            InventoryFolder.objects.filter(tenant=tenant, student_ps="REUSE01").exists()
+        )
 
 
 class TestSoftDeleteSemantics(TestCase):
@@ -750,6 +971,12 @@ class TestBulkRestoreFlow(TestCase):
 
     def test_restore_recovers_ps_number(self):
         """복원 서비스가 ps_number/user/parent/membership을 함께 복원."""
+        tombstone_folder = InventoryFolder.objects.create(
+            tenant=self.tenant,
+            scope="student",
+            student_ps=self.student.ps_number,
+            name="복원 파일",
+        )
         result = restore_student(self.student, tenant=self.tenant)
 
         self.assertEqual(result.restored_ps_number, "R11111")
@@ -766,6 +993,8 @@ class TestBulkRestoreFlow(TestCase):
         self.assertTrue(
             TenantMembership.objects.get(tenant=self.tenant, user=self.student.user).is_active
         )
+        tombstone_folder.refresh_from_db()
+        self.assertEqual(tombstone_folder.student_ps, "R11111")
 
     def test_restore_collision_detection(self):
         """복원 시 ps_number가 다른 활성 학생에게 사용 중이면 충돌."""
@@ -774,6 +1003,37 @@ class TestBulkRestoreFlow(TestCase):
             restore_student(self.student, tenant=self.tenant)
 
         self.assertEqual(ctx.exception.code, "ps_number_conflict")
+        self.student.refresh_from_db()
+        self.assertIsNotNone(self.student.deleted_at)
+        self.assertTrue(self.student.ps_number.startswith(f"_del_{self.student.id}_R11111"))
+
+    def test_restore_reports_stable_conflict_for_ambiguous_legacy_inventory(self):
+        predecessor = _create_student(
+            self.tenant,
+            "R11111",
+            name="과거 학생",
+            phone="01099998888",
+            parent_phone="01077778888",
+        )
+        predecessor_tombstone = f"_del_{predecessor.id}_R11111"
+        Student.objects.filter(pk=predecessor.pk).update(
+            ps_number=predecessor_tombstone,
+            deleted_at=timezone.now(),
+        )
+        User.objects.filter(pk=predecessor.user_id).update(
+            username=user_internal_username(self.tenant, predecessor_tombstone)
+        )
+        InventoryFolder.objects.create(
+            tenant=self.tenant,
+            scope="student",
+            student_ps="R11111",
+            name="소유자 불명 자료",
+        )
+
+        with self.assertRaises(StudentLifecycleError) as ctx:
+            restore_student(self.student, tenant=self.tenant)
+
+        self.assertEqual(ctx.exception.code, "student_storage_namespace_conflict")
         self.student.refresh_from_db()
         self.assertIsNotNone(self.student.deleted_at)
         self.assertTrue(self.student.ps_number.startswith(f"_del_{self.student.id}_R11111"))

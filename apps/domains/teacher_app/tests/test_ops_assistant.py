@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import io
+import threading
+import unittest
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase
+from django.db import close_old_connections, connection, transaction
+from django.db.models.query import QuerySet
+from django.test import TestCase, TransactionTestCase
 from PIL import Image
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps.core.models import OpsAuditLog, Tenant, TenantMembership
 from apps.domains.teacher_app.assistant.extraction import parse_teacher_ops_text
+from apps.domains.teacher_app.assistant.service import _lock_existing_students_for_execution
 from apps.domains.teacher_app.assistant.views import TeacherOpsAnalyzeView, TeacherOpsConfirmView
 from apps.domains.teacher_app.models import TeacherOpsExecution
 from apps.support.teacher_app.ops_assistant_dependencies import (
@@ -208,6 +213,118 @@ class TeacherOpsAssistantApiTests(TestCase):
         self.assertEqual(created.user.phone, "01033334444")
         self.assertEqual(Student.objects.filter(tenant=self.tenant, name="가온별").count(), 1)
         self.assertEqual(confirmed.data["rows"][0]["account_creation"], "not_created")
+
+    def test_confirm_locks_users_before_students(self):
+        create_student_account(
+            tenant=self.tenant,
+            password="safe-pass",
+            student_data={
+                "name": "가온별",
+                "phone": None,
+                "parent_phone": "01011112222",
+                "ps_number": "LOCK-ORDER",
+                "omr_code": "11112222",
+                "uses_identifier": True,
+                "school_type": "HIGH",
+                "high_school": "해솔고",
+                "grade": 1,
+            },
+        )
+        proposal = self._analyze()
+        lock_order = []
+        original = QuerySet.select_for_update
+
+        def record_lock(queryset, *args, **kwargs):
+            if queryset.model in {User, Student}:
+                lock_order.append(queryset.model)
+            return original(queryset, *args, **kwargs)
+
+        with patch.object(QuerySet, "select_for_update", record_lock):
+            response = self._confirm(proposal)
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertGreaterEqual(len(lock_order), 2)
+        self.assertEqual(lock_order[:2], [User, Student])
+
+
+class TeacherOpsStudentLockConcurrencyPostgresTests(TransactionTestCase):
+    @classmethod
+    def setUpClass(cls):
+        if connection.vendor != "postgresql":
+            raise unittest.SkipTest("PostgreSQL is required for assistant/student lock ordering.")
+        super().setUpClass()
+
+    def test_assistant_student_lock_and_delete_complete_without_deadlock(self):
+        tenant = Tenant.objects.create(name="Teacher Ops Lock", code="teacher-ops-lock")
+        created = create_student_account(
+            tenant=tenant,
+            password="safe-pass",
+            student_data={
+                "name": "잠금 학생",
+                "phone": "01033334444",
+                "parent_phone": "01011112222",
+                "ps_number": "OPS-LOCK",
+                "omr_code": "33334444",
+                "uses_identifier": False,
+                "school_type": "HIGH",
+                "grade": 1,
+            },
+        )
+        assistant_locked = threading.Event()
+        release_assistant = threading.Event()
+        delete_started = threading.Event()
+        delete_finished = threading.Event()
+        errors = []
+
+        def assistant_worker():
+            close_old_connections()
+            try:
+                with transaction.atomic():
+                    _lock_existing_students_for_execution(
+                        tenant=tenant,
+                        student_ids={created.student.id},
+                    )
+                    assistant_locked.set()
+                    if not release_assistant.wait(timeout=10):
+                        raise TimeoutError("assistant lock release timed out")
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        def delete_worker():
+            from apps.support.students.lifecycle import (
+                permanently_delete_students,
+                soft_delete_student,
+            )
+
+            close_old_connections()
+            try:
+                delete_started.set()
+                student = Student.objects.get(pk=created.student.id)
+                soft_delete_student(student, tenant=tenant)
+                permanently_delete_students(tenant=tenant, student_ids=[student.id])
+                delete_finished.set()
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        assistant_thread = threading.Thread(target=assistant_worker)
+        delete_thread = threading.Thread(target=delete_worker)
+        assistant_thread.start()
+        self.assertTrue(assistant_locked.wait(timeout=5))
+        delete_thread.start()
+        self.assertTrue(delete_started.wait(timeout=5))
+        self.assertFalse(delete_finished.wait(timeout=1))
+        release_assistant.set()
+        assistant_thread.join(timeout=10)
+        delete_thread.join(timeout=10)
+
+        self.assertFalse(assistant_thread.is_alive())
+        self.assertFalse(delete_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(delete_finished.is_set())
 
     def test_parent_phone_match_allows_sibling_with_same_parent_and_blank_phone(self):
         target = create_student_account(

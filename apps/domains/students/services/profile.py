@@ -14,7 +14,7 @@ from typing import Any, Iterable
 
 from apps.core.models import Program
 from apps.core.models.user import user_display_username
-from apps.domains.students.models import Student
+from apps.domains.students.models import Student, StudentInventoryNamespaceConflict
 from apps.domains.students.services.identity import (
     StudentIdentityError,
     canonical_student_phone,
@@ -286,7 +286,12 @@ def update_student_profile(
             changed.append("omr_code")
 
     if changed:
-        student.save(update_fields=changed)
+        try:
+            student.save(update_fields=changed)
+        except StudentInventoryNamespaceConflict as exc:
+            raise StudentProfileUpdateError(
+                {"detail": "학생 아이디의 이전 저장자료 소유권을 확인한 뒤 다시 시도해 주세요."}
+            ) from exc
 
     if "phone" in data and student.user_id and student.user.phone != student.phone:
         student.user.phone = student.phone

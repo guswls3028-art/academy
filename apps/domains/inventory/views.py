@@ -2,6 +2,7 @@
 # 저장소 API — R2 업로드 후 DB 메타데이터, 비어있지 않은 폴더 삭제 방지
 
 import logging
+from functools import wraps
 
 from django.http import HttpResponse, JsonResponse
 from django.views import View
@@ -14,10 +15,13 @@ from apps.core.authentication import TokenVersionJWTAuthentication as JWTAuthent
 
 from apps.core.models import Program
 from apps.support.inventory.storage_cleanup_dependencies import (
+    compensate_unattached_storage_object,
     ensure_storage_inventory_key_attachable,
-    schedule_unreferenced_storage_object_cleanup,
 )
-from apps.support.inventory.student_dependencies import active_student_id_for_storage
+from apps.support.inventory.student_dependencies import (
+    active_student_id_for_storage,
+    student_storage_namespace_has_legacy_conflict,
+)
 from apps.support.students.namespace_lock import lock_student_ps_namespaces
 from .r2_path import build_r2_key, safe_filename, folder_path_string
 from academy.adapters.db.django import repositories_inventory as inv_repo
@@ -96,6 +100,40 @@ def _jwt_required(view_func):
     return wrapped
 
 
+def _student_namespace_mutation(view_func):
+    """Serialize student metadata mutations with identity ownership changes."""
+    @wraps(view_func)
+    def wrapped(request, *args, **kwargs):
+        scope = (
+            request.GET.get("scope")
+            or request.POST.get("scope")
+            or "admin"
+        ).lower()
+        if scope != "student":
+            return view_func(request, *args, **kwargs)
+        student_ps = _requested_student_ps(request)
+        if not student_ps:
+            return view_func(request, *args, **kwargs)
+        with transaction.atomic():
+            lock_student_ps_namespaces(
+                tenant_id=request.tenant.id,
+                ps_numbers=(student_ps,),
+            )
+            if active_student_id_for_storage(
+                tenant_id=request.tenant.id,
+                ps_number=student_ps,
+            ) is None:
+                return JsonResponse(
+                    {
+                        "detail": "활성 학생 저장소를 확인할 수 없습니다.",
+                        "code": "student_storage_owner_missing",
+                    },
+                    status=409,
+                )
+            return view_func(request, *args, **kwargs)
+    return wrapped
+
+
 def _is_tenant_staff(request):
     """요청 사용자가 테넌트의 스태프(owner/admin/staff/teacher/assistant)인지 확인."""
     user = getattr(request, "user", None)
@@ -169,6 +207,18 @@ def _check_scope_permission(request, scope=None):
         student_ps = _requested_student_ps(request)
         if student_ps and student_ps != student_profile.ps_number:
             return JsonResponse({"detail": "다른 학생의 자료에 접근할 수 없습니다."}, status=403)
+        if student_storage_namespace_has_legacy_conflict(
+            tenant_id=request.tenant.id,
+            student_id=student_profile.id,
+            ps_number=student_profile.ps_number,
+        ):
+            return JsonResponse(
+                {
+                    "detail": "이 학생번호의 이전 저장자료를 확인 중입니다. 담당 선생님에게 문의해 주세요.",
+                    "code": "student_storage_namespace_conflict",
+                },
+                status=409,
+            )
     return None  # OK
 
 
@@ -209,6 +259,18 @@ def _inventory_file_permission_error(request, inv_file):
         return JsonResponse({"detail": "학생 정보가 없습니다."}, status=403)
     if inv_file.student_ps != student_profile.ps_number:
         return JsonResponse({"detail": "다른 학생의 자료에 접근할 수 없습니다."}, status=403)
+    if student_storage_namespace_has_legacy_conflict(
+        tenant_id=request.tenant.id,
+        student_id=student_profile.id,
+        ps_number=student_profile.ps_number,
+    ):
+        return JsonResponse(
+            {
+                "detail": "이 학생번호의 이전 저장자료를 확인 중입니다. 담당 선생님에게 문의해 주세요.",
+                "code": "student_storage_namespace_conflict",
+            },
+            status=409,
+        )
     return None
 
 
@@ -353,6 +415,23 @@ def _persist_inventory_upload(
             content_type=file_obj.content_type or "application/octet-stream",
         )
     except Exception as exc:
+        try:
+            compensate_unattached_storage_object(
+                tenant_id=tenant.id,
+                key=r2_key,
+                uncertain_write=True,
+            )
+        except Exception:
+            logger.exception(
+                "Inventory uncertain upload cleanup intent failed tenant=%s scope=%s",
+                tenant.id,
+                scope,
+            )
+            raise _InventoryUploadFailure(
+                status=502,
+                detail="파일 원본 저장 상태를 확인하지 못했습니다. 관리자에게 문의해 주세요.",
+                code="inventory_storage_upload_cleanup_failed",
+            ) from exc
         raise _InventoryUploadFailure(
             status=502,
             detail="파일 원본을 저장하지 못했습니다. 다시 시도해 주세요.",
@@ -373,7 +452,9 @@ def _persist_inventory_upload(
             r2_key=r2_key,
             validated_scores=validated_scores,
         )
-    except (_InventoryUploadFailure, _InventoryPersistenceFailure) as exc:
+    except Exception as exc:
+        if not isinstance(exc, (_InventoryUploadFailure, _InventoryPersistenceFailure)):
+            exc = _InventoryPersistenceFailure(stage="attach", cause=exc)
         stage = exc.stage if isinstance(exc, _InventoryPersistenceFailure) else "attach"
         logger.warning(
             "Inventory %s rejected after R2 upload tenant=%s scope=%s",
@@ -382,28 +463,37 @@ def _persist_inventory_upload(
             scope,
         )
         try:
-            delete_object_r2_storage(key=r2_key)
+            cleanup_outcome = compensate_unattached_storage_object(
+                tenant_id=tenant.id,
+                key=r2_key,
+            )
         except Exception:
             logger.exception(
                 "Inventory orphan cleanup failed tenant=%s scope=%s",
                 tenant.id,
                 scope,
             )
-            try:
-                schedule_unreferenced_storage_object_cleanup(
-                    tenant_id=tenant.id,
-                    key=r2_key,
-                )
-            except Exception:
-                logger.exception(
-                    "Inventory orphan cleanup intent failed tenant=%s scope=%s",
-                    tenant.id,
-                    scope,
-                )
             cleanup_detail = (
                 "성적 정보 저장과 원본 정리에 실패했습니다. 관리자에게 문의해 주세요."
                 if stage == "score"
                 else "파일 정보 저장과 원본 정리에 실패했습니다. 관리자에게 문의해 주세요."
+            )
+            cleanup_code = (
+                "score_storage_cleanup_failed"
+                if stage == "score"
+                else "inventory_storage_cleanup_failed"
+            )
+            raise _InventoryUploadFailure(
+                status=502,
+                detail=cleanup_detail,
+                code=cleanup_code,
+            ) from exc
+
+        if cleanup_outcome == "pending":
+            cleanup_detail = (
+                "성적 정보 저장과 원본 정리를 재시도하고 있습니다. 관리자에게 문의해 주세요."
+                if stage == "score"
+                else "파일 정보 저장과 원본 정리를 재시도하고 있습니다. 관리자에게 문의해 주세요."
             )
             cleanup_code = (
                 "score_storage_cleanup_failed"
@@ -566,23 +656,44 @@ class FolderCreateView(View):
         if perm_err:
             return perm_err
         tenant = request.tenant
-        parent = None
         pid = None
         if parent_id is not None and parent_id != "":
             try:
                 pid = int(parent_id)
             except (TypeError, ValueError):
                 return JsonResponse({"detail": "parent_id must be a number"}, status=400)
-            parent = inv_repo.inventory_folder_get(tenant, pid)
-            if not parent:
-                return JsonResponse({"detail": "Parent folder not found"}, status=404)
-            if not _folder_chain_matches_scope(parent, scope, student_ps):
-                return JsonResponse({"detail": "Parent folder scope mismatch"}, status=403)
 
         try:
-            folder = inv_repo.inventory_folder_create(
-                tenant, pid if parent_id not in (None, "") else None, name, scope, student_ps or "",
-            )
+            with transaction.atomic():
+                if scope == "student":
+                    lock_student_ps_namespaces(
+                        tenant_id=tenant.id,
+                        ps_numbers=(student_ps,),
+                    )
+                    if active_student_id_for_storage(
+                        tenant_id=tenant.id,
+                        ps_number=student_ps,
+                    ) is None:
+                        return JsonResponse(
+                            {
+                                "detail": "활성 학생 저장소를 확인할 수 없습니다.",
+                                "code": "student_storage_owner_missing",
+                            },
+                            status=409,
+                        )
+                if pid is not None:
+                    parent = inv_repo.inventory_folder_lock(tenant, pid)
+                    if not parent:
+                        return JsonResponse({"detail": "Parent folder not found"}, status=404)
+                    if not _folder_chain_matches_scope(parent, scope, student_ps):
+                        return JsonResponse({"detail": "Parent folder scope mismatch"}, status=403)
+                folder = inv_repo.inventory_folder_create(
+                    tenant,
+                    pid,
+                    name,
+                    scope,
+                    student_ps or "",
+                )
         except Exception as e:
             return JsonResponse(
                 {"detail": str(e) if settings.DEBUG else "Failed to create folder"},
@@ -833,6 +944,7 @@ class FolderDeleteView(View):
 
     @method_decorator(_tenant_required)
     @method_decorator(_jwt_required)
+    @method_decorator(_student_namespace_mutation)
     def delete(self, request, folder_id):
         tenant = request.tenant
         scope = (request.GET.get("scope") or "admin").lower()
@@ -870,6 +982,7 @@ class FolderDeleteView(View):
 
     @method_decorator(_tenant_required)
     @method_decorator(_jwt_required)
+    @method_decorator(_student_namespace_mutation)
     def patch(self, request, folder_id):
         import json
         tenant = request.tenant
@@ -910,6 +1023,7 @@ class FileDeleteView(View):
 
     @method_decorator(_tenant_required)
     @method_decorator(_jwt_required)
+    @method_decorator(_student_namespace_mutation)
     def delete(self, request, file_id):
         tenant = request.tenant
         scope = (request.GET.get("scope") or "admin").lower()
@@ -1001,6 +1115,7 @@ class FileDeleteView(View):
 
     @method_decorator(_tenant_required)
     @method_decorator(_jwt_required)
+    @method_decorator(_student_namespace_mutation)
     def patch(self, request, file_id):
         import json
         tenant = request.tenant

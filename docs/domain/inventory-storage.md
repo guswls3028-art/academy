@@ -41,9 +41,33 @@ folder/quota/key ownership이 달라지면 성공으로 추측하지 않고 `409
 거절한 뒤 방금 PUT한 exact key를 보상 삭제한다. provider 원문 예외는 노출하지 않고
 `502 inventory_storage_upload_failed`를 반환한다.
 
+PUT timeout/응답 실패는 provider가 object를 쓰지 않았다고 단정할 수 없다. 이 경로는
+canonical owner가 없는 exact 128-bit key만 즉시 삭제하고, 즉시 삭제 성공 여부와 무관하게
+durable pending intent를 남겨 늦게 나타난 object도 재확인한다. attach transaction의
+예상하지 못한 예외도 같은 owner scan과 exact-key 보상 경로를 사용한다. 이미 다른
+canonical owner가 같은 key를 참조하면 보상 삭제하지 않는다.
+
+학생번호는 저장소 ownership identity다. soft delete는 원래 학생번호의
+`InventoryFolder`/`InventoryFile.student_ps`를 `_del_{student_id}_{old_ps}` tombstone으로
+같은 transaction에서 옮기고 restore는 이를 되돌린다. 신규 생성 또는 기존 학생 rename이
+과거에 쓰인 학생번호를 claim할 때 exact tombstoned predecessor가 하나뿐이면 남은 legacy
+metadata를 그 tombstone으로 격리한 뒤 claim한다. attribution이 복수이거나 모호하면 해당
+claim만 실패 폐쇄한다. 구 런타임이 남긴 active replacement 이전 시각의 metadata가 원래
+namespace에 공존하는 경우 학생/학부모 list·download는 `409
+student_storage_namespace_conflict`로 차단하되, replacement가 정상 claim 뒤 새로 만든
+자기 파일은 허용한다. 2026-09-10 production/development PII-free read-only audit에서는 이
+legacy conflict 조합이 0건이어서 데이터 migration은 필요하지 않았다.
+
+student scope의 folder create/rename/delete, file rename/delete, upload attach와 file/folder
+move 최종 metadata write는 같은 student-PS namespace lock 아래에서 활성 owner와 최신
+row scope를 다시 읽는다. R2 copy/PUT 같은 긴 network 작업은 transaction 밖에서 실행하고,
+최종 attach/move가 소유권 변경에 져서 실패하면 새 exact object만 보상 정리한다. 따라서
+soft delete/reuse와 겹친 오래된 삭제 요청이 tombstone owner의 파일을 지울 수 없다.
+
 검증은 `apps/domains/inventory/tests/test_hardening.py`,
 `apps/domains/inventory/tests/test_student_upload_lifecycle_concurrency_pg.py`와
 `tests/test_student_reported_scores.py`의 학생·학부모 권한, sibling/tenant·폴더 경계,
 R2 업로드 성공, reload, 128-bit key, 메타데이터 실패 exact-key/durable intent 정리,
-PUT/attach와 삭제의 양방향 PostgreSQL 경쟁 회귀를 사용한다. 운영 확인은 개인 파일을 다운로드하지
-않고 tenant별 행 수, MIME/상태 집계와 R2 HEAD의 존재·크기·content-type 일치만 읽는다.
+PUT/attach와 soft/permanent delete의 양방향 PostgreSQL 경쟁, soft delete와 오래된 file
+delete 경쟁 회귀를 사용한다. 운영 확인은 개인 파일을 다운로드하지 않고 tenant별 행 수,
+MIME/상태 집계와 R2 HEAD의 존재·크기·content-type 일치만 읽는다.

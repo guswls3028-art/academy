@@ -97,6 +97,19 @@ def update_inventory_student_ps(*, tenant: Any, old_ps: str, new_ps: str) -> Non
     InventoryFile.objects.filter(tenant=tenant, student_ps=old_ps).update(student_ps=new_ps)
 
 
+def inventory_student_ps_metadata_exists(*, tenant_id: int, ps_number: str) -> bool:
+    from apps.domains.inventory.models import InventoryFile, InventoryFolder
+
+    filters = {
+        "tenant_id": int(tenant_id),
+        "scope": "student",
+        "student_ps": ps_number,
+    }
+    return InventoryFolder.objects.filter(**filters).exists() or InventoryFile.objects.filter(
+        **filters
+    ).exists()
+
+
 def delete_submission_storage_for_permanent_delete(
     *,
     tenant_id: int,

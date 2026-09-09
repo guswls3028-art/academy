@@ -236,8 +236,13 @@ def ensure_storage_inventory_key_attachable(*, tenant_id: int, key: str) -> None
         raise ValueError("inventory object key already has a canonical owner")
 
 
-def schedule_unreferenced_storage_object_cleanup(*, tenant_id: int, key: str) -> int | None:
-    """Durably retry compensation for a tenant-owned Storage upload."""
+def compensate_unattached_storage_object(
+    *,
+    tenant_id: int,
+    key: str,
+    uncertain_write: bool = False,
+) -> str:
+    """Delete an unattached upload under its key lock and persist retry state."""
     prefix = f"tenants/{int(tenant_id)}/"
     if not key.startswith(prefix) or len(key) <= len(prefix):
         raise ValueError("inventory object key is outside its tenant namespace")
@@ -247,23 +252,60 @@ def schedule_unreferenced_storage_object_cleanup(*, tenant_id: int, key: str) ->
             bucket=SubmissionStorageCleanupIntent.Bucket.STORAGE,
             key=key,
         ):
-            return None
-        intent, _ = SubmissionStorageCleanupIntent.objects.get_or_create(
-            tenant_id=tenant_id,
-            bucket=SubmissionStorageCleanupIntent.Bucket.STORAGE,
-            object_key=key,
-        )
-        if intent.status == SubmissionStorageCleanupIntent.Status.CLEANED:
-            intent.status = SubmissionStorageCleanupIntent.Status.PENDING
-            intent.cleaned_at = None
-            intent.last_error = ""
-            intent.save(update_fields=["status", "cleaned_at", "last_error", "updated_at"])
-        transaction.on_commit(
-            lambda intent_ids=(intent.id,): _process_submission_storage_cleanup_safely(
-                intent_ids
+            return "referenced"
+
+        intent = None
+        if uncertain_write:
+            intent, _ = SubmissionStorageCleanupIntent.objects.get_or_create(
+                tenant_id=tenant_id,
+                bucket=SubmissionStorageCleanupIntent.Bucket.STORAGE,
+                object_key=key,
             )
-        )
-        return intent.id
+            intent.status = SubmissionStorageCleanupIntent.Status.PENDING
+            intent.claim_token = None
+            intent.cleaned_at = None
+            intent.last_error = "uncertain_upload_write"
+            intent.save(
+                update_fields=[
+                    "status",
+                    "claim_token",
+                    "cleaned_at",
+                    "last_error",
+                    "updated_at",
+                ]
+            )
+        try:
+            from apps.infrastructure.storage.r2 import delete_object_r2_storage
+
+            delete_object_r2_storage(key=key)
+        except Exception:
+            if intent is None:
+                intent, _ = SubmissionStorageCleanupIntent.objects.get_or_create(
+                    tenant_id=tenant_id,
+                    bucket=SubmissionStorageCleanupIntent.Bucket.STORAGE,
+                    object_key=key,
+                )
+            intent.status = SubmissionStorageCleanupIntent.Status.PENDING
+            intent.claim_token = None
+            intent.cleaned_at = None
+            intent.last_error = "storage_delete_failed"
+            intent.save(
+                update_fields=[
+                    "status",
+                    "claim_token",
+                    "cleaned_at",
+                    "last_error",
+                    "updated_at",
+                ]
+            )
+            if not uncertain_write:
+                transaction.on_commit(
+                    lambda intent_ids=(intent.id,): _process_submission_storage_cleanup_safely(
+                        intent_ids
+                    )
+                )
+            return "pending"
+        return "pending" if uncertain_write else "deleted"
 
 
 def _finish_claimed_storage_cleanup(

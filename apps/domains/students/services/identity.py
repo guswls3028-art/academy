@@ -8,6 +8,7 @@ from django.db.models import Q
 from apps.core.models.user import user_display_username, user_internal_username
 from apps.domains.students.models import Student
 from apps.domains.students.ps_number import _generate_unique_ps_number
+from apps.support.students.lifecycle_dependencies import inventory_student_ps_metadata_exists
 
 
 class StudentIdentityError(ValueError):
@@ -92,6 +93,22 @@ def student_login_id_taken(
         student_qs = student_qs.exclude(pk=exclude_student_id)
     if student_qs.exists():
         return True
+
+    if inventory_student_ps_metadata_exists(
+        tenant_id=tenant.id,
+        ps_number=username,
+    ):
+        predecessors = tuple(
+            student_id
+            for student_id, ps_number in Student.objects.filter(
+                tenant=tenant,
+                deleted_at__isnull=False,
+                ps_number__endswith=f"_{username}",
+            ).values_list("id", "ps_number")
+            if ps_number == f"_del_{student_id}_{username}"
+        )
+        if len(predecessors) != 1:
+            return True
 
     user_qs = get_user_model().objects.filter(
         username=user_internal_username(tenant, username),

@@ -9,7 +9,7 @@ from django.db import connection, transaction
 from django.utils import timezone
 
 from apps.core.models import Tenant, TenantMembership
-from apps.domains.students.models import Student
+from apps.domains.students.models import Student, StudentInventoryNamespaceConflict
 from apps.domains.students.services.school import is_valid_grade, normalize_school_from_name
 from apps.support.students.lifecycle_dependencies import (
     active_wrong_note_pdf_exists_for_students,
@@ -290,7 +290,13 @@ def soft_delete_student(
         if student.parent_id is not None:
             student.parent_id = None
             update_fields.append("parent")
-        student.save(update_fields=update_fields)
+        try:
+            student.save(update_fields=update_fields)
+        except StudentInventoryNamespaceConflict as exc:
+            raise StudentLifecycleError(
+                "student_storage_namespace_conflict",
+                "이 학생번호의 이전 저장자료 소유권을 확인한 뒤 다시 시도해 주세요.",
+            ) from exc
 
         user_deactivated = False
         if student.user:
@@ -378,7 +384,13 @@ def restore_student(
 
         student.deleted_at = None
         _append_unique(changed, "deleted_at")
-        student.save(update_fields=changed)
+        try:
+            student.save(update_fields=changed)
+        except StudentInventoryNamespaceConflict as exc:
+            raise StudentLifecycleError(
+                "student_storage_namespace_conflict",
+                "이 학생번호의 이전 저장자료 소유권을 확인한 뒤 다시 시도해 주세요.",
+            ) from exc
 
         user_reactivated = False
         if student.user:

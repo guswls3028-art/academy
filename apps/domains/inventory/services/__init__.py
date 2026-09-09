@@ -16,7 +16,9 @@ from apps.support.inventory.matchup_dependencies import (
     get_matchup_document_for_inventory_file,
     matchup_delete_protection_result,
 )
+from apps.support.inventory.student_dependencies import active_student_id_for_storage
 from apps.support.results.student_reported_scores import inventory_files_have_any_reported_score
+from apps.support.students.namespace_lock import lock_student_ps_namespaces
 
 try:
     from apps.infrastructure.storage.r2 import (
@@ -191,6 +193,38 @@ def move_file(
 
     try:
         with transaction.atomic():
+            if scope == "student":
+                lock_student_ps_namespaces(
+                    tenant_id=tenant.id,
+                    ps_numbers=(student_ps,),
+                )
+                if active_student_id_for_storage(
+                    tenant_id=tenant.id,
+                    ps_number=student_ps,
+                ) is None:
+                    raise ValueError("student storage owner changed during move")
+                if not InventoryFile.objects.select_for_update().filter(
+                    tenant=tenant,
+                    id=source.id,
+                    scope="student",
+                    student_ps=student_ps,
+                    r2_key=old_key,
+                ).exists():
+                    raise ValueError("student storage file changed during move")
+                if target_folder_id and not InventoryFolder.objects.select_for_update().filter(
+                    tenant=tenant,
+                    id=target_folder_id,
+                    scope="student",
+                    student_ps=student_ps,
+                ).exists():
+                    raise ValueError("student storage folder changed during move")
+                if overwrite_existing and not InventoryFile.objects.select_for_update().filter(
+                    tenant=tenant,
+                    id=overwrite_existing.id,
+                    scope="student",
+                    student_ps=student_ps,
+                ).exists():
+                    raise ValueError("student storage overwrite target changed during move")
             if overwrite_existing:
                 overwrite_existing.delete()
             source.folder_id = target_folder_id
@@ -392,12 +426,13 @@ def move_folder(
         q = q.filter(student_ps=student_ps)
     existing_sibling = q.order_by("id").first()
     overwrite_folder = None
+    source_folder_renamed = False
     if existing_sibling and existing_sibling.id != source_folder_id:
         if on_duplicate == "overwrite":
             overwrite_folder = existing_sibling
         elif on_duplicate == "rename":
             source_folder.name = f"{source_folder.name}_복사본"
-            source_folder.save(update_fields=["name", "updated_at"])
+            source_folder_renamed = True
         else:
             return {"ok": False, "status": 409, "code": "duplicate", "existing_name": source_folder.name, "detail": "Folder with same name exists"}
 
@@ -467,13 +502,49 @@ def move_folder(
 
     try:
         with transaction.atomic():
+            if scope == "student":
+                lock_student_ps_namespaces(
+                    tenant_id=tenant.id,
+                    ps_numbers=(student_ps,),
+                )
+                if active_student_id_for_storage(
+                    tenant_id=tenant.id,
+                    ps_number=student_ps,
+                ) is None:
+                    raise ValueError("student storage owner changed during move")
+                folder_ids = [item.id for item in folders]
+                file_ids = [item.id for item in files]
+                if InventoryFolder.objects.select_for_update().filter(
+                    tenant=tenant,
+                    id__in=folder_ids,
+                    scope="student",
+                    student_ps=student_ps,
+                ).count() != len(folder_ids):
+                    raise ValueError("student storage folder tree changed during move")
+                if InventoryFile.objects.select_for_update().filter(
+                    tenant=tenant,
+                    id__in=file_ids,
+                    scope="student",
+                    student_ps=student_ps,
+                ).count() != len(file_ids):
+                    raise ValueError("student storage file tree changed during move")
+                if target_folder_id and not InventoryFolder.objects.select_for_update().filter(
+                    tenant=tenant,
+                    id=target_folder_id,
+                    scope="student",
+                    student_ps=student_ps,
+                ).exists():
+                    raise ValueError("student storage target folder changed during move")
             if overwrite_folder:
                 overwrite_folder.delete()
             for inv_file, old_key, new_key in copy_plans:
                 inv_file.r2_key = new_key
                 inv_file.save(update_fields=["r2_key", "updated_at"])
             source_folder.parent = target_folder
-            source_folder.save(update_fields=["parent_id", "updated_at"])
+            source_folder_fields = ["parent_id", "updated_at"]
+            if source_folder_renamed:
+                source_folder_fields.append("name")
+            source_folder.save(update_fields=source_folder_fields)
     except Exception as e:
         _restore_backups(backup_plans)
         _cleanup_uncommitted_copies(copied_keys, backup_plans)

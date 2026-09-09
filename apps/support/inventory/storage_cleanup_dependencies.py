@@ -11,13 +11,18 @@ def ensure_storage_inventory_key_attachable(*, tenant_id: int, key: str) -> None
     _ensure(tenant_id=tenant_id, key=key)
 
 
-def schedule_unreferenced_storage_object_cleanup(
+def compensate_unattached_storage_object(
     *,
     tenant_id: int,
     key: str,
-) -> int | None:
+    uncertain_write: bool = False,
+) -> str:
     from apps.domains.submissions.services.lifecycle import (
-        schedule_unreferenced_storage_object_cleanup as _schedule,
+        compensate_unattached_storage_object as _compensate,
     )
 
-    return _schedule(tenant_id=tenant_id, key=key)
+    return _compensate(
+        tenant_id=tenant_id,
+        key=key,
+        uncertain_write=uncertain_write,
+    )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 import json
 from unittest.mock import patch
 
@@ -8,6 +9,7 @@ from django.apps import apps as django_apps
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APIRequestFactory
 
 from apps.core.models import Tenant, TenantMembership
@@ -24,6 +26,12 @@ from apps.domains.inventory.views import (
     QuotaView,
 )
 from apps.domains.students.models import Student
+from apps.support.inventory.storage_cleanup_dependencies import (
+    compensate_unattached_storage_object,
+)
+from apps.support.inventory.student_dependencies import (
+    student_storage_namespace_has_legacy_conflict,
+)
 
 
 User = get_user_model()
@@ -512,6 +520,8 @@ class InventoryHardeningViewTests(TestCase):
         with self._auth(self.staff), patch(
             "apps.domains.inventory.views.upload_fileobj_to_r2_storage",
             side_effect=RuntimeError("provider-secret-detail"),
+        ), patch(
+            "apps.infrastructure.storage.r2.delete_object_r2_storage"
         ):
             response = FileUploadView.as_view()(request)
 
@@ -519,6 +529,282 @@ class InventoryHardeningViewTests(TestCase):
         self.assertEqual(response.status_code, 502)
         self.assertEqual(payload["code"], "inventory_storage_upload_failed")
         self.assertNotIn("provider-secret-detail", payload["detail"])
+
+    def test_uncertain_put_failure_compensates_and_keeps_durable_retry_intent(self):
+        upload = SimpleUploadedFile("uncertain.pdf", b"%PDF-1.4", content_type="application/pdf")
+        request = self._multipart_request(
+            "/storage/inventory/upload/",
+            {"scope": "admin", "file": upload},
+        )
+        stored_keys = set()
+
+        def store_then_raise(*, key, **kwargs):
+            stored_keys.add(key)
+            raise TimeoutError("provider response lost")
+
+        def exact_delete(*, key):
+            stored_keys.discard(key)
+
+        with self._auth(self.staff), patch(
+            "apps.domains.inventory.views.upload_fileobj_to_r2_storage",
+            side_effect=store_then_raise,
+        ), patch(
+            "apps.infrastructure.storage.r2.delete_object_r2_storage",
+            side_effect=exact_delete,
+        ):
+            response = FileUploadView.as_view()(request)
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(json.loads(response.content)["code"], "inventory_storage_upload_failed")
+        self.assertEqual(stored_keys, set())
+        intent = SubmissionStorageCleanupIntent.objects.get(tenant=self.tenant)
+        self.assertEqual(intent.status, SubmissionStorageCleanupIntent.Status.PENDING)
+        self.assertFalse(InventoryFile.objects.filter(tenant=self.tenant).exists())
+
+    def test_unexpected_attach_failure_still_compensates_uploaded_object(self):
+        upload = SimpleUploadedFile("attach-failure.pdf", b"%PDF-1.4", content_type="application/pdf")
+        request = self._multipart_request(
+            "/storage/inventory/upload/",
+            {"scope": "admin", "file": upload},
+        )
+
+        with self._auth(self.staff), patch(
+            "apps.domains.inventory.views.upload_fileobj_to_r2_storage"
+        ) as upload_r2, patch(
+            "apps.domains.inventory.views.inv_repo.inventory_file_aggregate_size",
+            side_effect=[0, RuntimeError("attach read failed")],
+        ), patch(
+            "apps.infrastructure.storage.r2.delete_object_r2_storage"
+        ) as delete_r2:
+            response = FileUploadView.as_view()(request)
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(json.loads(response.content)["code"], "inventory_metadata_save_failed")
+        delete_r2.assert_called_once_with(key=upload_r2.call_args.kwargs["key"])
+
+    def test_upload_compensation_preserves_a_canonical_inventory_owner(self):
+        owned_key = f"tenants/{self.tenant.id}/admin/inventory/already-owned.pdf"
+        owner = InventoryFile.objects.create(
+            tenant=self.tenant,
+            scope="admin",
+            student_ps="",
+            folder=None,
+            display_name="already-owned.pdf",
+            original_name="already-owned.pdf",
+            r2_key=owned_key,
+            content_type="application/pdf",
+        )
+
+        with patch(
+            "apps.infrastructure.storage.r2.delete_object_r2_storage"
+        ) as delete_r2:
+            outcome = compensate_unattached_storage_object(
+                tenant_id=self.tenant.id,
+                key=owned_key,
+                uncertain_write=True,
+            )
+
+        self.assertEqual(outcome, "referenced")
+        self.assertTrue(InventoryFile.objects.filter(pk=owner.pk).exists())
+        self.assertFalse(
+            SubmissionStorageCleanupIntent.objects.filter(
+                tenant=self.tenant,
+                object_key=owned_key,
+            ).exists()
+        )
+        delete_r2.assert_not_called()
+
+    def test_active_replacement_cannot_list_or_download_ambiguous_legacy_inventory(self):
+        legacy_file = InventoryFile.objects.create(
+            tenant=self.tenant,
+            scope="student",
+            student_ps=self.student.ps_number,
+            display_name="previous-private.pdf",
+            r2_key=f"tenants/{self.tenant.id}/students/S001/inventory/previous-private.pdf",
+            original_name="previous-private.pdf",
+            size_bytes=47,
+            content_type="application/pdf",
+        )
+        InventoryFile.objects.filter(pk=legacy_file.pk).update(
+            created_at=timezone.now() - timedelta(minutes=1)
+        )
+        Student.objects.filter(pk=self.student.pk).update(
+            ps_number=f"_del_{self.student.id}_S001",
+            deleted_at=timezone.now(),
+            parent=None,
+        )
+        replacement_user = User.objects.create_user(
+            username="inv-hard-replacement",
+            password="test1234",
+            tenant=self.tenant,
+        )
+        replacement = Student(
+            tenant=self.tenant,
+            user=replacement_user,
+            ps_number="S001",
+            omr_code="12345679",
+            name="새 학생",
+        )
+        Student.objects.bulk_create([replacement])
+        TenantMembership.ensure_active(
+            tenant=self.tenant,
+            user=replacement_user,
+            role="student",
+        )
+        replacement_parent_user = User.objects.create_user(
+            username="inv-hard-replacement-parent",
+            password="test1234",
+            tenant=self.tenant,
+        )
+        TenantMembership.ensure_active(
+            tenant=self.tenant,
+            user=replacement_parent_user,
+            role="parent",
+        )
+        replacement_parent = Parent.objects.create(
+            tenant=self.tenant,
+            user=replacement_parent_user,
+            name="새 학부모",
+            phone="01077778888",
+        )
+        Student.objects.filter(pk=replacement.pk).update(parent=replacement_parent)
+
+        student_list = self.factory.get(
+            "/storage/inventory/?scope=student&student_ps=S001"
+        )
+        student_list.tenant = self.tenant
+        with self._auth(replacement_user):
+            student_response = InventoryListView.as_view()(student_list)
+
+        parent_list = self.factory.get(
+            "/storage/inventory/?scope=student&student_ps=S001",
+            HTTP_X_STUDENT_ID=str(replacement.pk),
+        )
+        parent_list.tenant = self.tenant
+        with self._auth(replacement_parent_user):
+            parent_response = InventoryListView.as_view()(parent_list)
+
+        presign = self._json_request(
+            "/storage/inventory/presign/",
+            {"file_id": legacy_file.id},
+            replacement_user,
+        )
+        with self._auth(replacement_user):
+            presign_response = PresignView.as_view()(presign)
+
+        for response in (student_response, parent_response, presign_response):
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(
+                json.loads(response.content)["code"],
+                "student_storage_namespace_conflict",
+            )
+
+        staff_list = self.factory.get(
+            "/storage/inventory/?scope=student&student_ps=S001"
+        )
+        staff_list.tenant = self.tenant
+        with self._auth(self.staff):
+            staff_response = InventoryListView.as_view()(staff_list)
+        self.assertEqual(staff_response.status_code, 200)
+        self.assertEqual(len(json.loads(staff_response.content)["files"]), 1)
+
+    def test_safe_replacement_claim_can_use_new_inventory_without_old_file_exposure(self):
+        original_ps = self.student.ps_number
+        tombstone_ps = f"_del_{self.student.id}_{original_ps}"
+        legacy_file = InventoryFile.objects.create(
+            tenant=self.tenant,
+            scope="student",
+            student_ps=original_ps,
+            display_name="old-private.pdf",
+            r2_key=f"tenants/{self.tenant.id}/students/{original_ps}/inventory/old-private.pdf",
+            original_name="old-private.pdf",
+            size_bytes=47,
+            content_type="application/pdf",
+        )
+        Student.objects.filter(pk=self.student.pk).update(
+            ps_number=tombstone_ps,
+            deleted_at=timezone.now(),
+            parent=None,
+        )
+        User.objects.filter(pk=self.student.user_id).update(username=f"deleted-{self.student.id}")
+        replacement_user = User.objects.create_user(
+            username="safe-replacement",
+            password="test1234",
+            tenant=self.tenant,
+        )
+        replacement = Student.objects.create(
+            tenant=self.tenant,
+            user=replacement_user,
+            parent=self.parent,
+            ps_number=original_ps,
+            omr_code="12345679",
+            name="새 학생",
+        )
+        TenantMembership.ensure_active(
+            tenant=self.tenant,
+            user=replacement_user,
+            role="student",
+        )
+        new_file = InventoryFile.objects.create(
+            tenant=self.tenant,
+            scope="student",
+            student_ps=original_ps,
+            display_name="new.pdf",
+            r2_key=f"tenants/{self.tenant.id}/students/{original_ps}/inventory/new.pdf",
+            original_name="new.pdf",
+            size_bytes=48,
+            content_type="application/pdf",
+        )
+        legacy_file.refresh_from_db()
+        self.assertEqual(legacy_file.student_ps, tombstone_ps)
+        self.assertGreaterEqual(new_file.created_at, replacement.created_at)
+        self.assertFalse(
+            student_storage_namespace_has_legacy_conflict(
+                tenant_id=self.tenant.id,
+                student_id=replacement.id,
+                ps_number=original_ps,
+            ),
+            (
+                f"replacement={replacement.created_at.isoformat()} "
+                f"new_file={new_file.created_at.isoformat()}"
+            ),
+        )
+
+        student_list = self.factory.get(
+            f"/storage/inventory/?scope=student&student_ps={original_ps}"
+        )
+        student_list.tenant = self.tenant
+        with self._auth(replacement_user):
+            student_response = InventoryListView.as_view()(student_list)
+
+        parent_list = self.factory.get(
+            f"/storage/inventory/?scope=student&student_ps={original_ps}",
+            HTTP_X_STUDENT_ID=str(replacement.id),
+        )
+        parent_list.tenant = self.tenant
+        with self._auth(self.parent_user):
+            parent_response = InventoryListView.as_view()(parent_list)
+
+        presign = self._json_request(
+            "/storage/inventory/presign/",
+            {"file_id": new_file.id},
+            replacement_user,
+        )
+        with self._auth(replacement_user), patch(
+            "apps.domains.inventory.views.generate_presigned_get_url_storage",
+            return_value="https://example.invalid/safe",
+        ):
+            presign_response = PresignView.as_view()(presign)
+
+        for label, response in (
+            ("student-list", student_response),
+            ("parent-list", parent_response),
+            ("student-presign", presign_response),
+        ):
+            self.assertEqual(response.status_code, 200, f"{label}: {response.content!r}")
+        for response in (student_response, parent_response):
+            files = json.loads(response.content)["files"]
+            self.assertEqual([item["id"] for item in files], [str(new_file.id)])
 
     def test_all_plan_can_upload_and_reports_200gb_quota(self):
         upload = SimpleUploadedFile("all-plan.pdf", b"%PDF-1.4", content_type="application/pdf")
@@ -563,7 +849,7 @@ class InventoryHardeningViewTests(TestCase):
         ) as upload_r2, patch(
             "apps.domains.inventory.views.inv_repo.inventory_file_create",
             side_effect=RuntimeError("database unavailable"),
-        ), patch("apps.domains.inventory.views.delete_object_r2_storage") as delete_r2:
+        ), patch("apps.infrastructure.storage.r2.delete_object_r2_storage") as delete_r2:
             response = FileUploadView.as_view()(request)
 
         self.assertEqual(response.status_code, 500)
@@ -591,7 +877,7 @@ class InventoryHardeningViewTests(TestCase):
             "apps.domains.inventory.views.inv_repo.inventory_file_create",
             side_effect=RuntimeError("database unavailable"),
         ), patch(
-            "apps.domains.inventory.views.delete_object_r2_storage",
+            "apps.infrastructure.storage.r2.delete_object_r2_storage",
             side_effect=RuntimeError("storage unavailable"),
         ):
             response = FileUploadView.as_view()(request)

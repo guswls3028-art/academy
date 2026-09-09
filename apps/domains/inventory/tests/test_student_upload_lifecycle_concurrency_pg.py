@@ -15,10 +15,10 @@ from rest_framework.test import APIRequestFactory
 from academy.adapters.db.django import repositories_inventory as inv_repo
 from apps.core.models import Tenant, TenantMembership
 from apps.domains.inventory.models import InventoryFile
-from apps.domains.inventory.views import FileUploadView
-from apps.support.inventory.student_dependencies import (
-    permanently_delete_students_for_storage,
-    soft_delete_student_for_storage,
+from apps.domains.inventory.views import FileDeleteView, FileUploadView
+from apps.support.students.lifecycle import (
+    permanently_delete_students,
+    soft_delete_student,
 )
 
 
@@ -127,15 +127,15 @@ class TestStudentUploadLifecycleConcurrencyPostgres(TransactionTestCase):
             "apps.domains.inventory.views.upload_fileobj_to_r2_storage",
             side_effect=fake_put,
         ), patch(
-            "apps.domains.inventory.views.delete_object_r2_storage",
+            "apps.infrastructure.storage.r2.delete_object_r2_storage",
             side_effect=fake_delete,
         ):
             upload_thread = threading.Thread(target=upload_worker)
             upload_thread.start()
             self.assertTrue(put_started.wait(timeout=5))
             thread_student = Student.objects.get(pk=self.student.pk)
-            soft_delete_student_for_storage(thread_student, tenant=self.tenant)
-            result = permanently_delete_students_for_storage(
+            soft_delete_student(thread_student, tenant=self.tenant)
+            result = permanently_delete_students(
                 tenant=self.tenant,
                 student_ids=[self.student.id],
             )
@@ -198,9 +198,9 @@ class TestStudentUploadLifecycleConcurrencyPostgres(TransactionTestCase):
             try:
                 delete_started.set()
                 thread_student = Student.objects.get(pk=self.student.pk)
-                soft_delete_student_for_storage(thread_student, tenant=self.tenant)
+                soft_delete_student(thread_student, tenant=self.tenant)
                 delete_results.append(
-                    permanently_delete_students_for_storage(
+                    permanently_delete_students(
                         tenant=self.tenant,
                         student_ids=[self.student.id],
                     )
@@ -253,3 +253,99 @@ class TestStudentUploadLifecycleConcurrencyPostgres(TransactionTestCase):
             bucket=SubmissionStorageCleanupIntent.Bucket.STORAGE,
         )
         self.assertEqual(intent.status, SubmissionStorageCleanupIntent.Status.CLEANED)
+
+    def test_stale_file_delete_waits_for_soft_delete_and_preserves_quarantined_owner(self):
+        inv_file = InventoryFile.objects.create(
+            tenant=self.tenant,
+            scope="student",
+            student_ps=self.student.ps_number,
+            folder=None,
+            display_name="private.pdf",
+            original_name="private.pdf",
+            r2_key=(
+                f"tenants/{self.tenant.id}/students/"
+                f"{self.student.ps_number}/inventory/private.pdf"
+            ),
+            content_type="application/pdf",
+        )
+        quarantine_started = threading.Event()
+        release_quarantine = threading.Event()
+        delete_started = threading.Event()
+        delete_finished = threading.Event()
+        errors = []
+        responses = []
+        from apps.support.students.lifecycle_dependencies import (
+            update_inventory_student_ps as real_update_inventory_student_ps,
+        )
+
+        def blocking_update(*args, **kwargs):
+            quarantine_started.set()
+            if not release_quarantine.wait(timeout=10):
+                raise TimeoutError("test did not release inventory quarantine")
+            return real_update_inventory_student_ps(*args, **kwargs)
+
+        def soft_delete_worker():
+            close_old_connections()
+            try:
+                soft_delete_student(
+                    Student.objects.get(pk=self.student.pk),
+                    tenant=self.tenant,
+                )
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        def file_delete_worker():
+            close_old_connections()
+            try:
+                request = self.factory.delete(
+                    "/storage/inventory/files/"
+                    f"{inv_file.id}/?scope=student&student_ps={self.student.ps_number}"
+                )
+                request.tenant = self.tenant
+                delete_started.set()
+                responses.append(FileDeleteView.as_view()(request, file_id=inv_file.id))
+                delete_finished.set()
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        with patch(
+            "apps.domains.students.models.update_inventory_student_ps",
+            side_effect=blocking_update,
+        ), patch(
+            "apps.domains.inventory.views.JWTAuthentication.authenticate",
+            return_value=(self.staff, None),
+        ), patch(
+            "apps.domains.inventory.views.delete_object_r2_storage",
+        ) as storage_delete:
+            soft_thread = threading.Thread(target=soft_delete_worker)
+            soft_thread.start()
+            self.assertTrue(quarantine_started.wait(timeout=5))
+            file_delete_thread = threading.Thread(target=file_delete_worker)
+            file_delete_thread.start()
+            self.assertTrue(delete_started.wait(timeout=5))
+            self.assertFalse(
+                delete_finished.wait(timeout=1),
+                "File delete crossed the student namespace ownership lock.",
+            )
+            release_quarantine.set()
+            soft_thread.join(timeout=10)
+            file_delete_thread.join(timeout=10)
+
+        self.assertFalse(soft_thread.is_alive())
+        self.assertFalse(file_delete_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(responses[0].status_code, 409)
+        self.assertEqual(
+            json.loads(responses[0].content)["code"],
+            "student_storage_owner_missing",
+        )
+        self.student.refresh_from_db()
+        inv_file.refresh_from_db()
+        self.assertTrue(self.student.ps_number.startswith(f"_del_{self.student.id}_"))
+        self.assertEqual(inv_file.student_ps, self.student.ps_number)
+        storage_delete.assert_not_called()

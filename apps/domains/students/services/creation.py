@@ -9,9 +9,11 @@ from django.db import transaction
 from academy.adapters.db.django import repositories_students as student_repo
 from apps.core.models import TenantMembership
 from apps.support.students.lifecycle_dependencies import ensure_parent_account_for_student
+from apps.domains.students.models import StudentInventoryNamespaceConflict
 
 from .account_notice import stage_pending_account_notice
 from .identity import (
+    StudentIdentityError,
     canonical_student_phone,
     derive_student_omr_code,
     phone_digits,
@@ -119,12 +121,17 @@ def create_student_account(
         user.must_change_password = must_change_password
         user.save()
 
-        student = student_repo.student_create(
-            tenant=tenant,
-            user=user,
-            parent=parent,
-            **data,
-        )
+        try:
+            student = student_repo.student_create(
+                tenant=tenant,
+                user=user,
+                parent=parent,
+                **data,
+            )
+        except StudentInventoryNamespaceConflict as exc:
+            raise StudentIdentityError(
+                {"ps_number": "이전 저장자료 소유권을 확인한 뒤 다시 시도해 주세요."}
+            ) from exc
 
         TenantMembership.ensure_active(
             tenant=tenant,
