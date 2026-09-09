@@ -29,7 +29,11 @@ from apps.domains.students.models import Student
 from apps.domains.lectures.models import Lecture, Session as LectureSession
 from apps.domains.enrollment.models import Enrollment, SessionEnrollment
 from apps.domains.exams.models import Exam, ExamEnrollment, ExamQuestion, Sheet
-from apps.domains.submissions.models import Submission, SubmissionAnswer
+from apps.domains.submissions.models import (
+    Submission,
+    SubmissionAnswer,
+    SubmissionStorageCleanupIntent,
+)
 from apps.domains.submissions.services.ai_omr_result_mapper import apply_omr_ai_result
 from apps.domains.submissions.views.submission_view import SubmissionViewSet
 from apps.domains.submissions.views.pending_submissions_view import (
@@ -1025,6 +1029,52 @@ class TestC3ExamOMRSubmitGuard(_SecurityFixtureMixin, TestCase):
                 enrollment_id=self.enrollment.id,
             ).exists()
         )
+        dispatch_submission.assert_not_called()
+
+    @patch("apps.domains.submissions.views.exam_omr_submit_view.dispatch_submission")
+    def test_teacher_omr_submit_rejects_same_tenant_non_ai_namespace(
+        self,
+        dispatch_submission,
+    ):
+        Sheet.objects.create(exam=self.exam, name="MAIN", total_questions=1)
+        key = f"tenants/{self.tenant.id}/omr/caller-controlled.png"
+
+        resp = self._call(
+            lambda: ExamOMRSubmitView.as_view(),
+            "post",
+            f"/api/v1/submissions/submissions/exams/{self.exam.id}/omr/",
+            user=self.teacher,
+            data={"enrollment_id": self.enrollment.id, "file_key": key},
+            exam_id=self.exam.id,
+        )
+
+        self.assertEqual(resp.status_code, 400, resp.data)
+        dispatch_submission.assert_not_called()
+
+    @patch("apps.domains.submissions.views.exam_omr_submit_view.dispatch_submission")
+    def test_teacher_omr_submit_rejects_key_already_claimed_for_cleanup(
+        self,
+        dispatch_submission,
+    ):
+        Sheet.objects.create(exam=self.exam, name="MAIN", total_questions=1)
+        key = f"tenants/{self.tenant.id}/ai/submissions/legacy/cleanup.png"
+        SubmissionStorageCleanupIntent.objects.create(
+            tenant=self.tenant,
+            bucket=SubmissionStorageCleanupIntent.Bucket.AI,
+            object_key=key,
+        )
+
+        resp = self._call(
+            lambda: ExamOMRSubmitView.as_view(),
+            "post",
+            f"/api/v1/submissions/submissions/exams/{self.exam.id}/omr/",
+            user=self.teacher,
+            data={"enrollment_id": self.enrollment.id, "file_key": key},
+            exam_id=self.exam.id,
+        )
+
+        self.assertEqual(resp.status_code, 409, resp.data)
+        self.assertEqual(resp.data["code"], "submission_storage_cleanup_conflict")
         dispatch_submission.assert_not_called()
 
 

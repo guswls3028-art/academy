@@ -103,10 +103,14 @@ SSOT: `permanently_delete_students(tenant=..., student_ids=[...])`
   - `StudentReportedScore`, 학생 지원 세션, 비활성 수강·직접 영상 권한을
     학생 행 삭제 전에 같은 tenant 범위로 정리한다.
   - 수강이 먼저 삭제되어 `Submission.enrollment=NULL`인 제출도 삭제 대상
-    학생 전용 계정의 tenant-scoped submission이면 포함한다. 제출 도메인이
-    `SubmissionMedia`/legacy `file_key` object를 정리하고 child 행을 먼저 삭제한
-    뒤 부모 `Submission`을 삭제한다. OMR batch 이력은 보존하고 해당
+    학생의 `Submission.user`가 가리키는 tenant-scoped submission이면 포함한다.
+    `Student.user`는 OneToOne이므로 Parent/Staff 역할이 함께 있어도 submission의
+    학생 owner는 유일하며, 계정과 다른 역할은 보존하고 학생 제출만 삭제한다.
+    제출 도메인이 `SubmissionMedia`/legacy `file_key` cleanup intent와 child 행을
+    먼저 기록한 뒤 부모 `Submission`을 삭제한다. OMR batch 이력은 보존하고 해당
     submission 참조만 `NULL`로 바꾼다.
+  - `WrongNotePDF.file_path`도 같은 durable intent에 Storage 버킷 대상으로 기록한다.
+    제출 object는 AI 버킷 대상이므로 같은 문자열 key여도 버킷을 혼동하지 않는다.
 - 삭제 대상 테넌트의 student 멤버십과 pending password reset
 - 다른 활성 멤버십·Parent·Staff·staff-role 멤버십이 없는 orphan `User`
 
@@ -115,10 +119,20 @@ SSOT: `permanently_delete_students(tenant=..., student_ids=[...])`
 - 삭제 대상 학생은 반드시 같은 tenant의 soft-deleted 학생이어야 한다.
 - 같은 사용자가 다른 테넌트나 같은 테넌트의 비학생 역할로 남아 있으면 User와 해당 멤버십을 보존한다.
 - 보존되는 사용자가 과거 soft delete 때문에 비활성화되어 있고 활성 멤버십이 남아 있으면 재활성화한다.
-- tenant-owned child row가 다른 tenant로 깨져 있으면 조용히 삭제하지 않고 `cross_tenant_reference`로 중단한다.
-- 삭제 대상 object key를 다른 submission/media가 참조하면 R2 object는 보존한다.
-  대상 테넌트·submission·media 행만 정리하며 다른 테넌트 행을 키로
-  추측해 삭제하지 않는다.
+- Student, Enrollment, Submission reverse graph의 tenant-bearing 직접 FK와 소유
+  exam/session/lecture/video/batch tenant가 다르면 어떤 DB/R2 변경보다 먼저
+  `409 cross_tenant_reference`로 중단한다. legacy OMR batch item의 nullable
+  `tenant_id`는 parent batch가 exact tenant일 때만 허용하고 submission 참조만 비운다.
+- 삭제 대상 object key를 같은 owning bucket의 다른 submission/media 또는 등록된
+  inventory/exam/community/student/matchup/tools/public/video owner가 참조하면 R2 object를
+  보존한다. 대상 tenant·행·버킷을 키 문자열만으로 추측하지 않는다.
+- DB transaction은 object를 삭제하지 않는다. `(tenant, bucket, object_key)` cleanup
+  intent가 DB 삭제와 함께 commit된 다음 callback이 처리한다. provider 실패는 raw
+  예외 대신 `storage_delete_failed`를 남기며 pending/failed intent는 반복 실행해도
+  완료 key를 다시 처리하지 않는다. 15분 지난 PROCESSING claim만 token으로 회수한다.
+- 영구삭제 API 성공 응답은 `deleted`와
+  `storage_cleanup: {pending, failed}`를 반환한다. 저장 namespace 불일치 또는 진행 중
+  media upload는 `409 storage_cleanup_scope_mismatch`로 전체 mutation을 중단한다.
 - 현재 cross-domain 정리는 guarded raw SQL graph다. 장기 목표는 각 도메인 cleanup hook/event로 분해하는 것이다.
 
 ## 5. Retention 운영
@@ -126,6 +140,10 @@ SSOT: `permanently_delete_students(tenant=..., student_ids=[...])`
 - soft-deleted 학생은 30일 보관 후 purge 대상이다.
 - 운영 스케줄은 EventBridge `academy-v1-purge-soft-deleted`: 매일 03:15 KST.
 - 실행 명령은 API 컨테이너에서 `python manage.py purge_deleted_students`.
+- cleanup intent만 재시도할 때는
+  `python manage.py process_submission_storage_cleanup --limit 1000`을 사용한다.
+  매일 purge 명령도 학생 대상 유무와 무관하게 pending/failed intent를 먼저·후에
+  재시도한다.
 - 수동 점검:
 
 ```powershell
@@ -149,7 +167,9 @@ python manage.py purge_deleted_students
   - fee/section/video-comment dependency cleanup
   - reported score/support session/video entitlement cleanup
   - detached submission media R2/row cleanup과 공유 object 보존
+  - AI/Storage bucket 분리, DB rollback 전 object 미삭제, 부분 실패 재시도
+  - 오답노트 PDF의 동일한 post-commit cleanup과 scheduled retry
   - OMR batch submission 참조 nulling
-  - `Student`/`Submission` reverse FK graph contract drift
+  - `Student`/`Enrollment`/`Submission` reverse FK graph 및 storage owner registry drift
   - corrupt cross-tenant child reference 차단
   - purge/duplicate cleanup command routing

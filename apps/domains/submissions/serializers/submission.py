@@ -15,10 +15,17 @@ from apps.domains.submissions.models import Submission
 
 # ✅ API 서버 전용 R2 업로드
 from apps.core.r2_paths import ai_submission_key
-from apps.infrastructure.storage.r2 import delete_object_r2_storage, upload_fileobj_to_r2
+from apps.infrastructure.storage.r2 import delete_object_r2_ai, upload_fileobj_to_r2
 
 
 logger = logging.getLogger(__name__)
+
+
+class SubmissionUploadCleanupRequired(RuntimeError):
+    def __init__(self, *, tenant_id: int, key: str):
+        super().__init__("uploaded submission object requires durable cleanup")
+        self.tenant_id = int(tenant_id)
+        self.key = key
 
 
 class SubmissionSerializer(serializers.ModelSerializer):
@@ -129,15 +136,19 @@ class SubmissionCreateSerializer(serializers.ModelSerializer):
                 )
                 submission.file_size = getattr(upload_file, "size", None)
                 submission.save(update_fields=["file_key", "file_type", "file_size"])
-            except Exception:
+            except Exception as exc:
                 if uploaded:
                     try:
-                        delete_object_r2_storage(key=key)
+                        delete_object_r2_ai(key=key)
                     except Exception:
                         logger.exception(
                             "Failed to compensate uploaded submission object",
                             extra={"submission_id": int(submission.id)},
                         )
+                        raise SubmissionUploadCleanupRequired(
+                            tenant_id=submission.tenant_id,
+                            key=key,
+                        ) from exc
                 raise
 
         return submission

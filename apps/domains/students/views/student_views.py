@@ -705,6 +705,11 @@ class StudentViewSet(ModelViewSet):
         tenant = request.tenant
         try:
             result = permanently_delete_students(tenant=tenant, student_ids=ids)
+        except StudentLifecycleError as exc:
+            return Response(
+                {"code": exc.code, "detail": exc.detail},
+                status=409,
+            )
         except Exception as e:
             logger.exception(
                 "bulk_permanent_delete failed: %s (student_ids=%s)",
@@ -714,7 +719,16 @@ class StudentViewSet(ModelViewSet):
                 {"detail": f"영구 삭제 중 오류: {e}"},
                 status=500,
             )
-        return Response({"deleted": result.deleted_count}, status=200)
+        return Response(
+            {
+                "deleted": result.deleted_count,
+                "storage_cleanup": {
+                    "pending": result.storage_cleanup_pending_count,
+                    "failed": result.storage_cleanup_failed_count,
+                },
+            },
+            status=200,
+        )
 
     @action(
         detail=False,
