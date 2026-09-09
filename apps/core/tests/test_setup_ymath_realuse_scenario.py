@@ -203,6 +203,26 @@ class SetupYmathRealuseScenarioTests(TestCase):
         self.assertEqual(owner.code, "unexpected-owner")
         self.assertFalse(AutoSendConfig.objects.filter(tenant=owner).exists())
 
+    def test_development_messaging_baseline_rejects_missing_owner_in_nonempty_database(self):
+        other = Tenant.objects.create(pk=2, code="existing-development-tenant", name="Existing")
+        with (
+            override_settings(
+                OWNER_TENANT_ID=1,
+                SOLAPI_KAKAO_PF_ID="development-mock-pfid",
+            ),
+            patch(
+                "apps.core.management.commands.setup_ymath_realuse_scenario._is_persistent_development_runtime",
+                return_value=True,
+            ),
+            patch.dict(os.environ, {"SOLAPI_MOCK": "true"}),
+            self.assertRaisesMessage(CommandError, "non-empty development database"),
+        ):
+            ensure_development_messaging_baseline()
+
+        self.assertFalse(Tenant.objects.filter(pk=1).exists())
+        self.assertTrue(Tenant.objects.filter(pk=other.pk, code=other.code).exists())
+        self.assertFalse(AutoSendConfig.objects.exists())
+
     def test_explicit_long_video_fixture_creates_two_proctored_accesses_only(self):
         payload = json.loads(self._call_command(synthetic_long_video=True).splitlines()[-1])
 

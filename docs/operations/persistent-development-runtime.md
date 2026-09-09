@@ -185,7 +185,7 @@ APPROVED mock 템플릿을 보장한다. 이미 유효한 개발 템플릿은 �
 템플릿은 개발 런타임의 기준 데이터이므로 QA tenant cleanup 대상이 아니며 수신번호,
 자격 증명, 운영 provider 식별자를 저장하지 않는다. 전용 개발 messaging worker가
 개발 큐를 소비해 mock provider receipt를 영속화해야 계정 복구 실사용 검증이 통과한다.
-owner가 없는 개발 DB에서는 같은 transaction이 `OWNER_TENANT_ID`에
+빈 개발 DB에서는 같은 transaction이 `OWNER_TENANT_ID`에
 `academy-development-owner`/`Academy Development Owner` 활성 tenant를 먼저 만들고
 PostgreSQL tenant PK sequence를 전진시킨다. 그 ID나 code가 다른 tenant에 이미
 사용됐거나 기존 owner identity가 다르면 데이터를 덮어쓰지 않고 fail-closed한다.

@@ -183,6 +183,16 @@ def ensure_development_messaging_baseline() -> None:
         )
         if code_owner is not None:
             raise CommandError("Development messaging owner code is assigned to an unexpected tenant ID.")
+        existing_tenant = (
+            Tenant.objects.select_for_update()
+            .only("id")
+            .order_by("id")
+            .first()
+        )
+        if existing_tenant is not None:
+            raise CommandError(
+                "Development messaging owner is missing from a non-empty development database."
+            )
         owner = Tenant(
             pk=owner_id,
             code=DEVELOPMENT_MESSAGING_OWNER_CODE,
