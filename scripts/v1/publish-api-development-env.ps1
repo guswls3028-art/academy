@@ -229,7 +229,7 @@ function Set-IsolatedDevelopmentValues {
         SOLAPI_API_KEY = ""
         SOLAPI_API_SECRET = ""
         SOLAPI_SENDER = ""
-        SOLAPI_KAKAO_PF_ID = ""
+        SOLAPI_KAKAO_PF_ID = "development-mock-pfid"
         SOLAPI_KAKAO_TEMPLATE_ID = ""
         MESSAGING_DRY_RUN_TRIGGERS = "*"
         TOSS_AUTO_BILLING_ENABLED = "false"

@@ -28,12 +28,14 @@ Load-SSOT -Env prod | Out-Null
 $apiRelease = Get-ReleaseManifestImage -RepoName $script:EcrApiRepo
 $toolsRelease = Get-ReleaseManifestImage -RepoName $script:EcrToolsRepo
 $aiRelease = Get-ReleaseManifestImage -RepoName $script:EcrAiRepo
+$messagingRelease = Get-ReleaseManifestImage -RepoName $script:EcrMessagingRepo
 if (
     [string]$apiRelease.GitSha -notmatch '^[0-9a-fA-F]{40}$' -or
     [string]$toolsRelease.GitSha -ne [string]$apiRelease.GitSha -or
-    [string]$aiRelease.GitSha -ne [string]$apiRelease.GitSha
+    [string]$aiRelease.GitSha -ne [string]$apiRelease.GitSha -or
+    [string]$messagingRelease.GitSha -ne [string]$apiRelease.GitSha
 ) {
-    throw "Verified API, Tools, and AI release images must share one full Git SHA."
+    throw "Verified API, Tools, AI, and Messaging release images must share one full Git SHA."
 }
 $releaseId = "sha-$([string]$apiRelease.GitSha)-run-0-0"
 $apiImageUri = (
@@ -47,6 +49,10 @@ $toolsImageUri = (
 $aiImageUri = (
     "$($script:AccountId).dkr.ecr.$($script:Region).amazonaws.com/" +
     "$($script:EcrAiRepo)@$([string]$aiRelease.Digest)"
+)
+$messagingImageUri = (
+    "$($script:AccountId).dkr.ecr.$($script:Region).amazonaws.com/" +
+    "$($script:EcrMessagingRepo)@$([string]$messagingRelease.Digest)"
 )
 
 $outputPath = [System.IO.Path]::GetTempFileName()
@@ -74,6 +80,7 @@ try {
         -ApiImageUri $apiImageUri `
         -ToolsImageUri $toolsImageUri `
         -AiImageUri $aiImageUri `
+        -MessagingImageUri $messagingImageUri `
         -ExpectedEnvVersion ([int]$outputs["parameter_version"]) `
         -ExpectedWorkersEnvVersion ([int]$outputs["workers_parameter_version"]) `
         -ExpectedReleaseId $releaseId `
