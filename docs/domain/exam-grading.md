@@ -411,9 +411,12 @@ PATCH가 호환성을 위해 클라이언트의 `max_score`를 받더라도 유�
 snapshot을 복원한다. `question_id=0`인 `manual_objective`, `manual_subjective`,
 `manual_total`은 문항이 아니라 각각 객관식 합계, 서술형 합계, 전체 합계 이벤트다.
 새 합계 이벤트는 당시 `total_score`·`objective_score`·현재 만점 snapshot도 meta에
-보존하며, 과거 snapshot 없는 이벤트는 같은 순서의 점수 상태를 축약해 복원한다.
-Fact가 없는 과거 오프라인 attempt는 `meta.total_score`, `final_result_snapshot`,
-`initial_snapshot` 순서의 보존 상태로 복원하고 기존 제출 시각도 유지한다.
+보존한다. `meta.total_score`, `final_result_snapshot`, `initial_snapshot` 중 보존된 최종
+상태가 있으면 이를 authoritative terminal state로 사용하고 과거 Fact를 점수에 다시
+적용하지 않는다. 이때 Fact는 최신 실제 문항 snapshot과, terminal에 객관식 점수가
+없는 과거 데이터의 객관식 근거만 복원한다. 보존된 최종 상태가 없는 legacy attempt만
+명시된 합계 이벤트를 ID 순서로 재생하며, 서술형 점수를 전체 점수의 잔여분으로
+추측하지 않는다. Fact가 없는 과거 오프라인 attempt도 보존 상태와 제출 시각을 유지한다.
 양수 문항 ID의 최신 Fact만 `ResultItem`으로 만들고 이전 대표에만 있던 문항은
 제거한다. 계산된 총점과 객관식 점수가 유한수가 아니거나 현재 `Exam.max_score` 범위를
 벗어나면 대표 플래그와 `Result`/`ResultItem`을 바꾸기 전에 요청 전체를 거부한다.
