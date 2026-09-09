@@ -3,7 +3,7 @@
 
 import logging
 
-from django.http import JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.views import View
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
@@ -695,7 +695,7 @@ class FolderDeleteView(View):
             return JsonResponse({"detail": "비어있지 않은 폴더는 지울 수 없습니다. 먼저 하위 파일·폴더를 비우거나 삭제하세요.", "code": "folder_not_empty"}, status=400)
 
         folder.delete()
-        return JsonResponse({}, status=204)
+        return HttpResponse(status=204)
 
     @method_decorator(_tenant_required)
     @method_decorator(_jwt_required)
@@ -826,7 +826,7 @@ class FileDeleteView(View):
 
         inv_file.delete()  # CASCADE: MatchupDocument → MatchupProblem 함께 삭제
 
-        return JsonResponse({}, status=204)
+        return HttpResponse(status=204)
 
     @method_decorator(_tenant_required)
     @method_decorator(_jwt_required)
