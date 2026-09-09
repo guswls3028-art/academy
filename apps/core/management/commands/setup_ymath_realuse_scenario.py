@@ -11,6 +11,7 @@ from django.apps import apps
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
+from django.core.management.color import no_style
 from django.db import connection, transaction
 from django.utils import timezone
 from rest_framework_simplejwt.token_blacklist.models import OutstandingToken
@@ -39,6 +40,8 @@ DEVELOPMENT_DATABASE_NAME = "academy_api_development"
 DEVELOPMENT_DATABASE_USER = "academy_api_development_app"
 DEVELOPMENT_R2_BUCKET = "academy-development-artifacts"
 DEVELOPMENT_MOCK_ALIMTALK_PF_ID = "development-mock-pfid"
+DEVELOPMENT_MESSAGING_OWNER_CODE = "academy-development-owner"
+DEVELOPMENT_MESSAGING_OWNER_NAME = "Academy Development Owner"
 DEVELOPMENT_MOCK_ACCOUNT_TEMPLATE_DEFINITIONS = {
     "password_reset_student": {
         "name": "[DEVELOPMENT QA] 학생 비밀번호 재설정",
@@ -162,9 +165,52 @@ def ensure_development_messaging_baseline() -> None:
     from apps.domains.messaging.models import AutoSendConfig, MessageTemplate
 
     owner_id = int(getattr(settings, "OWNER_TENANT_ID", 1))
-    owner = Tenant.objects.select_for_update().filter(pk=owner_id, is_active=True).first()
+    if connection.vendor == "postgresql":
+        if not connection.in_atomic_block:
+            raise RuntimeError("Development messaging baseline requires transaction.atomic().")
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                ["development-messaging-owner"],
+            )
+
+    owner = Tenant.objects.select_for_update().filter(pk=owner_id).first()
     if owner is None:
-        raise CommandError("Development messaging owner tenant is missing or inactive.")
+        code_owner = (
+            Tenant.objects.select_for_update()
+            .filter(code=DEVELOPMENT_MESSAGING_OWNER_CODE)
+            .first()
+        )
+        if code_owner is not None:
+            raise CommandError("Development messaging owner code is assigned to an unexpected tenant ID.")
+        existing_tenant = (
+            Tenant.objects.select_for_update()
+            .only("id")
+            .order_by("id")
+            .first()
+        )
+        if existing_tenant is not None:
+            raise CommandError(
+                "Development messaging owner is missing from a non-empty development database."
+            )
+        owner = Tenant(
+            pk=owner_id,
+            code=DEVELOPMENT_MESSAGING_OWNER_CODE,
+            name=DEVELOPMENT_MESSAGING_OWNER_NAME,
+            is_active=True,
+        )
+        owner.full_clean()
+        owner.save(force_insert=True)
+        if connection.vendor == "postgresql":
+            with connection.cursor() as cursor:
+                for statement in connection.ops.sequence_reset_sql(no_style(), [Tenant]):
+                    cursor.execute(statement)
+    elif (
+        owner.code != DEVELOPMENT_MESSAGING_OWNER_CODE
+        or owner.name != DEVELOPMENT_MESSAGING_OWNER_NAME
+        or not owner.is_active
+    ):
+        raise CommandError("Development messaging owner tenant identity is not exact.")
 
     defaults = get_default_templates(owner.name)
     definitions = {

@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.db import close_old_connections, connection
+from django.db import close_old_connections, connection, transaction
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from rest_framework_simplejwt.settings import api_settings
@@ -99,7 +99,11 @@ class SetupYmathRealuseScenarioTests(TestCase):
         self.assertFalse(Video.objects.filter(tenant=tenant).exists())
 
     def test_development_messaging_baseline_is_idempotent_and_preserves_approved_config(self):
-        owner = Tenant.objects.create(code="development-owner", name="Development Owner", is_active=True)
+        owner = Tenant.objects.create(
+            code="academy-development-owner",
+            name="Academy Development Owner",
+            is_active=True,
+        )
         approved = MessageTemplate.objects.create(
             tenant=owner,
             category=MessageTemplate.Category.SIGNUP,
@@ -157,6 +161,91 @@ class SetupYmathRealuseScenarioTests(TestCase):
             ).count(),
             3,
         )
+
+    def test_development_messaging_baseline_bootstraps_missing_exact_owner(self):
+        self.assertFalse(Tenant.objects.exists())
+        with (
+            override_settings(
+                OWNER_TENANT_ID=1,
+                SOLAPI_KAKAO_PF_ID="development-mock-pfid",
+            ),
+            patch(
+                "apps.core.management.commands.setup_ymath_realuse_scenario._is_persistent_development_runtime",
+                return_value=True,
+            ),
+            patch.dict(os.environ, {"SOLAPI_MOCK": "true"}),
+        ):
+            ensure_development_messaging_baseline()
+
+        owner = Tenant.objects.get(pk=1)
+        self.assertEqual(owner.code, "academy-development-owner")
+        self.assertEqual(owner.name, "Academy Development Owner")
+        self.assertTrue(owner.is_active)
+        self.assertEqual(AutoSendConfig.objects.filter(tenant=owner).count(), 4)
+
+    def test_development_messaging_baseline_rejects_owner_identity_drift(self):
+        owner = Tenant.objects.create(pk=1, code="unexpected-owner", name="Unexpected Owner")
+        with (
+            override_settings(
+                OWNER_TENANT_ID=1,
+                SOLAPI_KAKAO_PF_ID="development-mock-pfid",
+            ),
+            patch(
+                "apps.core.management.commands.setup_ymath_realuse_scenario._is_persistent_development_runtime",
+                return_value=True,
+            ),
+            patch.dict(os.environ, {"SOLAPI_MOCK": "true"}),
+            self.assertRaisesMessage(CommandError, "identity is not exact"),
+        ):
+            ensure_development_messaging_baseline()
+
+        owner.refresh_from_db()
+        self.assertEqual(owner.code, "unexpected-owner")
+        self.assertFalse(AutoSendConfig.objects.filter(tenant=owner).exists())
+
+    def test_development_messaging_baseline_rejects_missing_owner_in_nonempty_database(self):
+        other = Tenant.objects.create(pk=2, code="existing-development-tenant", name="Existing")
+        with (
+            override_settings(
+                OWNER_TENANT_ID=1,
+                SOLAPI_KAKAO_PF_ID="development-mock-pfid",
+            ),
+            patch(
+                "apps.core.management.commands.setup_ymath_realuse_scenario._is_persistent_development_runtime",
+                return_value=True,
+            ),
+            patch.dict(os.environ, {"SOLAPI_MOCK": "true"}),
+            self.assertRaisesMessage(CommandError, "non-empty development database"),
+        ):
+            ensure_development_messaging_baseline()
+
+        self.assertFalse(Tenant.objects.filter(pk=1).exists())
+        self.assertTrue(Tenant.objects.filter(pk=other.pk, code=other.code).exists())
+        self.assertFalse(AutoSendConfig.objects.exists())
+
+    def test_development_messaging_baseline_rejects_owner_code_at_other_id(self):
+        other = Tenant.objects.create(
+            pk=2,
+            code="academy-development-owner",
+            name="Academy Development Owner",
+        )
+        with (
+            override_settings(
+                OWNER_TENANT_ID=1,
+                SOLAPI_KAKAO_PF_ID="development-mock-pfid",
+            ),
+            patch(
+                "apps.core.management.commands.setup_ymath_realuse_scenario._is_persistent_development_runtime",
+                return_value=True,
+            ),
+            patch.dict(os.environ, {"SOLAPI_MOCK": "true"}),
+            self.assertRaisesMessage(CommandError, "unexpected tenant ID"),
+        ):
+            ensure_development_messaging_baseline()
+
+        self.assertFalse(Tenant.objects.filter(pk=1).exists())
+        self.assertTrue(Tenant.objects.filter(pk=other.pk, code=other.code).exists())
+        self.assertFalse(AutoSendConfig.objects.exists())
 
     def test_explicit_long_video_fixture_creates_two_proctored_accesses_only(self):
         payload = json.loads(self._call_command(synthetic_long_video=True).splitlines()[-1])
@@ -756,6 +845,35 @@ class SetupYmathRealuseScenarioTests(TestCase):
 
 class SetupYmathRealuseScenarioPostgresLockTests(TransactionTestCase):
     reset_sequences = True
+
+    def test_development_messaging_baseline_bootstraps_exact_owner_and_sequence(self):
+        if connection.vendor != "postgresql":
+            self.skipTest("PostgreSQL development-owner sequence regression")
+
+        self.assertFalse(Tenant.objects.exists())
+        with (
+            override_settings(
+                OWNER_TENANT_ID=1,
+                SOLAPI_KAKAO_PF_ID="development-mock-pfid",
+            ),
+            patch(
+                "apps.core.management.commands.setup_ymath_realuse_scenario._is_persistent_development_runtime",
+                return_value=True,
+            ),
+            patch.dict(os.environ, {"SOLAPI_MOCK": "true"}),
+            transaction.atomic(),
+        ):
+            ensure_development_messaging_baseline()
+            ensure_development_messaging_baseline()
+
+        owner = Tenant.objects.get(pk=1)
+        self.assertEqual(owner.code, "academy-development-owner")
+        self.assertEqual(owner.name, "Academy Development Owner")
+        self.assertTrue(owner.is_active)
+        self.assertEqual(AutoSendConfig.objects.filter(tenant=owner).count(), 4)
+
+        later = Tenant.objects.create(code="after-development-owner", name="Later tenant")
+        self.assertGreater(later.pk, owner.pk)
 
     @staticmethod
     def _set_application_name(name):
