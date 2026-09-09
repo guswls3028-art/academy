@@ -99,6 +99,11 @@ class InventoryHardeningViewTests(TestCase):
     def _auth(self, user):
         return patch("apps.domains.inventory.views.JWTAuthentication.authenticate", return_value=(user, None))
 
+    def assert_empty_no_content_response(self, response):
+        self.assertEqual(response.status_code, 204, response.content)
+        self.assertEqual(response.content, b"")
+        self.assertIn(response.headers.get("Content-Length"), (None, "0"))
+
     def test_parent_selected_child_can_manage_inventory_and_staff_sees_same_projection(self):
         create_request = self.factory.post(
             "/storage/inventory/folders/",
@@ -164,7 +169,7 @@ class InventoryHardeningViewTests(TestCase):
             "apps.domains.inventory.views.delete_object_r2_storage"
         ) as delete_r2:
             deleted_file = FileDeleteView.as_view()(delete_file_request, file_id=file_id)
-        self.assertEqual(deleted_file.status_code, 204, deleted_file.content)
+        self.assert_empty_no_content_response(deleted_file)
         delete_r2.assert_called_once()
 
         delete_folder_request = self.factory.delete(
@@ -180,7 +185,7 @@ class InventoryHardeningViewTests(TestCase):
                 delete_folder_request,
                 folder_id=folder_id,
             )
-        self.assertEqual(deleted_folder.status_code, 204, deleted_folder.content)
+        self.assert_empty_no_content_response(deleted_folder)
         self.assertFalse(InventoryFolder.objects.filter(id=folder_id).exists())
 
     def test_parent_inventory_rejects_sibling_scope_without_storage_side_effect(self):
