@@ -416,11 +416,27 @@ class HomeworkScoreViewSet(ModelViewSet):
                 enrollment_id=enrollment_id,
                 homework_id=homework_id,
             )
+            legacy_score = None
             if assignment is None:
-                return Response(
-                    {"enrollment_id": "이 과제의 배정 대상 수강생만 점수를 입력할 수 있습니다."},
-                    status=drf_status.HTTP_400_BAD_REQUEST,
+                # HomeworkAssignment 도입 전 생성된 점수행은 학생 상세 이력에
+                # 계속 노출된다. 새 미배정 점수 생성은 거부하되, 이미 존재하는
+                # 정확한 1차 점수행은 그 행 자체를 잠근 뒤 수정할 수 있게 한다.
+                legacy_score = (
+                    HomeworkScore.objects.select_for_update()
+                    .filter(
+                        homework=homework,
+                        session=session,
+                        enrollment_id=enrollment_id,
+                        attempt_index=1,
+                    )
+                    .select_related("session", "homework")
+                    .first()
                 )
+                if legacy_score is None:
+                    return Response(
+                        {"enrollment_id": "이 과제의 배정 대상 수강생만 점수를 입력할 수 있습니다."},
+                        status=drf_status.HTTP_400_BAD_REQUEST,
+                    )
             require_homework_score_edit_lease(
                 request,
                 session_id=session.id,
@@ -429,17 +445,19 @@ class HomeworkScoreViewSet(ModelViewSet):
             )
 
             with transaction.atomic():
-                obj = (
-                    HomeworkScore.objects.select_for_update()
-                    .filter(
-                        homework_id=homework_id,
-                        session=session,
-                        enrollment_id=enrollment_id,
-                        attempt_index=1,
+                obj = legacy_score
+                if obj is None:
+                    obj = (
+                        HomeworkScore.objects.select_for_update()
+                        .filter(
+                            homework_id=homework_id,
+                            session=session,
+                            enrollment_id=enrollment_id,
+                            attempt_index=1,
+                        )
+                        .select_related("session", "homework")
+                        .first()
                     )
-                    .select_related("session", "homework")
-                    .first()
-                )
 
                 if obj and obj.is_locked:
                     return _locked_response(obj)
