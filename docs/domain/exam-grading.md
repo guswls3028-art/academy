@@ -393,10 +393,14 @@ PATCH가 호환성을 위해 클라이언트의 `max_score`를 받더라도 유�
 현재 대표 `Result.total_score`와 보존된 1차 점수 중 어느 하나라도 새 만점을
 초과하면 `max_score` 필드 오류로 거부한다. 교사는 현재 점수를 먼저 바로잡은 뒤
 다시 만점을 낮춰야 하며, 이 검사는 기존 `ExamAttempt` 이력을 수정하거나 삭제하지
-않는다. 1차 시도의 점수를 합산 점수 PATCH로 정정할 때는 해당 시도의
-`initial_snapshot` 점수·만점도 함께 정정한다. append-only `ResultFact` 감사 기록은
-그대로 추가되며, 이후 재시험이 대표가 되어도 정정 전의 오래된 1차 값이 되살아나지
-않는다.
+않는다. 합산 점수 PATCH에서 `attempt_index`를 생략하면 기존 표 편집 계약대로 현재
+대표 시도를 수정한다. drawer에서 `attempt_index=1`을 명시하면 같은 시험·수강의 1차
+`ExamAttempt`를 잠가 그 시도의 `meta.total_score`와 `initial_snapshot` 점수·만점을
+함께 정정하고, append-only `ResultFact`도 그 1차 attempt와 submission에 귀속한다.
+1차가 현재 대표일 때만 `Result`를 동기화한다. 재시험이 대표이면 그 재시험의 meta와
+대표 `Result`는 건드리지 않으므로 저장 뒤 다시 조회해도 정정한 1차 값과 현재 재시험
+점수가 각각 유지된다. 이후 재시험이 대표가 되어도 정정 전의 오래된 1차 값이
+되살아나지 않는다.
 
 ### 성적 탭 오답 확인 요약
 

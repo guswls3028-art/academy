@@ -170,8 +170,6 @@ class ExamPolicyUpdateTests(TestCase):
         self.assertIn("max_score", rejected.data)
         self.exam.refresh_from_db()
         self.assertEqual(self.exam.max_score, 100)
-        original_attempt_meta = dict(attempt.meta)
-
         result.total_score = 80
         result.save(update_fields=["total_score", "updated_at"])
         corrected_meta = dict(attempt.meta)
@@ -186,7 +184,7 @@ class ExamPolicyUpdateTests(TestCase):
         self.assertEqual(accepted.status_code, 200, accepted.data)
         self.assertEqual(accepted.data["max_score"], 85)
         attempt.refresh_from_db()
-        self.assertEqual(attempt.meta, original_attempt_meta)
+        self.assertEqual(attempt.meta, corrected_meta)
 
     def test_patch_rejects_max_below_preserved_first_attempt_score(self):
         first_attempt = ExamAttempt.objects.create(

@@ -302,6 +302,101 @@ class ManualExamScoreAssignmentGuardTests(TestCase):
             105.0,
         )
 
+    def test_total_score_edits_explicit_first_attempt_without_touching_representative_retake(self):
+        SessionEnrollment.objects.get_or_create(
+            tenant=self.tenant,
+            session=self.session,
+            enrollment=self.assigned_enrollment,
+        )
+        Attendance.objects.create(
+            tenant=self.tenant,
+            session=self.session,
+            enrollment=self.assigned_enrollment,
+            status="PRESENT",
+        )
+        first_attempt = ExamAttempt.objects.create(
+            exam=self.exam,
+            enrollment=self.assigned_enrollment,
+            submission_id=11,
+            attempt_index=1,
+            is_retake=False,
+            is_representative=False,
+            status="done",
+            meta={
+                "total_score": 90.0,
+                "max_score": 100.0,
+                "initial_snapshot": {
+                    "total_score": 90.0,
+                    "max_score": 100.0,
+                    "source": "omr",
+                },
+            },
+        )
+        second_meta = {"total_score": 80.0, "max_score": 100.0}
+        second_attempt = ExamAttempt.objects.create(
+            exam=self.exam,
+            enrollment=self.assigned_enrollment,
+            submission_id=12,
+            attempt_index=2,
+            is_retake=True,
+            is_representative=True,
+            status="done",
+            meta=second_meta,
+        )
+        result = Result.objects.create(
+            target_type="exam",
+            target_id=self.exam.id,
+            enrollment=self.assigned_enrollment,
+            attempt=second_attempt,
+            total_score=80,
+            max_score=100,
+            objective_score=40,
+        )
+
+        response = self._patch(
+            AdminExamTotalScoreView,
+            {"score": 70, "max_score": 100, "attempt_index": 1},
+            enrollment=self.assigned_enrollment,
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        first_attempt.refresh_from_db()
+        second_attempt.refresh_from_db()
+        result.refresh_from_db()
+        self.assertEqual(first_attempt.meta["total_score"], 70.0)
+        self.assertEqual(first_attempt.meta["initial_snapshot"]["total_score"], 70.0)
+        self.assertEqual(second_attempt.meta, second_meta)
+        self.assertEqual(result.attempt_id, second_attempt.id)
+        self.assertEqual(result.total_score, 80.0)
+        self.assertEqual(result.max_score, 100.0)
+        fact = ResultFact.objects.get(
+            target_type="exam",
+            target_id=self.exam.id,
+            enrollment=self.assigned_enrollment,
+            source="manual_total",
+        )
+        self.assertEqual(fact.attempt_id, first_attempt.id)
+        self.assertEqual(fact.submission_id, first_attempt.submission_id)
+        self.assertEqual(fact.score, 70.0)
+
+        reloaded = self._get_session_scores()
+        self.assertEqual(reloaded.status_code, 200, reloaded.data)
+        row = next(
+            item
+            for item in reloaded.data["rows"]
+            if item["enrollment_id"] == self.assigned_enrollment.id
+        )
+        exam_row = next(
+            item
+            for item in row["exams"]
+            if item["exam_id"] == self.exam.id
+        )
+        self.assertEqual(exam_row["block"]["score"], 70.0)
+        self.assertEqual(
+            [attempt["score"] for attempt in exam_row["attempts"]],
+            [70.0, 80.0],
+        )
+
     def test_total_score_accepts_linked_session_roster_and_materializes_exam_enrollment(self):
         ExamEnrollment.objects.filter(exam=self.exam).delete()
         response = self._patch(
