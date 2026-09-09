@@ -252,6 +252,38 @@ class ManualExamScoreAssignmentGuardTests(TestCase):
         self.assertEqual(response.status_code, 400, response.data)
         self._assert_no_manual_score_side_effects()
 
+    def test_total_score_uses_current_exam_max_instead_of_client_snapshot(self):
+        self.exam.max_score = 105
+        self.exam.save(update_fields=["max_score", "updated_at"])
+
+        response = self._patch(
+            AdminExamTotalScoreView,
+            {"score": 97, "max_score": 97},
+            enrollment=self.assigned_enrollment,
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["max_score"], 105.0)
+        result = Result.objects.get(
+            target_type="exam",
+            target_id=self.exam.id,
+            enrollment=self.assigned_enrollment,
+        )
+        self.assertEqual(result.max_score, 105.0)
+        self.assertEqual(
+            ResultFact.objects.get(
+                target_type="exam",
+                target_id=self.exam.id,
+                enrollment=self.assigned_enrollment,
+                source="manual_total",
+            ).max_score,
+            105.0,
+        )
+        self.assertEqual(
+            result.attempt.meta["initial_snapshot"]["max_score"],
+            105.0,
+        )
+
     def test_total_score_accepts_linked_session_roster_and_materializes_exam_enrollment(self):
         ExamEnrollment.objects.filter(exam=self.exam).delete()
         response = self._patch(

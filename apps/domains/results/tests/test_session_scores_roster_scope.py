@@ -346,6 +346,48 @@ class SessionScoresRosterScopeTests(TestCase):
             43.0,
         )
 
+    def test_session_scores_uses_current_exam_max_and_preserves_attempt_history(self):
+        attempt = ExamAttempt.objects.create(
+            exam=self.exam,
+            enrollment=self.active_enrollment,
+            attempt_index=1,
+            is_retake=False,
+            is_representative=True,
+            status="done",
+            meta={
+                "initial_snapshot": {
+                    "total_score": 97.0,
+                    "max_score": 97.0,
+                    "source": "admin_manual_total",
+                },
+                "total_score": 97.0,
+                "max_score": 97.0,
+            },
+        )
+        Result.objects.create(
+            target_type="exam",
+            target_id=self.exam.id,
+            enrollment=self.active_enrollment,
+            attempt=attempt,
+            total_score=97,
+            max_score=97,
+            objective_score=97,
+        )
+        self.exam.max_score = 105
+        self.exam.save(update_fields=["max_score", "updated_at"])
+
+        request = self.factory.get(f"/api/v1/results/admin/sessions/{self.session.id}/scores/")
+        request.tenant = self.tenant
+        force_authenticate(request, user=self.admin)
+        response = SessionScoresView.as_view()(request, session_id=self.session.id)
+
+        self.assertEqual(response.status_code, 200, response.data)
+        exam_meta = response.data["meta"]["exams"][0]
+        exam_row = response.data["rows"][0]["exams"][0]
+        self.assertEqual(exam_meta["max_score"], 105.0)
+        self.assertEqual(exam_row["block"]["max_score"], 105.0)
+        self.assertEqual(exam_row["attempts"][0]["max_score"], 97.0)
+
     def test_session_scores_exposes_homework_cell_version(self):
         score = HomeworkScore.objects.create(
             enrollment=self.active_enrollment,

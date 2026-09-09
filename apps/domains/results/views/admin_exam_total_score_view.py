@@ -84,12 +84,13 @@ class AdminExamTotalScoreView(APIView):
         if new_score < 0:
             raise ValidationError({"detail": "score must be >= 0", "code": "INVALID"})
 
-        # max_score: 프론트에서 전달하면 사용, 없으면 시험 모델에서 가져옴 (기본 100)
+        # max_score는 시험 정책의 단일 진실이다. 오래 열린 화면이 과거 만점을
+        # 보내더라도 학생별 Result가 서로 다른 만점으로 저장되면 안 된다.
+        # 필드가 있으면 형식만 검증해 기존 요청 오류 계약은 유지한다.
         req_max = request.data.get("max_score")
         if req_max is not None:
-            max_score = parse_finite_score(req_max, field_name="max_score")
-        else:
-            max_score = float(getattr(exam, "max_score", 100.0) or 100.0)
+            parse_finite_score(req_max, field_name="max_score")
+        max_score = float(getattr(exam, "max_score", 100.0) or 100.0)
 
         # -------------------------------------------------
         # 1️⃣ Result (대표 스냅샷)

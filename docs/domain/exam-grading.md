@@ -374,6 +374,14 @@ submission ID만 유일성을 검사한다. `NULL`은 클리닉 직접 입력 �
 제외한다. 무결성 감사는 전체 `ExamResult.manual_overrides`를 순회하므로 뒤쪽 행의
 `max_score` 누락도 표본 제한 없이 보고한다.
 
+차시 성적표의 현재 점수 분모는 `Exam.max_score`가 단일 진실이다. 합산 점수
+PATCH가 호환성을 위해 클라이언트의 `max_score`를 받더라도 유한수 형식만
+검증하고 저장에는 현재 시험 만점을 사용한다. 따라서 시험 만점을 바꾼 뒤 오래
+열어 둔 화면에서 점수를 저장해도 학생별 `Result.max_score`가 갈라지지 않는다.
+`GET /results/admin/sessions/{session_id}/scores/`도 모든 현재 행의
+`block.max_score`를 시험 만점으로 투영한다. 다만 1차·재시험 당시의 분모는
+`attempts[].max_score`에 그대로 보존해 과거 응시 이력을 소급 변경하지 않는다.
+
 ### 성적 탭 오답 확인 요약
 
 `GET /results/admin/sessions/{session_id}/scores/`의 시험별

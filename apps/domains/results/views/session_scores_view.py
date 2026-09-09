@@ -758,7 +758,7 @@ class SessionScoresView(APIView):
                     omr_review_meta = omr_review_map.get((exid, eid))
                     block = {
                         "score": None,
-                        "max_score": None,
+                        "max_score": exam_max_score_map.get(exid, 100.0),
                         "passed": None,
                         "clinic_required": clinic_required,
                         "is_locked": False,
@@ -848,7 +848,12 @@ class SessionScoresView(APIView):
 
                     block = {
                         "score": None if is_not_submitted else float(initial_score or 0.0),
-                        "max_score": float(initial_max_score or 0.0),
+                        # 현재 성적표의 분모는 시험 정책을 따른다. 1차/재시험의
+                        # 당시 분모는 attempts에 별도 보존해 이력 의미를 잃지 않는다.
+                        "max_score": exam_max_score_map.get(
+                            exid,
+                            float(initial_max_score or 0.0),
+                        ),
                         "passed": passed,
                         "clinic_required": clinic_required,
                         "is_locked": locked,
