@@ -112,45 +112,47 @@ class AdminRepresentativeAttemptView(APIView):
         if terminal_total is not None:
             terminal_source, terminal_value = terminal_total
             total_score = _score_float(terminal_value)
-            objective_value = None
+            objective_value = {
+                "meta": attempt_meta.get("objective_score"),
+                "final": final_snapshot.get("objective_score"),
+                "initial": initial_snapshot.get("objective_score"),
+            }[terminal_source]
 
-            if terminal_source == "meta":
-                objective_value = attempt_meta.get("objective_score")
-                if objective_value is None:
-                    objective_events: list[tuple[int, float]] = []
-                    for fact in ordered_facts:
-                        question_id = int(fact.question_id)
-                        meta = fact.meta if isinstance(fact.meta, dict) else {}
-                        snapshot = meta.get("result_snapshot")
-                        if question_id == 0 and isinstance(snapshot, dict):
-                            if snapshot.get("objective_score") is not None:
-                                objective_events.append(
-                                    (fact.id, _score_float(snapshot["objective_score"]))
-                                )
-                        elif question_id == 0 and fact.source == "manual_objective":
+            if objective_value is None:
+                objective_events: list[tuple[int, float]] = []
+                for fact in ordered_facts:
+                    question_id = int(fact.question_id)
+                    meta = fact.meta if isinstance(fact.meta, dict) else {}
+                    snapshot = meta.get("result_snapshot")
+                    if question_id == 0 and isinstance(snapshot, dict):
+                        if snapshot.get("objective_score") is not None:
                             objective_events.append(
-                                (
-                                    fact.id,
-                                    _score_float(meta.get("objective_score", fact.score)),
-                                )
+                                (fact.id, _score_float(snapshot["objective_score"]))
                             )
-
-                    choice_facts = [
-                        fact
-                        for fact in question_facts.values()
-                        if score_shape.question_kind(int(fact.question_id)) == "choice"
-                    ]
-                    if choice_facts:
+                    elif question_id == 0 and fact.source == "manual_objective":
                         objective_events.append(
                             (
-                                max(fact.id for fact in choice_facts),
-                                sum(_score_float(fact.score) for fact in choice_facts),
+                                fact.id,
+                                _score_float(meta.get("objective_score", fact.score)),
                             )
                         )
-                    if objective_events:
-                        objective_value = max(objective_events, key=lambda event: event[0])[1]
 
-            if objective_value is None and terminal_source in {"meta", "final"}:
+                choice_facts = [
+                    fact
+                    for fact in question_facts.values()
+                    if score_shape.question_kind(int(fact.question_id)) == "choice"
+                ]
+                if choice_facts:
+                    objective_events.append(
+                        (
+                            max(fact.id for fact in choice_facts),
+                            sum(_score_float(fact.score) for fact in choice_facts),
+                        )
+                    )
+                if objective_events:
+                    objective_value = max(objective_events, key=lambda event: event[0])[1]
+
+            if objective_value is None and terminal_source == "meta":
                 objective_value = final_snapshot.get("objective_score")
             if objective_value is None:
                 objective_value = initial_snapshot.get("objective_score")
@@ -167,6 +169,7 @@ class AdminRepresentativeAttemptView(APIView):
             total_score = 0.0
             objective_score = 0.0
             subjective_score = _score_float(attempt_meta.get("subjective_score"))
+            subjective_is_explicit = attempt_meta.get("subjective_score") is not None
 
             replay_question_facts: dict[int, ResultFact] = {}
             for fact in ordered_facts:
@@ -181,7 +184,13 @@ class AdminRepresentativeAttemptView(APIView):
                 }.issubset(snapshot):
                     total_score = _score_float(snapshot["total_score"])
                     objective_score = _score_float(snapshot["objective_score"])
-                    subjective_score = max(0.0, total_score - objective_score)
+                    if source == "manual_subjective":
+                        subjective_score = _score_float(
+                            meta.get("subjective_score", score)
+                        )
+                        subjective_is_explicit = True
+                    elif source == "manual_total":
+                        subjective_is_explicit = False
                     continue
 
                 if question_id > 0:
@@ -215,16 +224,23 @@ class AdminRepresentativeAttemptView(APIView):
                             subjective_score = sum(
                                 _score_float(item.score) for item in essay_facts
                             )
-                        total_score = objective_score + subjective_score
+                            subjective_is_explicit = True
+                        total_score = objective_score + (
+                            subjective_score if subjective_is_explicit else 0.0
+                        )
                 elif source == "manual_objective":
                     objective_score = _score_float(meta.get("objective_score", score))
-                    total_score = objective_score + subjective_score
+                    if subjective_is_explicit:
+                        total_score = objective_score + subjective_score
+                    else:
+                        total_score = max(total_score, objective_score)
                 elif source == "manual_subjective":
                     subjective_score = _score_float(meta.get("subjective_score", score))
+                    subjective_is_explicit = True
                     total_score = objective_score + subjective_score
                 elif source == "manual_total":
                     total_score = score
-                    subjective_score = max(0.0, total_score - objective_score)
+                    subjective_is_explicit = False
 
         submitted_at_value = (
             final_snapshot.get("submitted_at")
