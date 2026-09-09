@@ -9,24 +9,28 @@ import uuid
 from unittest.mock import patch
 
 import pytest
+from django.apps import apps
 from django.contrib.auth import get_user_model
 from django.db import close_old_connections, connection, transaction
 from django.test import TransactionTestCase
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps.core.models import Tenant, TenantMembership
-from apps.domains.enrollment.models import Enrollment, SessionEnrollment
-from apps.domains.exams.models import Exam, ExamEnrollment
-from apps.domains.lectures.models import Lecture, Session
 from apps.domains.results.models import Result, ScoreEditDraft
 from apps.domains.results.views.admin_exam_total_score_view import (
     AdminExamTotalScoreView,
 )
-from apps.domains.students.models import Student
 
 
 pytestmark = pytest.mark.django_db(transaction=True)
 User = get_user_model()
+Enrollment = apps.get_model("enrollment", "Enrollment")
+SessionEnrollment = apps.get_model("enrollment", "SessionEnrollment")
+Exam = apps.get_model("exams", "Exam")
+ExamEnrollment = apps.get_model("exams", "ExamEnrollment")
+Lecture = apps.get_model("lectures", "Lecture")
+Session = apps.get_model("lectures", "Session")
+Student = apps.get_model("students", "Student")
 
 
 class ExamMaxScoreConcurrencyPGTests(TransactionTestCase):

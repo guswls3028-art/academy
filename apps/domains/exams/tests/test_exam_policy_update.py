@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+from django.apps import apps
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.utils import timezone
@@ -10,13 +11,16 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps.core.models import Tenant, TenantMembership
 from apps.domains.exams.models import Exam, Sheet
-from apps.domains.enrollment.models import Enrollment
-from apps.domains.lectures.models import Lecture
-from apps.domains.results.models import ExamAttempt, Result
-from apps.domains.students.models import Student
 from apps.domains.exams.serializers.exam import ExamSerializer
 from apps.domains.exams.serializers.exam_update import ExamUpdateSerializer
 from apps.domains.exams.views.exam_view import ExamViewSet
+
+
+Enrollment = apps.get_model("enrollment", "Enrollment")
+Lecture = apps.get_model("lectures", "Lecture")
+ExamAttempt = apps.get_model("results", "ExamAttempt")
+Result = apps.get_model("results", "Result")
+Student = apps.get_model("students", "Student")
 
 
 class ExamPolicyUpdateTests(TestCase):
