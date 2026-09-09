@@ -72,18 +72,14 @@ def exam_correction_fingerprint(
     *,
     result: Result,
     items,
-    current_max_score: Optional[float] = None,
+    current_max_score: float,
 ) -> str:
-    """Meaningful exam-result version, excluding timestamp-only rewrites."""
+    """Meaningful current-policy result version, excluding timestamp rewrites."""
     payload = {
         "result_id": int(result.id),
         "attempt_id": int(result.attempt_id) if result.attempt_id else None,
         "total_score": _float_or_none(result.total_score),
-        "max_score": (
-            _float_or_none(current_max_score)
-            if current_max_score is not None
-            else _float_or_none(result.max_score)
-        ),
+        "max_score": _float_or_none(current_max_score),
         "objective_score": _float_or_none(result.objective_score),
         "items": [
             {

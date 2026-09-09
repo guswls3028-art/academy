@@ -17,6 +17,7 @@ def stale_teacher_exam_resolution_link_ids(
     pipeline is reopening the Clinic target.
     """
     from apps.domains.progress.models import AssessmentCorrection, ClinicLink
+    from apps.domains.exams.models import Exam
     from apps.domains.results.services.assessment_correction_status import (
         exam_correction_fingerprint,
     )
@@ -73,6 +74,13 @@ def stale_teacher_exam_resolution_link_ids(
         .select_related("attempt")
         .prefetch_related("items")
     }
+    current_max_score_by_exam_id = {
+        int(exam_id): float(max_score or 0.0)
+        for exam_id, max_score in Exam.objects.filter(
+            id__in=exam_ids,
+            tenant_id=int(tenant_id),
+        ).values_list("id", "max_score")
+    }
 
     stale: set[int] = set()
     for link, correction_id in teacher_links:
@@ -89,12 +97,17 @@ def stale_teacher_exam_resolution_link_ids(
             stale.add(link_id)
             continue
         result = results.get((enrollment_id, exam_id))
+        current_max_score = current_max_score_by_exam_id.get(exam_id)
         attempt_meta = (
             result.attempt.meta
             if result and result.attempt and isinstance(result.attempt.meta, dict)
             else {}
         )
-        if not result or attempt_meta.get("status") == "NOT_SUBMITTED":
+        if (
+            not result
+            or current_max_score is None
+            or attempt_meta.get("status") == "NOT_SUBMITTED"
+        ):
             stale.add(link_id)
             continue
         if correction.source_fingerprint and (
@@ -102,6 +115,7 @@ def stale_teacher_exam_resolution_link_ids(
             != exam_correction_fingerprint(
                 result=result,
                 items=result.items.all(),
+                current_max_score=current_max_score,
             )
         ):
             stale.add(link_id)
@@ -117,6 +131,7 @@ def is_current_teacher_exam_resolution(
     correction_id: int,
 ) -> bool:
     from apps.domains.progress.models import AssessmentCorrection
+    from apps.domains.exams.models import Exam
     from apps.domains.results.services.assessment_correction_status import (
         exam_correction_fingerprint,
     )
@@ -136,6 +151,15 @@ def is_current_teacher_exam_resolution(
         .first()
     )
     if not correction:
+        return False
+
+    current_max_score = (
+        Exam.objects.filter(
+            id=int(exam_id),
+            tenant_id=int(tenant_id),
+        ).values_list("max_score", flat=True).first()
+    )
+    if current_max_score is None:
         return False
 
     result = (
@@ -161,4 +185,5 @@ def is_current_teacher_exam_resolution(
     return correction.source_fingerprint == exam_correction_fingerprint(
         result=result,
         items=result.items.all(),
+        current_max_score=float(current_max_score),
     )

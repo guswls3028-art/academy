@@ -489,13 +489,17 @@ class AdminExamResultsView(ListAPIView):
             )
             correction_status = None
             if correction_session_id is not None:
+                current_exam_max_score = float(
+                    getattr(exam, "max_score", 100.0) or 100.0
+                )
                 correction_status = assessment_correction_payload(
                     source_type=AssessmentCorrection.SourceType.EXAM,
                     score=visible_total_score,
-                    max_score=raw_max_score,
+                    max_score=current_exam_max_score,
                     source_fingerprint=exam_correction_fingerprint(
                         result=r,
                         items=r.items.all(),
+                        current_max_score=current_exam_max_score,
                     ),
                     correction=correction,
                 )["correction_status"]

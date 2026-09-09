@@ -174,6 +174,13 @@ class ExamPolicyUpdateTests(TestCase):
 
         result.total_score = 80
         result.save(update_fields=["total_score", "updated_at"])
+        corrected_meta = dict(attempt.meta)
+        corrected_meta["initial_snapshot"] = {
+            **corrected_meta["initial_snapshot"],
+            "total_score": 80.0,
+        }
+        attempt.meta = corrected_meta
+        attempt.save(update_fields=["meta", "updated_at"])
         accepted = self.patch({"max_score": 85, "pass_score": 80})
 
         self.assertEqual(accepted.status_code, 200, accepted.data)
@@ -224,6 +231,28 @@ class ExamPolicyUpdateTests(TestCase):
         self.assertTrue(
             ExamAttempt.objects.filter(id=representative_attempt.id).exists()
         )
+
+        representative_attempt.is_representative = False
+        representative_attempt.save(update_fields=["is_representative"])
+        first_attempt.is_representative = True
+        first_attempt.save(update_fields=["is_representative"])
+        result = Result.objects.get(
+            target_type="exam",
+            target_id=self.exam.id,
+            enrollment=self.enrollment,
+        )
+        result.attempt = first_attempt
+        result.total_score = 80
+        result.save(update_fields=["attempt", "total_score", "updated_at"])
+
+        rejected_after_switch = self.patch({"max_score": 85, "pass_score": 80})
+
+        self.assertEqual(
+            rejected_after_switch.status_code,
+            400,
+            rejected_after_switch.data,
+        )
+        self.assertIn("max_score", rejected_after_switch.data)
 
     def test_student_result_publication_defaults_on_and_can_be_disabled(self):
         expected_updated_at = ExamSerializer(self.exam).data["updated_at"]

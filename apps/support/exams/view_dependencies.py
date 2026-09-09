@@ -217,7 +217,6 @@ def dispatch_progress_for_exam(*, exam_id: int) -> None:
 def highest_current_or_initial_exam_score(*, exam) -> float | None:
     """Return the highest live representative or preserved first-attempt score."""
     from apps.domains.results.models import ExamAttempt, Result
-    from apps.domains.results.utils.initial_exam_score import load_initial_exam_scores
 
     current_results = list(
         Result.objects.filter(
@@ -226,29 +225,28 @@ def highest_current_or_initial_exam_score(*, exam) -> float | None:
             enrollment__tenant=exam.tenant,
         ).only("enrollment_id", "total_score")
     )
-    enrollment_ids = {
-        int(result.enrollment_id)
-        for result in current_results
-        if result.enrollment_id is not None
-    }
-    enrollment_ids.update(
-        int(enrollment_id)
-        for enrollment_id in ExamAttempt.objects.filter(
+    first_attempts = list(
+        ExamAttempt.objects.filter(
             exam=exam,
             attempt_index=1,
             enrollment__tenant=exam.tenant,
-        ).values_list("enrollment_id", flat=True)
-    )
-    initial_states = load_initial_exam_scores(
-        exam_ids=[int(exam.id)],
-        enrollment_ids=enrollment_ids,
+        ).only("meta")
     )
     candidates = [result.total_score for result in current_results]
-    candidates.extend(
-        state.total_score
-        for state in initial_states.values()
-        if not state.not_submitted
-    )
+    for attempt in first_attempts:
+        meta = attempt.meta if isinstance(attempt.meta, dict) else {}
+        if meta.get("status") == "NOT_SUBMITTED":
+            continue
+        snapshot = (
+            meta.get("initial_snapshot")
+            if isinstance(meta.get("initial_snapshot"), dict)
+            else {}
+        )
+        candidates.append(
+            snapshot.get("total_score")
+            if snapshot
+            else meta.get("total_score")
+        )
     normalized = []
     for value in candidates:
         try:

@@ -258,16 +258,8 @@ def build_student_grades_summary(*, tenant: Any, student: Any) -> dict[str, Any]
             )
             for result in result_rows
         }
-        result_fingerprint_map = {
-            int(result.id): exam_correction_fingerprint(
-                result=result,
-                items=result.items.all(),
-            )
-            for result in result_rows
-        }
     else:
         result_by_id = {}
-        result_fingerprint_map = {}
 
     correction_map = {}
     correction_session_ids = [
@@ -300,6 +292,7 @@ def build_student_grades_summary(*, tenant: Any, student: Any) -> dict[str, Any]
     for exam in exam_list:
         result_id = int(exam.pop("_result_id"))
         exam.pop("_structure_exam_id")
+        current_exam_max_score = float(exam.pop("_current_max_score"))
         exam_id = int(exam["exam_id"])
         enrollment_id = int(exam["enrollment_id"])
         rank_info = exam_rank_maps.get(exam_id, {}).get(enrollment_id, {})
@@ -313,9 +306,13 @@ def build_student_grades_summary(*, tenant: Any, student: Any) -> dict[str, Any]
         correction_payload = assessment_correction_payload(
             source_type=AssessmentCorrection.SourceType.EXAM,
             score=exam.get("total_score"),
-            max_score=exam.get("max_score"),
+            max_score=current_exam_max_score,
             source_fingerprint=(
-                result_fingerprint_map.get(result_id)
+                exam_correction_fingerprint(
+                    result=result_by_id[result_id],
+                    items=result_by_id[result_id].items.all(),
+                    current_max_score=current_exam_max_score,
+                )
                 if result_by_id.get(result_id) is not None
                 else None
             ),

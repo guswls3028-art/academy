@@ -35,6 +35,11 @@ from apps.domains.results.views.session_scores_view import (
     SessionScoresView,
 )
 from apps.domains.results.views.admin_session_exams_summary_view import AdminSessionExamsSummaryView
+from apps.domains.results.views.admin_exam_results_view import AdminExamResultsView
+from apps.domains.results.services.student_result_service import get_my_exam_result_data
+from apps.support.progress.assessment_correction_dependencies import (
+    is_current_teacher_exam_resolution,
+)
 from apps.domains.students.models import Student
 from apps.domains.submissions.models import OMRStudentMatch, Submission
 from apps.domains.submissions.views.submission_view import SubmissionViewSet
@@ -422,6 +427,52 @@ class SessionScoresRosterScopeTests(TestCase):
         reloaded_block = reloaded.data["rows"][0]["exams"][0]["block"]
         self.assertEqual(reloaded_block["max_score"], 105.0)
         self.assertEqual(reloaded_block["correction_status"], "COMPLETED")
+        admin_results_request = self.factory.get(
+            f"/api/v1/results/admin/exams/{self.exam.id}/results/"
+        )
+        admin_results_request.tenant = self.tenant
+        force_authenticate(admin_results_request, user=self.admin)
+        admin_results = AdminExamResultsView.as_view()(
+            admin_results_request,
+            exam_id=self.exam.id,
+        )
+        self.assertEqual(admin_results.status_code, 200, admin_results.data)
+        self.assertEqual(
+            admin_results.data["results"][0]["correction_status"],
+            "COMPLETED",
+        )
+        student_request = self.factory.get(
+            f"/api/v1/results/me/exams/{self.exam.id}/"
+        )
+        TenantMembership.ensure_active(
+            tenant=self.tenant,
+            user=self.active_enrollment.student.user,
+            role="student",
+        )
+        student_request.tenant = self.tenant
+        student_request.user = self.active_enrollment.student.user
+        student_result = get_my_exam_result_data(
+            student_request,
+            self.exam.id,
+            tenant=self.tenant,
+        )
+        self.assertEqual(student_result["correction_status"], "COMPLETED")
+        correction = AssessmentCorrection.objects.get(
+            tenant=self.tenant,
+            enrollment=self.active_enrollment,
+            session=self.session,
+            source_type=AssessmentCorrection.SourceType.EXAM,
+            source_id=self.exam.id,
+        )
+        self.assertTrue(
+            is_current_teacher_exam_resolution(
+                tenant_id=self.tenant.id,
+                enrollment_id=self.active_enrollment.id,
+                session_id=self.session.id,
+                exam_id=self.exam.id,
+                correction_id=correction.id,
+            )
+        )
         result.refresh_from_db()
         self.assertEqual(result.max_score, 97.0)
         attempt.refresh_from_db()

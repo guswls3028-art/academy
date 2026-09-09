@@ -284,6 +284,24 @@ class ManualExamScoreAssignmentGuardTests(TestCase):
             105.0,
         )
 
+        corrected = self._patch(
+            AdminExamTotalScoreView,
+            {"score": 80, "max_score": 105},
+            enrollment=self.assigned_enrollment,
+        )
+
+        self.assertEqual(corrected.status_code, 200, corrected.data)
+        result.refresh_from_db()
+        result.attempt.refresh_from_db()
+        self.assertEqual(
+            result.attempt.meta["initial_snapshot"]["total_score"],
+            80.0,
+        )
+        self.assertEqual(
+            result.attempt.meta["initial_snapshot"]["max_score"],
+            105.0,
+        )
+
     def test_total_score_accepts_linked_session_roster_and_materializes_exam_enrollment(self):
         ExamEnrollment.objects.filter(exam=self.exam).delete()
         response = self._patch(

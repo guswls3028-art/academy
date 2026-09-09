@@ -206,6 +206,7 @@ class AdminExamResultsScopeTest(TestCase):
             source_fingerprint=exam_correction_fingerprint(
                 result=result,
                 items=result.items.all(),
+                current_max_score=float(exam.max_score),
             ),
             updated_by=self.admin_user,
         )

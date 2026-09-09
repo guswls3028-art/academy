@@ -218,10 +218,26 @@ class AdminExamTotalScoreView(APIView):
         # 5-b) Representative ExamAttempt 점수 동기화 + NOT_SUBMITTED 해제
         # -------------------------------------------------
         if attempt and attempt.is_representative:
-            attempt.meta = attempt.meta or {}
-            attempt.meta["total_score"] = float(new_score)
-            attempt.meta["synced_from_result"] = True
-            attempt.meta.pop("status", None)  # 정상 점수 입력 시 NOT_SUBMITTED 해제
+            attempt_meta = dict(attempt.meta or {})
+            attempt_meta["total_score"] = float(new_score)
+            attempt_meta["max_score"] = float(max_score)
+            attempt_meta["synced_from_result"] = True
+            attempt_meta.pop("status", None)  # 정상 점수 입력 시 NOT_SUBMITTED 해제
+            if int(attempt.attempt_index) == 1:
+                initial_snapshot = dict(
+                    attempt_meta.get("initial_snapshot")
+                    if isinstance(attempt_meta.get("initial_snapshot"), dict)
+                    else {}
+                )
+                initial_snapshot["total_score"] = float(new_score)
+                initial_snapshot["max_score"] = float(max_score)
+                initial_snapshot.setdefault(
+                    "submitted_at",
+                    timezone.now().isoformat(),
+                )
+                initial_snapshot.setdefault("source", "admin_manual_total")
+                attempt_meta["initial_snapshot"] = initial_snapshot
+            attempt.meta = attempt_meta
             attempt.save(update_fields=["meta", "updated_at"])
 
         # -------------------------------------------------

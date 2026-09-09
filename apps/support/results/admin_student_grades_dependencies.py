@@ -69,6 +69,7 @@ def exam_metadata_by_id(*, tenant: Any, exam_ids: list[int]) -> dict[int, dict[s
             "id",
             "title",
             "pass_score",
+            "max_score",
             "is_active",
             "student_results_published",
             "exam_type",
@@ -99,6 +100,7 @@ def exam_metadata_by_id(*, tenant: Any, exam_ids: list[int]) -> dict[int, dict[s
         exams_map[exam.id] = {
             "title": exam.title,
             "pass_score": float(exam.pass_score or 0),
+            "max_score": float(exam.max_score or 0),
             "pass_score_by_lecture": pass_scores_by_exam.get(int(exam.id), {}),
             "is_active": bool(exam.is_active),
             "student_results_published": bool(exam.student_results_published),
