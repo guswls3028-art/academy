@@ -171,3 +171,51 @@ class SubmissionMedia(TimestampModel):
                 name="uniq_active_submission_media_position",
             ),
         ]
+
+
+class SubmissionStorageCleanupIntent(TimestampModel):
+    """Durable post-commit request to remove an unreferenced lifecycle object."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        PROCESSING = "processing", "Processing"
+        FAILED = "failed", "Failed"
+        CLEANED = "cleaned", "Cleaned"
+
+    class Bucket(models.TextChoices):
+        AI = "ai", "AI"
+        STORAGE = "storage", "Storage"
+
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="submission_storage_cleanup_intents",
+    )
+    bucket = models.CharField(max_length=16, choices=Bucket.choices)
+    object_key = models.CharField(max_length=512)
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.PENDING,
+        db_index=True,
+    )
+    attempt_count = models.PositiveIntegerField(default=0)
+    claim_token = models.UUIDField(null=True, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+    cleaned_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "submissions_storage_cleanup_intent"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "bucket", "object_key"],
+                name="uniq_sub_cleanup_tenant_bucket_key",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["tenant", "status", "created_at"],
+                name="sub_cleanup_tenant_status_idx",
+            ),
+        ]

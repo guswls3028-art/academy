@@ -106,6 +106,10 @@ if CDN_HLS_SIGNING_KEY_ID != "v1":  # noqa: F405
     )
 if os.getenv("SOLAPI_MOCK", "").strip().lower() not in {"1", "true", "yes"}:
     raise ImproperlyConfigured("Development messaging must be mock-only.")
+if os.getenv("MESSAGING_DRY_RUN_TRIGGERS", "").strip():
+    raise ImproperlyConfigured(
+        "Development mock messaging must persist durable outboxes."
+    )
 if os.getenv("TOSS_AUTO_BILLING_ENABLED", "").strip().lower() in {
     "1",
     "true",

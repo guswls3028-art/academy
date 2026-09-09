@@ -22,7 +22,10 @@ from apps.domains.submissions.models import (
     OmrUploadBatchItem,
     Submission,
 )
-from apps.domains.submissions.serializers.submission import SubmissionCreateSerializer
+from apps.domains.submissions.serializers.submission import (
+    SubmissionCreateSerializer,
+    SubmissionUploadCleanupRequired,
+)
 from apps.domains.submissions.services.dispatcher import (
     dispatch_submission,
     resolve_omr_sheet_for_exam,
@@ -30,8 +33,9 @@ from apps.domains.submissions.services.dispatcher import (
 from apps.domains.submissions.services.lifecycle import (
     InvalidTransitionError,
     retry_failed_submission,
+    schedule_unreferenced_ai_object_cleanup,
 )
-from apps.infrastructure.storage.r2 import delete_object_r2_storage
+from apps.infrastructure.storage.r2 import delete_object_r2_ai
 from apps.support.submissions.dependencies import exam_belongs_to_tenant
 
 
@@ -426,13 +430,23 @@ def _mark_admission_failed(item_id: int, *, code: str, message: str) -> bool:
         return True
 
 
-def _delete_rolled_back_upload(*, key: str, batch_id: UUID, ordinal: int) -> None:
+def _delete_rolled_back_upload(
+    *,
+    tenant_id: int,
+    key: str,
+    batch_id: UUID,
+    ordinal: int,
+) -> None:
     try:
-        delete_object_r2_storage(key=key)
+        delete_object_r2_ai(key=key)
     except Exception:
         logger.exception(
             "Failed to compensate rolled-back OMR upload",
             extra={"batch_id": str(batch_id), "ordinal": int(ordinal)},
+        )
+        schedule_unreferenced_ai_object_cleanup(
+            tenant_id=tenant_id,
+            key=key,
         )
 
 
@@ -664,9 +678,24 @@ class ExamOMRBatchUploadView(APIView):
                     )
                     dispatch_submission(submission)
                     created_ids.append(int(submission.id))
+            except SubmissionUploadCleanupRequired as exc:
+                schedule_unreferenced_ai_object_cleanup(
+                    tenant_id=exc.tenant_id,
+                    key=exc.key,
+                )
+                logger.exception(
+                    "OMR upload compensation queued for retry",
+                    extra={"batch_id": str(batch.id), "ordinal": int(ordinal)},
+                )
+                _mark_admission_failed(
+                    item.id,
+                    code="upload_cleanup_pending",
+                    message="파일 저장 정리를 예약했습니다. 해당 항목만 다시 선택해 주세요.",
+                )
             except IntegrityError:
                 if uploaded_key:
                     _delete_rolled_back_upload(
+                        tenant_id=tenant.id,
                         key=uploaded_key,
                         batch_id=batch.id,
                         ordinal=int(ordinal),
@@ -690,6 +719,7 @@ class ExamOMRBatchUploadView(APIView):
             except Exception:
                 if uploaded_key:
                     _delete_rolled_back_upload(
+                        tenant_id=tenant.id,
                         key=uploaded_key,
                         batch_id=batch.id,
                         ordinal=int(ordinal),

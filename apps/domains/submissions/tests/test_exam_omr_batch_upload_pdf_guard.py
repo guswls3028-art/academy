@@ -18,7 +18,12 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 from academy.adapters.tools.pymupdf_renderer import create_blank_pdf_bytes
 from apps.core.models import Tenant, TenantMembership
 from apps.domains.exams.models import Exam, Sheet
-from apps.domains.submissions.models import OmrUploadBatch, OmrUploadBatchItem, Submission
+from apps.domains.submissions.models import (
+    OmrUploadBatch,
+    OmrUploadBatchItem,
+    Submission,
+    SubmissionStorageCleanupIntent,
+)
 from apps.domains.submissions.services.lifecycle import (
     retry_failed_submission as retry_failed_submission_lifecycle,
 )
@@ -388,7 +393,7 @@ class ExamOMRBatchUploadPdfGuardTests(TestCase):
         self.assertEqual(dispatch_submission.call_count, 1)
 
     @patch(
-        "apps.domains.submissions.views.exam_omr_batch_upload_view.delete_object_r2_storage",
+        "apps.domains.submissions.views.exam_omr_batch_upload_view.delete_object_r2_ai",
         create=True,
     )
     @patch("apps.domains.submissions.views.exam_omr_batch_upload_view.dispatch_submission")
@@ -397,7 +402,7 @@ class ExamOMRBatchUploadPdfGuardTests(TestCase):
         self,
         upload_fileobj_to_r2,
         dispatch_submission,
-        delete_object_r2_storage,
+        delete_object_r2_ai,
     ):
         batch_id = self._initialize(1).data["id"]
         dispatch_submission.side_effect = RuntimeError("dispatch failed after upload")
@@ -408,17 +413,17 @@ class ExamOMRBatchUploadPdfGuardTests(TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data["failed_ordinals"], [1])
         self.assertFalse(Submission.objects.filter(target_id=self.exam.id).exists())
-        delete_object_r2_storage.assert_called_once_with(key=uploaded_key)
+        delete_object_r2_ai.assert_called_once_with(key=uploaded_key)
 
     @patch(
-        "apps.domains.submissions.serializers.submission.delete_object_r2_storage",
+        "apps.domains.submissions.serializers.submission.delete_object_r2_ai",
         create=True,
     )
     @patch("apps.domains.submissions.serializers.submission.upload_fileobj_to_r2")
     def test_serializer_file_metadata_failure_deletes_exact_uploaded_object(
         self,
         upload_fileobj_to_r2,
-        delete_object_r2_storage,
+        delete_object_r2_ai,
     ):
         original_save = Submission.save
 
@@ -434,7 +439,40 @@ class ExamOMRBatchUploadPdfGuardTests(TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data["failed_ordinals"], [1])
         self.assertFalse(Submission.objects.filter(target_id=self.exam.id).exists())
-        delete_object_r2_storage.assert_called_once_with(key=uploaded_key)
+        delete_object_r2_ai.assert_called_once_with(key=uploaded_key)
+
+    @patch("apps.infrastructure.storage.r2.delete_object_r2_ai")
+    @patch("apps.domains.submissions.serializers.submission.delete_object_r2_ai")
+    @patch("apps.domains.submissions.serializers.submission.upload_fileobj_to_r2")
+    def test_serializer_compensation_failure_persists_retry_intent(
+        self,
+        upload_fileobj_to_r2,
+        serializer_delete_object_r2_ai,
+        processor_delete_object_r2_ai,
+    ):
+        original_save = Submission.save
+
+        def fail_file_metadata_save(instance, *args, **kwargs):
+            if "file_key" in set(kwargs.get("update_fields") or []):
+                raise RuntimeError("file metadata save failed")
+            return original_save(instance, *args, **kwargs)
+
+        serializer_delete_object_r2_ai.side_effect = RuntimeError("provider private detail")
+        processor_delete_object_r2_ai.side_effect = RuntimeError("provider private detail")
+        with self.captureOnCommitCallbacks(execute=True):
+            with patch.object(Submission, "save", new=fail_file_metadata_save):
+                response = self._post(self._image("metadata-cleanup-retry.jpg"))
+
+        uploaded_key = upload_fileobj_to_r2.call_args.kwargs["key"]
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["failed_ordinals"], [1])
+        intent = SubmissionStorageCleanupIntent.objects.get(
+            bucket=SubmissionStorageCleanupIntent.Bucket.AI,
+            object_key=uploaded_key,
+        )
+        self.assertEqual(intent.status, SubmissionStorageCleanupIntent.Status.FAILED)
+        self.assertEqual(intent.last_error, "storage_delete_failed")
+        self.assertNotIn("provider private detail", intent.last_error)
 
     def test_legacy_invalid_sheet_does_not_leave_pending_batch(self):
         request = self.factory.post(

@@ -24,6 +24,7 @@ from apps.api.common.upload_validation import (
 from apps.core.permissions import TenantResolvedAndMember, TenantResolvedAndStaff
 from apps.domains.submissions.models import OMRStudentMatch, Submission, SubmissionAnswer
 from apps.domains.submissions.serializers.submission import (
+    SubmissionUploadCleanupRequired,
     SubmissionSerializer,
     SubmissionCreateSerializer,
 )
@@ -40,8 +41,10 @@ from apps.domains.submissions.services.omr_submission_guards import (
 )
 from apps.domains.submissions.services.lifecycle import (
     InvalidTransitionError,
+    ensure_ai_submission_key_attachable,
     fail_submission,
     retry_failed_submission,
+    schedule_unreferenced_ai_object_cleanup,
     supersede_submission,
 )
 from apps.support.submissions.dependencies import (
@@ -94,6 +97,22 @@ class SubmissionViewSet(ModelViewSet):
         if self.action in ("create", "admin_omr_upload"):
             return SubmissionCreateSerializer
         return SubmissionSerializer
+
+    def create(self, request, *args, **kwargs):
+        try:
+            return super().create(request, *args, **kwargs)
+        except SubmissionUploadCleanupRequired as exc:
+            schedule_unreferenced_ai_object_cleanup(
+                tenant_id=exc.tenant_id,
+                key=exc.key,
+            )
+            return Response(
+                {
+                    "code": "submission_storage_cleanup_pending",
+                    "detail": "업로드 정리를 예약했습니다. 잠시 후 다시 시도해 주세요.",
+                },
+                status=503,
+            )
 
     @extend_schema(
         request=inline_serializer(
@@ -205,6 +224,19 @@ class SubmissionViewSet(ModelViewSet):
                 "requested_by_user_id": getattr(request.user, "id", None),
                 "requested_at": timezone.now().isoformat(),
             }
+            try:
+                ensure_ai_submission_key_attachable(
+                    tenant_id=tenant.id,
+                    key=str(source.file_key),
+                )
+            except ValueError:
+                return Response(
+                    {
+                        "code": "submission_storage_cleanup_conflict",
+                        "detail": "정리 중인 원본 파일은 다시 사용할 수 없습니다.",
+                    },
+                    status=409,
+                )
             replacement = Submission.objects.create(
                 tenant=tenant,
                 user=source.user,
@@ -323,7 +355,31 @@ class SubmissionViewSet(ModelViewSet):
             }
         )
         ser.is_valid(raise_exception=True)
-        submission = ser.save(user=request.user, tenant=tenant)
+        try:
+            with transaction.atomic():
+                submission = ser.save(user=request.user, tenant=tenant)
+        except Exception as error:
+            if isinstance(error, SubmissionUploadCleanupRequired):
+                cleanup_error = error
+            else:
+                uploaded_key = getattr(ser, "uploaded_object_key", None)
+                if not uploaded_key:
+                    raise
+                cleanup_error = SubmissionUploadCleanupRequired(
+                    tenant_id=getattr(ser, "uploaded_tenant_id", tenant.id),
+                    key=uploaded_key,
+                )
+            schedule_unreferenced_ai_object_cleanup(
+                tenant_id=cleanup_error.tenant_id,
+                key=cleanup_error.key,
+            )
+            return Response(
+                {
+                    "code": "submission_storage_cleanup_pending",
+                    "detail": "업로드 정리를 예약했습니다. 잠시 후 다시 시도해 주세요.",
+                },
+                status=503,
+            )
         dispatch_submission(submission)
         submission.refresh_from_db(fields=["status"])
 
@@ -376,7 +432,19 @@ class SubmissionViewSet(ModelViewSet):
                 ensure_exam_enrollment=True,
             ):
                 raise PermissionDenied("해당 시험/과제에 등록되지 않은 수강 정보입니다.")
-        submission = serializer.save(user=self.request.user, tenant=tenant)
+        try:
+            with transaction.atomic():
+                submission = serializer.save(user=self.request.user, tenant=tenant)
+        except Exception as error:
+            if isinstance(error, SubmissionUploadCleanupRequired):
+                raise
+            uploaded_key = getattr(serializer, "uploaded_object_key", None)
+            if not uploaded_key:
+                raise
+            raise SubmissionUploadCleanupRequired(
+                tenant_id=getattr(serializer, "uploaded_tenant_id", tenant.id),
+                key=uploaded_key,
+            ) from error
         dispatch_submission(submission)
 
     @staticmethod

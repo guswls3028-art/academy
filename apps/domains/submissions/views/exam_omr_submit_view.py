@@ -2,6 +2,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import ValidationError
+from django.db import transaction
 
 from apps.api.common.upload_validation import (
     DEFAULT_MAX_OMR_SIZE,
@@ -11,7 +12,10 @@ from apps.api.common.upload_validation import (
 )
 from apps.core.permissions import TenantResolvedAndStaff
 from apps.domains.submissions.models import Submission
-from apps.domains.submissions.serializers.submission import SubmissionCreateSerializer
+from apps.domains.submissions.serializers.submission import (
+    SubmissionCreateSerializer,
+    SubmissionUploadCleanupRequired,
+)
 from apps.domains.submissions.services.dispatcher import (
     dispatch_submission,
     resolve_omr_sheet_for_exam,
@@ -22,6 +26,10 @@ from apps.domains.submissions.services.omr_submission_guards import (
     duplicate_conflict_payload,
     ensure_exam_enrollment_candidate,
     find_conflicting_exam_submission,
+)
+from apps.domains.submissions.services.lifecycle import (
+    ensure_ai_submission_key_attachable,
+    schedule_unreferenced_ai_object_cleanup,
 )
 
 
@@ -105,21 +113,56 @@ class ExamOMRSubmitView(APIView):
                 }
             )
             ser.is_valid(raise_exception=True)
-            submission = ser.save(user=request.user, tenant=tenant)
+            try:
+                with transaction.atomic():
+                    submission = ser.save(user=request.user, tenant=tenant)
+            except Exception as error:
+                if isinstance(error, SubmissionUploadCleanupRequired):
+                    cleanup_error = error
+                else:
+                    uploaded_key = getattr(ser, "uploaded_object_key", None)
+                    if not uploaded_key:
+                        raise
+                    cleanup_error = SubmissionUploadCleanupRequired(
+                        tenant_id=getattr(ser, "uploaded_tenant_id", tenant.id),
+                        key=uploaded_key,
+                    )
+                schedule_unreferenced_ai_object_cleanup(
+                    tenant_id=cleanup_error.tenant_id,
+                    key=cleanup_error.key,
+                )
+                return Response(
+                    {"detail": "업로드 정리를 예약했습니다. 파일을 다시 선택해 주세요."},
+                    status=503,
+                )
         else:
             file_key_str = str(file_key or "").strip()
-            if not file_key_str.startswith(f"tenants/{tenant.id}/"):
+            if not file_key_str.startswith(f"tenants/{tenant.id}/ai/submissions/"):
                 return Response({"detail": "file_key does not belong to this tenant"}, status=400)
-            submission = Submission.objects.create(
-                tenant=tenant,
-                user=request.user,
-                enrollment_id=enrollment_id_int,
-                target_type=Submission.TargetType.EXAM,
-                target_id=int(exam_id),
-                source=Submission.Source.OMR_SCAN,
-                file_key=file_key_str,
-                payload=payload,
-            )
+            try:
+                with transaction.atomic():
+                    ensure_ai_submission_key_attachable(
+                        tenant_id=tenant.id,
+                        key=file_key_str,
+                    )
+                    submission = Submission.objects.create(
+                        tenant=tenant,
+                        user=request.user,
+                        enrollment_id=enrollment_id_int,
+                        target_type=Submission.TargetType.EXAM,
+                        target_id=int(exam_id),
+                        source=Submission.Source.OMR_SCAN,
+                        file_key=file_key_str,
+                        payload=payload,
+                    )
+            except ValueError:
+                return Response(
+                    {
+                        "code": "submission_storage_cleanup_conflict",
+                        "detail": "정리 중인 제출 파일은 새 답안에 연결할 수 없습니다.",
+                    },
+                    status=409,
+                )
 
         dispatch_submission(submission)
         submission.refresh_from_db(fields=["status"])

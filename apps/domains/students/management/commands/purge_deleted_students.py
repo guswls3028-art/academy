@@ -15,6 +15,9 @@ from django.utils import timezone
 
 from academy.adapters.db.django import repositories_students as student_repo
 from apps.domains.students.services import permanently_delete_students
+from apps.support.students.lifecycle_dependencies import (
+    process_pending_submission_storage_cleanup,
+)
 
 
 class Command(BaseCommand):
@@ -38,6 +41,13 @@ class Command(BaseCommand):
         dry_run = options["dry_run"]
         cutoff = timezone.now() - timedelta(days=days)
         to_purge = list(student_repo.student_filter_deleted_before_cutoff(cutoff))
+
+        if not dry_run:
+            cleanup = process_pending_submission_storage_cleanup(limit=1000)
+            self.stdout.write(
+                "제출 저장소 재시도: "
+                f"cleaned={cleanup.cleaned} failed={cleanup.failed} deferred={cleanup.deferred}"
+            )
 
         if not to_purge:
             self.stdout.write(f"삭제 대상 없음 (deleted_at < {cutoff})")
@@ -65,5 +75,11 @@ class Command(BaseCommand):
                 student_ids=group["ids"],
             )
             deleted += result.deleted_count
+
+        cleanup = process_pending_submission_storage_cleanup(limit=1000)
+        self.stdout.write(
+            "제출 저장소 후속 정리: "
+            f"cleaned={cleanup.cleaned} failed={cleanup.failed} deferred={cleanup.deferred}"
+        )
 
         self.stdout.write(self.style.SUCCESS(f"영구 삭제 완료: {deleted}명"))

@@ -60,6 +60,12 @@ def upload_fileobj_to_r2(
     )
 
 
+def delete_object_r2_ai(*, key: str, timeout_seconds: int | None = None) -> None:
+    """Delete one object from the AI bucket."""
+    s3 = _get_s3_client(timeout_seconds=timeout_seconds)
+    s3.delete_object(Bucket=settings.R2_AI_BUCKET, Key=key)
+
+
 def _excel_bucket():
     return getattr(settings, "R2_EXCEL_BUCKET", "academy-excel")
 

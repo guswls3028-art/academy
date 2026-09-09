@@ -197,6 +197,31 @@ X를 나중에 다시 맞힌 뒤에도 남기려면 O·복습으로 바꾼다. �
   정리도 tenant·행·보존기간을 확정한 별도 exact-target 작업에서만 수행한다. 이번
   expand migration은 child table만 만들며 기존 행, constraint, object를 바꾸거나
   지우지 않는다.
+- 학생 계정을 명시적으로 영구 삭제하거나 30일 보관 후 purge할 때는 예외다. 학생
+  lifecycle은 exact tenant/submission ID를 제출 도메인에 넘긴다. 제출 도메인은
+  `SubmissionMedia.object_key`와 legacy `Submission.file_key`를 AI 버킷 대상으로
+  분류하고, DB transaction 안에서는 `SubmissionStorageCleanupIntent`와 media 행
+  변경만 수행한다. parent submission과 학생 DB 삭제가 commit된 뒤에만 callback이
+  object 삭제를 시도하므로 이후 SQL 실패가 원본을 먼저 지우지 않는다.
+- cleanup intent identity는 `(tenant, bucket, object_key)`다. 제출물은 AI 버킷,
+  오답노트 PDF는 Storage 버킷으로 분리하며 동일 문자열 key가 두 버킷에 있어도 각
+  owning delete API만 호출한다. 실패 key는 고정 코드 `storage_delete_failed`만
+  기록하고 `process_submission_storage_cleanup` 또는 매일
+  `purge_deleted_students`가 재시도한다. 15분 지난 claim은 새 token으로 회수하며
+  이전 worker는 token이 달라진 상태를 완료/실패로 덮어쓸 수 없다.
+- 현재 writer는 신규 제출 key를
+  `tenants/{tenant}/ai/submissions/{submission_id}/{uuid}.{ext}`로 생성한다. 기존
+  tenant-scoped `tenants/{tenant}/ai/submissions/...`와 구 serializer의 exact-owner
+  `submissions/{submission_id}/...` key도 삭제 대상으로 인정하되,
+  다른 submission/media 및 등록된 AI 버킷 owner가 같은 key를 참조하면 object를
+  보존한다. 신규 caller-supplied key는 canonical tenant AI namespace만 허용하고
+  `submissions/...` legacy key의 새 연결은 거부한다. reused key writer와 cleanup은
+  같은 bucket+key advisory lock을 사용하며 cleanup intent가 생긴 key의 재연결도
+  거부한다. `SubmissionMedia.UPLOADING`은 1시간 lease 동안 영구삭제를 `409`로
+  중단하고, lease 만료 후에는 durable cleanup으로 회수한다. 늦게 끝난 PUT은 finalize
+  시 row/intent 소유권을 확인해 row를 되살리지 않고 다시 정리한다. 제출 업로드 뒤
+  DB 저장/입학 처리가 rollback 또는 commit 경계에서 실패하면 generic/admin/single
+  OMR caller도 uploaded key를 같은 durable intent로 넘겨 orphan object를 재시도한다.
 - 기존 `homework_image`·`homework_video` 단건 `Submission.file_key`는 그대로
   보존한다. 새 목록에서는 `legacy-{submission_id}`인 파일 하나로 투영하고, soft
   remove는 기존 행의 `meta`에 감사 시각을 기록한다. 구 단건 제출 생성 API도

@@ -1,4 +1,4 @@
-# 메시징/알림톡 운영 정책 SSOT (2026-09-05 갱신)
+# 메시징/알림톡 운영 정책 SSOT (2026-09-10 갱신)
 
 ## 정책 분류 체계
 
@@ -104,7 +104,7 @@ preview→confirm 경로에서 선생이 명시적으로 확인한 경우에만 
 1. **Tenant.messaging_is_active** — 대표·관리자가 화면에서 직접 제어하는 학원 전체 on/off. 신규·기존 사용 중 학원은 기본 on이며 개인 고객의 선호를 코드나 운영 환경변수에 넣지 않는다.
 2. **AutoSendConfig.enabled** — 트리거별 DB on/off (설정 콘솔에서 제어)
 3. **TRIGGER_POLICY** — 코드 레벨 정책 분류 (SYSTEM_AUTO는 토글 비활성화)
-4. **is_event_dry_run()** — MESSAGING_DRY_RUN_TRIGGERS 환경변수로 dry-run
+4. **is_event_dry_run()** — `MESSAGING_DRY_RUN_TRIGGERS` 환경변수로 이벤트 생산 자체를 dry-run한다. 상시 persistent development는 제품의 저장→outbox 생명주기를 실사용 형태로 검증해야 하므로 이 값을 비워 두고, API와 전용 Messaging worker의 `SOLAPI_MOCK=true`가 공급자 호출·비용을 차단한다. preprod와 운영자가 명시한 dry-run의 기존 동작은 바꾸지 않는다.
 5. **check_recipient_allowed()** — `MESSAGING_RECIPIENT_DENYLIST`의 운영 차단번호를 우선 거부하고, 테스트 환경에서는 `MESSAGING_TEST_WHITELIST`로 추가 제한한다. API enqueue와 워커 소비 입구에서 검사하며 공용 Solapi 호출 직전에도 다시 검사한다.
 6. **NotificationPreviewToken** — preview→confirm 핸드셰이크 (1회용, 5분 TTL). confirm 성공 즉시 수신자/본문을 비우며, 1분 주기 `process_scheduled_notifications`가 만료 행을 회당 500건 정리한다. 수동 대량 정리는 `python manage.py purge_expired_notification_preview_tokens [--dry-run]`을 사용한다.
 7. **멱등성 키** — business_idempotency_key (trigger + student_id + 날짜)
@@ -151,6 +151,7 @@ preview→confirm 경로에서 선생이 명시적으로 확인한 경우에만 
 - 잔액 충전/자동충전 뒤 audited recovery가 기존 이력을 보존하며 `sent`와 provider id까지 닫혔는지 확인한다. `ambiguous`는 접수 여부가 불명확하므로 자동 재발송하지 않고 공급자 대사 후 수동 조치한다.
 
 ## 변경 이력
+- 2026-09-10: persistent development에서 dry-run 조기 반환 때문에 클리닉 직접 취소의 필수 학생·학부모 outbox가 생성되지 않아 503으로 롤백되던 경계를 수정했다. 개발 API와 Messaging worker는 durable outbox와 전용 개발 SQS를 실제로 통과하되 `SOLAPI_MOCK=true`로 공급자 호출을 0건 보장한다. preprod·production 정책은 변경하지 않았다.
 - 2026-09-03: 하원 알림을 승인된 공용 `clinic_info` 봉투로 복구하고, 기존 테넌트에 하원 전용 본문/config를 기본 ON으로 프로비저닝했다. 정상 하원과 명시 확인한 미등원 하원 모두 직원이 수신자를 선택하며, 중복 하원은 재발송하지 않는다.
 - 2026-08-29: 일반 강의 개별 출결 PATCH에 재유입된 입실·결석 자동 훅을 제거하고, 출결 알림 preview→confirm 수동 발송만 허용하는 회귀 계약을 복구
 - 2026-08-23: 참관 사본에서 계정 아이디·비밀번호·OTP를 포함할 수 있는 5개 계정 트리거를 fail-closed로 제외했다. durable trigger와 payload event type을 중앙 민감도 판정으로 함께 검사해 legacy mismatch도 차단하며, 기존 감사 로그와 outbox는 보존한다.

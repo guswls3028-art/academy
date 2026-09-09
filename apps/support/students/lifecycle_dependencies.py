@@ -95,20 +95,66 @@ def update_inventory_student_ps(*, tenant: Any, old_ps: str, new_ps: str) -> Non
     InventoryFile.objects.filter(tenant=tenant, student_ps=old_ps).update(student_ps=new_ps)
 
 
-def delete_wrong_note_pdf_storage_or_raise(
+def delete_submission_storage_for_permanent_delete(
     *,
-    enrollment_ids: list[int],
-) -> None:
-    from apps.domains.results.models import WrongNotePDF
-    from apps.infrastructure.storage.r2 import delete_object_r2_storage
-
-    keys = list(
-        WrongNotePDF.objects.filter(enrollment_id__in=enrollment_ids)
-        .exclude(file_path="")
-        .values_list("file_path", flat=True)
+    tenant_id: int,
+    submission_ids: list[int],
+    wrong_note_pdf_ids: list[int] | tuple[int, ...] = tuple(),
+) -> tuple[int, ...]:
+    from apps.domains.submissions.services.lifecycle import (
+        delete_submission_storage_for_permanent_delete as _delete_submission_storage,
     )
-    for key in keys:
-        delete_object_r2_storage(key=str(key))
+
+    return _delete_submission_storage(
+        tenant_id=tenant_id,
+        submission_ids=submission_ids,
+        wrong_note_pdf_ids=wrong_note_pdf_ids,
+    )
+
+
+def submission_storage_cleanup_status_counts(
+    *,
+    intent_ids: tuple[int, ...],
+) -> tuple[int, int]:
+    from apps.domains.submissions.models import SubmissionStorageCleanupIntent
+
+    if not intent_ids:
+        return 0, 0
+    rows = SubmissionStorageCleanupIntent.objects.filter(id__in=intent_ids).values_list(
+        "status",
+        flat=True,
+    )
+    pending = 0
+    failed = 0
+    for status in rows:
+        if status == SubmissionStorageCleanupIntent.Status.FAILED:
+            failed += 1
+        elif status != SubmissionStorageCleanupIntent.Status.CLEANED:
+            pending += 1
+    return pending, failed
+
+
+def process_pending_submission_storage_cleanup(
+    *,
+    intent_ids: tuple[int, ...] | None = None,
+    limit: int = 100,
+):
+    from apps.domains.submissions.services.lifecycle import (
+        process_submission_storage_cleanup_intents,
+    )
+
+    return process_submission_storage_cleanup_intents(
+        intent_ids=intent_ids,
+        limit=limit,
+    )
+
+
+def submission_storage_reference_fields() -> frozenset[tuple[str, str, str, str]]:
+    from apps.domains.submissions.services.lifecycle import (
+        STORAGE_OBJECT_REFERENCE_FIELDS,
+    )
+
+    return STORAGE_OBJECT_REFERENCE_FIELDS
 
 
 def active_wrong_note_pdf_exists_for_students(

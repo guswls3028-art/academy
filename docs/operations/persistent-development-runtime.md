@@ -362,7 +362,9 @@ lock/mutation job은 environment subject를 사용한다.
 
 1. GitHub Actions가 run-unique 태그로 immutable 후보 이미지를 빌드한다.
 2. `publish-api-development-env.ps1`이 운영 형태의 값을 복사하되 DB·큐·R2·발송/결제를
-   개발 경계로 치환한다.
+   개발 경계로 치환한다. 메시징은 dry-run 조기 종료를 쓰지 않고 durable outbox와
+   전용 개발 SQS를 통과하며, API와 Messaging worker의 `SOLAPI_MOCK=true`가 외부
+   공급자 호출과 비용을 차단한다.
 3. `deploy-api-development.ps1`이 새 candidate 인스턴스를 만들고 migration, DB 역할,
    운영 DB 접근 거부, 개발 큐, 개발 R2와 운영 R2 접근 거부, Redis, `/healthz`,
    `/health`, 정확한 API/Tools/AI digest를 검증한다.
@@ -391,9 +393,11 @@ pwsh scripts/v1/connect-api-development.ps1 -AwsProfile <profile>
 실행하고 API proxy를 위 loopback tunnel로 지정한다. 검수용 tenant·교사·학생은
 `setup_ymath_realuse_scenario`처럼 production DB/R2에서 실행을 거부하는 명령으로만
 만든다. 실제 학생·학부모·성적·연락처와 운영 비밀값은 복제하지 않는다.
-이 명령은 `SOLAPI_MOCK=true`인 상시 개발 런타임에서만 `clinic_cancelled`의 승인된
-공용 봉투 매핑을 확인하고, 일회용 QA tenant에 tenant-owned content template과 활성
-알림톡 config를 만든다. 학생+학부모 취소 접수 검증에는 합성 학생 연락처만 사용한다.
+이 명령은 `SOLAPI_MOCK=true`, `MESSAGING_DRY_RUN_TRIGGERS` 빈 값인 상시 개발
+런타임에서만 `clinic_cancelled`의 승인된 공용 봉투 매핑을 확인하고, 일회용 QA
+tenant에 tenant-owned content template과 활성 알림톡 config를 만든다. 학생+학부모
+취소 접수 검증에는 합성 학생 연락처만 사용한다. 성공 판정은 취소 상태 저장과 두
+durable outbox 생성, 전용 개발 SQS·mock worker 처리이며 실제 Solapi 호출은 0건이다.
 
 검수는 desktop과 390px에서 로그인, 대상 화면 DOM, 상호작용, 새로고침 후 상태,
 가로 overflow와 콘솔/API 오류를 확인한다. 종료 시 같은 명령의 `--destroy`로 정확한
