@@ -255,6 +255,13 @@ PostgreSQL barrier 회귀는
 완료 여부, 점수형은 `점수/만점`을 표시하며 `NOT_SUBMITTED`와 미검사 `null`은
 모두 숫자 0으로 바꾸지 않는다.
 
+학생 상세는 `HomeworkAssignment` 도입 전 생성된 1차 `HomeworkScore`도 과거
+이력으로 보존한다. `/homework/scores/quick/`은 새 미배정 점수 생성은 계속
+거부하지만, 같은 tenant의 정확한 차시·수강·과제에 이미 존재하는 레거시 1차
+점수행은 그 행을 잠근 뒤 수정할 수 있다. 따라서 화면에 정상 이력으로 노출된
+과제가 배정행 부재만으로 저장 불가능해지지 않으며, 다른 tenant·차시·수강생이나
+점수행조차 없는 미배정 대상은 기존처럼 실패한다.
+
 차시 성적표의 편집 초안은 브라우저 편집기별로 유지한다. 같은 계정을 공유한
 여러 화면도 `X-Score-Editor-Client`로 구분한다. 시험과 과제 변경은 각각
 `(enrollment_id, exam_id, 입력 종류, question_id)`와

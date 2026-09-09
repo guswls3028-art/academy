@@ -137,6 +137,38 @@ class HomeworkQuickPatchScopeTests(TestCase):
             ).exists()
         )
 
+    def test_updates_existing_legacy_score_without_assignment(self):
+        legacy_score = HomeworkScore.objects.create(
+            homework=self.homework,
+            session=self.session,
+            enrollment=self.unassigned_enrollment,
+            attempt_index=1,
+            score=None,
+            max_score=None,
+        )
+
+        response = self._quick_patch(
+            {
+                "session_id": self.session.id,
+                "homework_id": self.homework.id,
+                "enrollment_id": self.unassigned_enrollment.id,
+                "score": 80,
+            }
+        )
+
+        legacy_score.refresh_from_db()
+        self.assertEqual(response.data["id"], legacy_score.id)
+        self.assertEqual(legacy_score.score, 80)
+        self.assertEqual(
+            HomeworkScore.objects.filter(
+                homework=self.homework,
+                session=self.session,
+                enrollment=self.unassigned_enrollment,
+                attempt_index=1,
+            ).count(),
+            1,
+        )
+
     def test_rejects_session_mismatch_without_side_effects(self):
         self._quick_patch(
             {
