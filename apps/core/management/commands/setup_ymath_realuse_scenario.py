@@ -180,7 +180,6 @@ def ensure_development_messaging_baseline() -> None:
     for trigger, definition in definitions.items():
         config = (
             AutoSendConfig.objects.select_for_update()
-            .select_related("template")
             .filter(tenant=owner, trigger=trigger)
             .first()
         )
