@@ -318,6 +318,117 @@ class ManualExamScoreAssignmentGuardTests(TestCase):
             105.0,
         )
 
+    def test_objective_score_rejects_aggregate_above_current_exam_max(self):
+        exam, _questions = self._create_structured_exam(
+            "Objective current max",
+            [50],
+            [50],
+        )
+        result = self._create_result(exam, objective_score=40)
+        result.total_score = 80
+        result.max_score = 100
+        result.save(update_fields=["total_score", "max_score", "updated_at"])
+        exam.max_score = 85
+        exam.save(update_fields=["max_score", "updated_at"])
+
+        response = self._patch_for_exam(
+            AdminExamObjectiveScoreView,
+            exam,
+            {"score": 50},
+        )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        result.refresh_from_db()
+        self.assertEqual(result.total_score, 80.0)
+        self.assertEqual(result.max_score, 100.0)
+
+        accepted = self._patch_for_exam(
+            AdminExamObjectiveScoreView,
+            exam,
+            {"score": 45},
+        )
+        self.assertEqual(accepted.status_code, 200, accepted.data)
+        result.refresh_from_db()
+        self.assertEqual(result.total_score, 85.0)
+        self.assertEqual(result.max_score, 85.0)
+
+    def test_subjective_score_rejects_aggregate_above_current_exam_max(self):
+        exam, _questions = self._create_structured_exam(
+            "Subjective current max",
+            [50],
+            [50],
+        )
+        result = self._create_result(exam, objective_score=40)
+        result.total_score = 80
+        result.max_score = 100
+        result.save(update_fields=["total_score", "max_score", "updated_at"])
+        exam.max_score = 85
+        exam.save(update_fields=["max_score", "updated_at"])
+
+        response = self._patch_for_exam(
+            AdminExamSubjectiveScoreView,
+            exam,
+            {"score": 50},
+        )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        result.refresh_from_db()
+        self.assertEqual(result.total_score, 80.0)
+        self.assertEqual(result.max_score, 100.0)
+
+        accepted = self._patch_for_exam(
+            AdminExamSubjectiveScoreView,
+            exam,
+            {"score": 45},
+        )
+        self.assertEqual(accepted.status_code, 200, accepted.data)
+        result.refresh_from_db()
+        self.assertEqual(result.total_score, 85.0)
+        self.assertEqual(result.max_score, 85.0)
+
+    def test_item_score_rejects_aggregate_above_current_exam_max(self):
+        exam, questions = self._create_structured_exam(
+            "Item current max",
+            [50, 50],
+            [],
+        )
+        result = self._create_result(exam, objective_score=80)
+        for question in questions:
+            ResultItem.objects.create(
+                result=result,
+                question=question,
+                answer="",
+                is_correct=False,
+                score=40,
+                max_score=50,
+                source="manual",
+            )
+        exam.max_score = 85
+        exam.save(update_fields=["max_score", "updated_at"])
+
+        response = self._patch_for_exam(
+            AdminExamItemScoreView,
+            exam,
+            {"score": 50},
+            question_id=questions[1].id,
+        )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        result.refresh_from_db()
+        self.assertEqual(result.total_score, 80.0)
+        self.assertEqual(result.max_score, 100.0)
+
+        accepted = self._patch_for_exam(
+            AdminExamItemScoreView,
+            exam,
+            {"score": 45},
+            question_id=questions[1].id,
+        )
+        self.assertEqual(accepted.status_code, 200, accepted.data)
+        result.refresh_from_db()
+        self.assertEqual(result.total_score, 85.0)
+        self.assertEqual(result.max_score, 85.0)
+
     def test_total_score_edits_explicit_first_attempt_without_touching_representative_retake(self):
         SessionEnrollment.objects.get_or_create(
             tenant=self.tenant,

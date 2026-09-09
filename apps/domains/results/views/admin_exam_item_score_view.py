@@ -32,7 +32,7 @@ from apps.support.results.admin_exam_item_score_dependencies import (
     get_answer_key_value,
     get_exam_question_for_item_score,
     get_latest_exam_submission_id,
-    get_regular_active_exam_for_tenant,
+    lock_regular_active_exam_for_tenant,
 )
 
 _OBJECTIVE_CHOICE_LABELS = {"1", "2", "3", "4", "5"}
@@ -110,7 +110,7 @@ class AdminExamItemScoreView(APIView):
         question_id = int(question_id)
 
         # ✅ tenant isolation: verify exam belongs to tenant
-        exam = get_regular_active_exam_for_tenant(
+        exam = lock_regular_active_exam_for_tenant(
             exam_id=exam_id,
             tenant=request.tenant,
         )
@@ -192,7 +192,11 @@ class AdminExamItemScoreView(APIView):
         # -------------------------------------------------
         # 2️⃣ Attempt 상태 확인 (LOCK)
         # -------------------------------------------------
-        attempt = ExamAttempt.objects.filter(id=int(result.attempt_id)).first()
+        attempt = (
+            ExamAttempt.objects.select_for_update()
+            .filter(id=int(result.attempt_id))
+            .first()
+        )
         if not attempt:
             raise NotFound({"detail": "attempt not found", "code": "NOT_FOUND"})
 
@@ -321,7 +325,6 @@ class AdminExamItemScoreView(APIView):
         # -------------------------------------------------
         agg_items = list(ResultItem.objects.filter(result=result))
         items_sum = sum(float(x.score or 0.0) for x in agg_items)
-        items_max_sum = sum(float(x.max_score or 0.0) for x in agg_items)
 
         choice_items_sum = 0.0
         essay_items_sum = 0.0
@@ -342,7 +345,6 @@ class AdminExamItemScoreView(APIView):
         if has_unknown_items:
             objective_score = float(result.objective_score or 0.0)
             total_score = items_sum
-            max_total = items_max_sum
         else:
             previous_objective = float(result.objective_score or 0.0)
             explicit_subjective = explicit_manual_subjective_score_for_result(
@@ -353,12 +355,8 @@ class AdminExamItemScoreView(APIView):
             objective_score = choice_items_sum if has_choice_items else previous_objective
             subjective_score = essay_items_sum if has_essay_items else explicit_subjective
             total_score = objective_score + subjective_score
-            max_total = float(
-                score_shape.total_max_score
-                or getattr(exam, "max_score", 0.0)
-                or items_max_sum
-                or 0.0
-            )
+
+        max_total = float(getattr(exam, "max_score", 100.0) or 100.0)
 
         if max_total > 0 and total_score > max_total:
             raise ValidationError(

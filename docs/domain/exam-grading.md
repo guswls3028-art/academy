@@ -378,6 +378,11 @@ submission ID만 유일성을 검사한다. `NULL`은 클리닉 직접 입력 �
 PATCH가 호환성을 위해 클라이언트의 `max_score`를 받더라도 유한수 형식만
 검증하고 저장에는 현재 시험 만점을 사용한다. 따라서 시험 만점을 바꾼 뒤 오래
 열어 둔 화면에서 점수를 저장해도 학생별 `Result.max_score`가 갈라지지 않는다.
+객관식 합계·서술형 합계·문항별 점수 PATCH도 tenant의 같은 `Exam` 행을 먼저 잠근다.
+각 선택형·서술형·문항 점수는 OMR score shape의 구성요소별 상한을 계속 검증하되,
+합산한 최종 총점은 현재 `Exam.max_score`를 넘을 수 없고 성공 시
+`Result.max_score`도 그 현재 만점으로 저장한다. 따라서 만점 하향과 점수 저장이
+겹쳐도 과거 shape 분모로 현재 시험 만점을 우회하지 않는다.
 `GET /results/admin/sessions/{session_id}/scores/`도 모든 현재 행의
 `block.max_score`를 시험 만점으로 투영한다. 다만 1차·재시험 당시의 분모는
 `attempts[].max_score`에 그대로 보존해 과거 응시 이력을 소급 변경하지 않는다.

@@ -16,15 +16,12 @@ from django.test import TransactionTestCase
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps.core.models import Tenant, TenantMembership
-from apps.domains.results.models import ExamAttempt, Result, ResultFact, ScoreEditDraft
-from apps.domains.results.views.admin_representative_attempt_view import (
-    AdminRepresentativeAttemptView,
+from apps.domains.results.models import ExamAttempt, Result, ScoreEditDraft
+from apps.domains.results.views.admin_exam_objective_score_view import (
+    AdminExamObjectiveScoreView,
 )
 from apps.domains.results.views.admin_exam_total_score_view import (
     AdminExamTotalScoreView,
-)
-from apps.support.results.admin_exam_dependencies import (
-    lock_regular_active_exam_for_tenant,
 )
 
 
@@ -194,157 +191,102 @@ class ExamMaxScoreConcurrencyPGTests(TransactionTestCase):
         )
         self.assertEqual(result.max_score, 105.0)
 
-    def test_representative_switch_and_total_write_share_exam_result_attempt_lock_order(self):
-        first_attempt = ExamAttempt.objects.create(
+    @patch(
+        "apps.domains.results.views.admin_exam_objective_score_view."
+        "dispatch_progress_pipeline"
+    )
+    def test_objective_write_waits_for_committed_exam_max(
+        self,
+        _dispatch_progress_pipeline,
+    ):
+        attempt = ExamAttempt.objects.create(
             exam=self.exam,
             enrollment=self.enrollment,
-            submission_id=11,
+            submission_id=0,
             attempt_index=1,
             is_retake=False,
-            is_representative=False,
-            status="done",
-            meta={"total_score": 70.0, "max_score": 100.0},
-        )
-        second_attempt = ExamAttempt.objects.create(
-            exam=self.exam,
-            enrollment=self.enrollment,
-            submission_id=12,
-            attempt_index=2,
-            is_retake=True,
             is_representative=True,
             status="done",
-            meta={"total_score": 80.0, "max_score": 100.0},
+            meta={"total_score": 70.0, "max_score": 100.0},
         )
         Result.objects.create(
             target_type="exam",
             target_id=self.exam.id,
             enrollment=self.enrollment,
-            attempt=second_attempt,
-            total_score=80,
+            attempt=attempt,
+            total_score=70,
             max_score=100,
+            objective_score=70,
         )
-        ResultFact.objects.create(
-            target_type="exam",
-            target_id=self.exam.id,
-            enrollment=self.enrollment,
-            submission_id=first_attempt.submission_id,
-            attempt=first_attempt,
-            question_id=0,
-            answer="",
-            is_correct=True,
-            score=70,
-            max_score=100,
-            source="manual_total",
-            meta={"manual_total": True},
-        )
-
-        representative_locked_exam = threading.Event()
-        total_started = threading.Event()
-        responses: list[tuple[str, int]] = []
+        exam_locked = threading.Event()
+        objective_started = threading.Event()
+        responses: list[tuple[int, float]] = []
         errors: list[str] = []
 
-        def pausing_representative_exam_lock(*, exam_id, tenant):
-            exam = lock_regular_active_exam_for_tenant(
-                exam_id=exam_id,
-                tenant=tenant,
-            )
-            representative_locked_exam.set()
-            if not total_started.wait(timeout=5):
-                raise AssertionError("total score writer did not start")
-            time.sleep(0.2)
-            return exam
-
-        def representative_writer() -> None:
+        def policy_writer() -> None:
             close_old_connections()
             try:
-                tenant = Tenant.objects.get(id=self.tenant.id)
-                admin = User.objects.get(id=self.admin.id)
-                request = APIRequestFactory().post(
-                    "/results/admin/exams/representative-attempt/",
-                    {
-                        "enrollment_id": self.enrollment.id,
-                        "attempt_id": first_attempt.id,
-                    },
-                    format="json",
-                )
-                request.tenant = tenant
-                force_authenticate(request, user=admin)
-                response = AdminRepresentativeAttemptView.as_view()(
-                    request,
-                    exam_id=self.exam.id,
-                )
-                responses.append(("representative", response.status_code))
+                with transaction.atomic():
+                    exam = Exam.objects.select_for_update().get(
+                        id=self.exam.id,
+                        tenant_id=self.tenant.id,
+                    )
+                    exam.max_score = 85
+                    exam.save(update_fields=["max_score", "updated_at"])
+                    exam_locked.set()
+                    if not objective_started.wait(timeout=5):
+                        raise AssertionError("objective writer did not start")
+                    time.sleep(0.2)
             except Exception as exc:  # noqa: BLE001
-                errors.append(f"representative: {exc!r}")
+                errors.append(f"policy: {exc!r}")
             finally:
                 close_old_connections()
 
-        def total_writer() -> None:
+        def objective_writer() -> None:
             close_old_connections()
             try:
-                if not representative_locked_exam.wait(timeout=5):
-                    raise AssertionError("representative writer did not lock exam")
+                if not exam_locked.wait(timeout=5):
+                    raise AssertionError("policy writer did not lock exam")
                 tenant = Tenant.objects.get(id=self.tenant.id)
                 admin = User.objects.get(id=self.admin.id)
                 request = APIRequestFactory().patch(
                     "/results/admin/exams/manual/",
-                    {"score": 75, "max_score": 100},
+                    {"score": 80},
                     format="json",
                     HTTP_X_SCORE_EDITOR_CLIENT="exam-max-lock",
                     HTTP_X_SCORE_SESSION_ID=str(self.session.id),
                 )
                 request.tenant = tenant
                 force_authenticate(request, user=admin)
-                total_started.set()
-                response = AdminExamTotalScoreView.as_view()(
+                objective_started.set()
+                response = AdminExamObjectiveScoreView.as_view()(
                     request,
                     exam_id=self.exam.id,
                     enrollment_id=self.enrollment.id,
                 )
-                responses.append(("total", response.status_code))
+                responses.append(
+                    (response.status_code, float(response.data["max_score"]))
+                )
             except Exception as exc:  # noqa: BLE001
-                errors.append(f"total: {exc!r}")
+                errors.append(f"objective: {exc!r}")
             finally:
                 close_old_connections()
 
-        with (
-            patch(
-                "apps.domains.results.views.admin_representative_attempt_view."
-                "lock_regular_active_exam_for_tenant",
-                side_effect=pausing_representative_exam_lock,
-            ),
-            patch(
-                "apps.domains.results.views.admin_representative_attempt_view."
-                "get_latest_session_submission_id",
-                return_value=99,
-            ),
-            patch(
-                "apps.domains.results.views.admin_representative_attempt_view."
-                "dispatch_progress_pipeline"
-            ),
-            patch(
-                "apps.domains.results.views.admin_exam_total_score_view."
-                "dispatch_progress_pipeline"
-            ),
-        ):
-            representative = threading.Thread(target=representative_writer)
-            total = threading.Thread(target=total_writer)
-            representative.start()
-            total.start()
-            representative.join(timeout=10)
-            total.join(timeout=10)
+        policy = threading.Thread(target=policy_writer)
+        objective = threading.Thread(target=objective_writer)
+        policy.start()
+        objective.start()
+        policy.join(timeout=10)
+        objective.join(timeout=10)
 
-        self.assertFalse(representative.is_alive(), "representative writer deadlocked")
-        self.assertFalse(total.is_alive(), "total score writer deadlocked")
+        self.assertFalse(policy.is_alive(), "policy writer did not finish")
+        self.assertFalse(objective.is_alive(), "objective writer did not finish")
         self.assertEqual(errors, [])
-        self.assertEqual(
-            sorted(responses),
-            [("representative", 200), ("total", 200)],
-        )
+        self.assertEqual(responses, [(200, 85.0)])
         result = Result.objects.get(
             target_type="exam",
             target_id=self.exam.id,
             enrollment=self.enrollment,
         )
-        self.assertEqual(result.attempt_id, first_attempt.id)
-        self.assertEqual(result.total_score, 75.0)
+        self.assertEqual(result.total_score, 80.0)
+        self.assertEqual(result.max_score, 85.0)
