@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .namespace_lock import lock_student_ps_namespaces
+
 
 def ensure_parent_for_student(
     *,

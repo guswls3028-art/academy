@@ -8,10 +8,17 @@ from django.views import View
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 from django.conf import settings
+from django.db import transaction
 
 from apps.core.authentication import TokenVersionJWTAuthentication as JWTAuthentication
 
 from apps.core.models import Program
+from apps.support.inventory.storage_cleanup_dependencies import (
+    ensure_storage_inventory_key_attachable,
+    schedule_unreferenced_storage_object_cleanup,
+)
+from apps.support.inventory.student_dependencies import active_student_id_for_storage
+from apps.support.students.namespace_lock import lock_student_ps_namespaces
 from .r2_path import build_r2_key, safe_filename, folder_path_string
 from academy.adapters.db.django import repositories_inventory as inv_repo
 from .services import (
@@ -210,6 +217,217 @@ def _find_inventory_file_by_r2_key(tenant, r2_key: str):
     if inv_file:
         return inv_file
     return inv_repo.inventory_file_filter(tenant, "student").filter(r2_key=r2_key).order_by("id").first()
+
+
+class _InventoryUploadFailure(Exception):
+    def __init__(self, *, status: int, detail: str, code: str = ""):
+        super().__init__(detail)
+        self.status = status
+        self.detail = detail
+        self.code = code
+
+
+class _InventoryPersistenceFailure(Exception):
+    def __init__(self, *, stage: str, cause: Exception):
+        super().__init__(str(cause))
+        self.stage = stage
+        self.__cause__ = cause
+
+
+def _attach_inventory_upload(
+    *,
+    tenant,
+    scope: str,
+    student_ps: str,
+    scope_student,
+    folder,
+    file_obj,
+    display_name: str,
+    description: str,
+    icon: str,
+    r2_key: str,
+    validated_scores,
+):
+    with transaction.atomic():
+        if scope == "student":
+            lock_student_ps_namespaces(
+                tenant_id=tenant.id,
+                ps_numbers=(student_ps,),
+            )
+            owner_id = active_student_id_for_storage(
+                tenant_id=tenant.id,
+                ps_number=student_ps,
+            )
+            if owner_id is None or (
+                scope_student is not None and owner_id != scope_student.id
+            ):
+                raise _InventoryUploadFailure(
+                    status=409,
+                    detail="활성 학생 저장소를 확인할 수 없습니다.",
+                    code="student_storage_owner_missing",
+                )
+
+        if folder is not None:
+            folder = (
+                folder.__class__.objects.select_for_update()
+                .filter(pk=folder.pk, tenant=tenant)
+                .first()
+            )
+            if folder is None or not _folder_chain_matches_scope(
+                folder,
+                scope,
+                student_ps,
+            ):
+                raise _InventoryUploadFailure(
+                    status=409,
+                    detail="저장 폴더가 변경되었습니다. 다시 선택해 주세요.",
+                    code="inventory_storage_folder_changed",
+                )
+
+        used = inv_repo.inventory_file_aggregate_size(tenant)
+        if used + file_obj.size > STORAGE_QUOTA_BYTES:
+            raise _InventoryUploadFailure(
+                status=403,
+                detail="기본 저장공간 200GB를 초과했습니다. 운영팀에 문의해 주세요.",
+                code="quota_exceeded",
+            )
+        try:
+            ensure_storage_inventory_key_attachable(
+                tenant_id=tenant.id,
+                key=r2_key,
+            )
+        except ValueError as exc:
+            raise _InventoryUploadFailure(
+                status=409,
+                detail="같은 저장 경로가 이미 사용 중입니다. 다시 시도해 주세요.",
+                code="inventory_storage_key_conflict",
+            ) from exc
+
+        try:
+            inv_file = inv_repo.inventory_file_create(
+                tenant=tenant,
+                scope=scope,
+                student_ps=student_ps,
+                folder=folder,
+                display_name=display_name or file_obj.name,
+                description=description,
+                icon=icon,
+                r2_key=r2_key,
+                original_name=file_obj.name,
+                size_bytes=file_obj.size,
+                content_type=file_obj.content_type or "application/octet-stream",
+            )
+        except Exception as exc:
+            raise _InventoryPersistenceFailure(stage="metadata", cause=exc) from exc
+
+        reported_scores = []
+        if validated_scores is not None:
+            try:
+                reported_scores = create_student_score_submissions(
+                    evidence_file=inv_file,
+                    validated_rows=validated_scores,
+                )
+            except Exception as exc:
+                raise _InventoryPersistenceFailure(stage="score", cause=exc) from exc
+        return inv_file, reported_scores
+
+
+def _persist_inventory_upload(
+    *,
+    tenant,
+    scope: str,
+    student_ps: str,
+    scope_student,
+    folder,
+    file_obj,
+    display_name: str,
+    description: str,
+    icon: str,
+    r2_key: str,
+    validated_scores,
+):
+    try:
+        upload_fileobj_to_r2_storage(
+            fileobj=file_obj,
+            key=r2_key,
+            content_type=file_obj.content_type or "application/octet-stream",
+        )
+    except Exception as exc:
+        raise _InventoryUploadFailure(
+            status=502,
+            detail="파일 원본을 저장하지 못했습니다. 다시 시도해 주세요.",
+            code="inventory_storage_upload_failed",
+        ) from exc
+
+    try:
+        return _attach_inventory_upload(
+            tenant=tenant,
+            scope=scope,
+            student_ps=student_ps,
+            scope_student=scope_student,
+            folder=folder,
+            file_obj=file_obj,
+            display_name=display_name,
+            description=description,
+            icon=icon,
+            r2_key=r2_key,
+            validated_scores=validated_scores,
+        )
+    except (_InventoryUploadFailure, _InventoryPersistenceFailure) as exc:
+        stage = exc.stage if isinstance(exc, _InventoryPersistenceFailure) else "attach"
+        logger.warning(
+            "Inventory %s rejected after R2 upload tenant=%s scope=%s",
+            stage,
+            tenant.id,
+            scope,
+        )
+        try:
+            delete_object_r2_storage(key=r2_key)
+        except Exception:
+            logger.exception(
+                "Inventory orphan cleanup failed tenant=%s scope=%s",
+                tenant.id,
+                scope,
+            )
+            try:
+                schedule_unreferenced_storage_object_cleanup(
+                    tenant_id=tenant.id,
+                    key=r2_key,
+                )
+            except Exception:
+                logger.exception(
+                    "Inventory orphan cleanup intent failed tenant=%s scope=%s",
+                    tenant.id,
+                    scope,
+                )
+            cleanup_detail = (
+                "성적 정보 저장과 원본 정리에 실패했습니다. 관리자에게 문의해 주세요."
+                if stage == "score"
+                else "파일 정보 저장과 원본 정리에 실패했습니다. 관리자에게 문의해 주세요."
+            )
+            cleanup_code = (
+                "score_storage_cleanup_failed"
+                if stage == "score"
+                else "inventory_storage_cleanup_failed"
+            )
+            raise _InventoryUploadFailure(
+                status=502,
+                detail=cleanup_detail,
+                code=cleanup_code,
+            ) from exc
+
+        if isinstance(exc, _InventoryUploadFailure):
+            raise
+        if stage == "score":
+            raise _InventoryUploadFailure(
+                status=500,
+                detail="성적표 제출 정보를 저장하지 못했습니다.",
+            ) from exc
+        raise _InventoryUploadFailure(
+            status=500,
+            detail="파일 정보를 저장하지 못했습니다. 다시 시도해 주세요.",
+            code="inventory_metadata_save_failed",
+        ) from exc
 
 
 @method_decorator(csrf_exempt, name="dispatch")
@@ -458,6 +676,21 @@ class FileUploadView(View):
                 return JsonResponse({"detail": str(exc)}, status=400)
 
         tenant = request.tenant
+        if scope == "student":
+            preflight_owner_id = active_student_id_for_storage(
+                tenant_id=tenant.id,
+                ps_number=student_ps,
+            )
+            if preflight_owner_id is None or (
+                scope_student is not None and preflight_owner_id != scope_student.id
+            ):
+                return JsonResponse(
+                    {
+                        "detail": "활성 학생 저장소를 확인할 수 없습니다.",
+                        "code": "student_storage_owner_missing",
+                    },
+                    status=409,
+                )
         # Quota
         Program.ensure_for_tenant(tenant=tenant)
         used = inv_repo.inventory_file_aggregate_size(tenant)
@@ -520,86 +753,24 @@ class FileUploadView(View):
                 status=503,
             )
         try:
-            upload_fileobj_to_r2_storage(
-                fileobj=file_obj,
-                key=r2_key,
-                content_type=file_obj.content_type or "application/octet-stream",
-            )
-        except Exception as e:
-            return JsonResponse({"detail": f"R2 upload failed: {e}"}, status=502)
-
-        try:
-            inv_file = inv_repo.inventory_file_create(
+            inv_file, reported_scores = _persist_inventory_upload(
                 tenant=tenant,
                 scope=scope,
                 student_ps=student_ps,
+                scope_student=scope_student,
                 folder=folder,
-                display_name=display_name or file_obj.name,
+                file_obj=file_obj,
+                display_name=display_name,
                 description=description,
                 icon=icon,
                 r2_key=r2_key,
-                original_name=file_obj.name,
-                size_bytes=file_obj.size,
-                content_type=file_obj.content_type or "application/octet-stream",
+                validated_scores=validated_scores,
             )
-        except Exception:
-            logger.exception(
-                "Inventory metadata creation failed after R2 upload tenant=%s scope=%s",
-                tenant.id,
-                scope,
-            )
-            try:
-                delete_object_r2_storage(key=r2_key)
-            except Exception:
-                logger.exception(
-                    "Inventory orphan cleanup failed tenant=%s scope=%s",
-                    tenant.id,
-                    scope,
-                )
-                return JsonResponse(
-                    {
-                        "detail": "파일 정보 저장과 원본 정리에 실패했습니다. 관리자에게 문의해 주세요.",
-                        "code": "inventory_storage_cleanup_failed",
-                    },
-                    status=502,
-                )
-            return JsonResponse(
-                {
-                    "detail": "파일 정보를 저장하지 못했습니다. 다시 시도해 주세요.",
-                    "code": "inventory_metadata_save_failed",
-                },
-                status=500,
-            )
-
-        reported_scores = []
-        if validated_scores is not None:
-            try:
-                reported_scores = create_student_score_submissions(
-                    evidence_file=inv_file,
-                    validated_rows=validated_scores,
-                )
-            except Exception:
-                import logging
-                logging.getLogger(__name__).exception(
-                    "Student score submission creation failed for inventory_file %s",
-                    inv_file.id,
-                )
-                try:
-                    delete_object_r2_storage(key=r2_key)
-                except Exception:
-                    logging.getLogger(__name__).exception(
-                        "Failed to roll back student score R2 upload: %s",
-                        r2_key,
-                    )
-                    return JsonResponse(
-                        {
-                            "detail": "성적 정보 저장과 원본 정리에 실패했습니다. 관리자에게 문의해 주세요.",
-                            "code": "score_storage_cleanup_failed",
-                        },
-                        status=502,
-                    )
-                inv_file.delete()
-                return JsonResponse({"detail": "성적표 제출 정보를 저장하지 못했습니다."}, status=500)
+        except _InventoryUploadFailure as exc:
+            payload = {"detail": exc.detail}
+            if exc.code:
+                payload["code"] = exc.code
+            return JsonResponse(payload, status=exc.status)
 
         matchup_doc_id = None
         matchup_promote_failed = False

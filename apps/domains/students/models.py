@@ -9,6 +9,7 @@ from apps.api.common.models import TimestampModel
 from apps.core.models import Tenant
 from apps.core.db import TenantQuerySet  # ✅ 추가
 from apps.support.students.lifecycle_dependencies import update_inventory_student_ps
+from apps.support.students.namespace_lock import lock_student_ps_namespaces
 
 
 def generate_student_custom_field_key() -> str:
@@ -219,12 +220,34 @@ class Student(TimestampModel):
 
     def save(self, *args, **kwargs):
         if not self.pk:
+            with transaction.atomic():
+                lock_student_ps_namespaces(
+                    tenant_id=self.tenant_id,
+                    ps_numbers=(self.ps_number,),
+                )
+                return super().save(*args, **kwargs)
+
+        update_fields = kwargs.get("update_fields")
+        persists_ps_number = update_fields is None or "ps_number" in update_fields
+        if not persists_ps_number:
+            try:
+                persisted_identity = Student.objects.values("user_id", "tenant_id").get(
+                    pk=self.pk
+                )
+            except Student.DoesNotExist:
+                return super().save(*args, **kwargs)
+            if self.user_id != persisted_identity["user_id"]:
+                raise ValueError("Student.user cannot be changed through Student.save().")
+            if self.tenant_id != persisted_identity["tenant_id"]:
+                raise ValueError("Student.tenant cannot be changed through Student.save().")
             return super().save(*args, **kwargs)
 
         try:
-            persisted_identity = Student.objects.values("user_id", "tenant_id").get(
-                pk=self.pk
-            )
+            persisted_identity = Student.objects.values(
+                "user_id",
+                "tenant_id",
+                "ps_number",
+            ).get(pk=self.pk)
         except Student.DoesNotExist:
             return super().save(*args, **kwargs)
 
@@ -234,11 +257,6 @@ class Student(TimestampModel):
             raise ValueError("Student.user cannot be changed through Student.save().")
         if self.tenant_id != persisted_tenant_id:
             raise ValueError("Student.tenant cannot be changed through Student.save().")
-
-        update_fields = kwargs.get("update_fields")
-        persists_ps_number = update_fields is None or "ps_number" in update_fields
-        if not persists_ps_number:
-            return super().save(*args, **kwargs)
 
         with transaction.atomic():
             user_model = self._meta.get_field("user").remote_field.model
@@ -254,6 +272,10 @@ class Student(TimestampModel):
                 raise ValueError("Student account link changed while saving identity.")
             if old.tenant_id != persisted_tenant_id or self.tenant_id != old.tenant_id:
                 raise ValueError("Student tenant changed while saving identity.")
+            lock_student_ps_namespaces(
+                tenant_id=persisted_tenant_id,
+                ps_numbers=(old.ps_number, self.ps_number),
+            )
 
             if old.ps_number != self.ps_number:
                 from apps.core.models.user import user_internal_username

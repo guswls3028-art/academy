@@ -22,13 +22,28 @@ PDF/PNG/JPEG만 허용한다. 브라우저가 보내는 MIME은 서버가 다시
 정상 순서는 R2 원본 업로드 뒤 `InventoryFile` 생성이다. 원본 업로드 뒤 DB 메타데이터
 생성이 실패하면 방금 생성한 exact R2 key를 즉시 삭제하고
 `500 inventory_metadata_save_failed`를 반환한다. 그 삭제까지 실패하면 임의 재시도나
-성공 응답 대신 `502 inventory_storage_cleanup_failed`로 운영 확인을 요구한다. 성적표의
+성공 응답 대신 durable Storage cleanup intent를 남긴 뒤
+`502 inventory_storage_cleanup_failed`로 운영 확인을 요구한다. 성적표의
 후속 점수 행 생성 실패도 같은 원본과 메타데이터를 보상 정리한다. 학부모가 제출한
 성적표는 선택 자녀를 `student`, 인증된 학부모를 `submitted_by`로 기록하고 학생/학부모/
 교직원 조회가 동일한 원본과 점수 행을 반환한다. 다른 tenant·기존
 파일·사용자 작성 행은 이 보상 범위에 포함하지 않는다.
 
-검증은 `apps/domains/inventory/tests/test_hardening.py`와
+업로드 key의 랜덤 suffix는 128-bit(`token_hex(16)`)이며 Inventory helper를 공유하는
+매치업 경로도 같은 충돌 저항을 사용한다. 최대 2GB PUT 동안 DB transaction을 열어두지
+않는다. 서버는 권한·활성 학생·폴더·quota를 먼저 cheap preflight하고 R2 PUT 뒤 짧은
+attach transaction을 연다. student scope는
+`academy:student-ps-namespace:v1:{tenant_id}:{student_ps}`를 잠근 뒤 Student row lock
+없이 활성 owner/선택 자녀를 다시 읽고, 선택 folder row와 quota를 재검증한다. 이어 exact
+Storage object-key lock을 잡아 cleanup intent와 모든 canonical owner가 없음을 확인한 뒤
+`InventoryFile`과 성적표 점수 행을 한 번에 commit한다. PUT 사이에 학생이 삭제되거나
+folder/quota/key ownership이 달라지면 성공으로 추측하지 않고 `409`/`403`으로 attach를
+거절한 뒤 방금 PUT한 exact key를 보상 삭제한다. provider 원문 예외는 노출하지 않고
+`502 inventory_storage_upload_failed`를 반환한다.
+
+검증은 `apps/domains/inventory/tests/test_hardening.py`,
+`apps/domains/inventory/tests/test_student_upload_lifecycle_concurrency_pg.py`와
 `tests/test_student_reported_scores.py`의 학생·학부모 권한, sibling/tenant·폴더 경계,
-R2 업로드 성공, reload, 메타데이터 실패 exact-key 정리 회귀를 사용한다. 운영 확인은 개인 파일을 다운로드하지
+R2 업로드 성공, reload, 128-bit key, 메타데이터 실패 exact-key/durable intent 정리,
+PUT/attach와 삭제의 양방향 PostgreSQL 경쟁 회귀를 사용한다. 운영 확인은 개인 파일을 다운로드하지
 않고 tenant별 행 수, MIME/상태 집계와 R2 HEAD의 존재·크기·content-type 일치만 읽는다.

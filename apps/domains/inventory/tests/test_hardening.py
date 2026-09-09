@@ -4,6 +4,7 @@ import json
 from unittest.mock import patch
 
 from django.apps import apps
+from django.apps import apps as django_apps
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
@@ -11,6 +12,7 @@ from rest_framework.test import APIRequestFactory
 
 from apps.core.models import Tenant, TenantMembership
 from apps.domains.inventory.models import InventoryFile, InventoryFolder
+from apps.domains.inventory.r2_path import safe_filename
 from apps.domains.inventory.services import delete_folder_recursive, move_file, move_folder
 from apps.domains.inventory.views import (
     FileDeleteView,
@@ -25,6 +27,10 @@ from apps.domains.students.models import Student
 
 
 User = get_user_model()
+SubmissionStorageCleanupIntent = django_apps.get_model(
+    "submissions",
+    "SubmissionStorageCleanupIntent",
+)
 Parent = apps.get_model("parents", "Parent")
 
 
@@ -460,6 +466,60 @@ class InventoryHardeningViewTests(TestCase):
         upload_r2.assert_not_called()
         self.assertFalse(InventoryFile.objects.filter(tenant=self.tenant, original_name="x.pdf").exists())
 
+    def test_staff_student_upload_revalidates_active_owner_before_r2_put(self):
+        upload = SimpleUploadedFile("x.pdf", b"%PDF-1.4", content_type="application/pdf")
+        request = self._multipart_request(
+            "/storage/inventory/upload/",
+            {
+                "scope": "student",
+                "student_ps": "MISSING-STUDENT",
+                "file": upload,
+            },
+        )
+
+        with self._auth(self.staff), patch(
+            "apps.domains.inventory.views.upload_fileobj_to_r2_storage"
+        ) as upload_r2:
+            response = FileUploadView.as_view()(request)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(json.loads(response.content)["code"], "student_storage_owner_missing")
+        upload_r2.assert_not_called()
+        self.assertFalse(
+            InventoryFile.objects.filter(
+                tenant=self.tenant,
+                student_ps="MISSING-STUDENT",
+            ).exists()
+        )
+
+    def test_inventory_filename_uses_128_bit_random_suffix(self):
+        with patch(
+            "apps.domains.inventory.r2_path.secrets.token_hex",
+            return_value="a" * 32,
+        ) as token_hex:
+            generated = safe_filename("lesson.pdf")
+
+        token_hex.assert_called_once_with(16)
+        self.assertTrue(generated.endswith(f"_{'a' * 32}.pdf"))
+
+    def test_upload_failure_returns_stable_code_without_provider_detail(self):
+        upload = SimpleUploadedFile("x.pdf", b"%PDF-1.4", content_type="application/pdf")
+        request = self._multipart_request(
+            "/storage/inventory/upload/",
+            {"scope": "admin", "file": upload},
+        )
+
+        with self._auth(self.staff), patch(
+            "apps.domains.inventory.views.upload_fileobj_to_r2_storage",
+            side_effect=RuntimeError("provider-secret-detail"),
+        ):
+            response = FileUploadView.as_view()(request)
+
+        payload = json.loads(response.content)
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(payload["code"], "inventory_storage_upload_failed")
+        self.assertNotIn("provider-secret-detail", payload["detail"])
+
     def test_all_plan_can_upload_and_reports_200gb_quota(self):
         upload = SimpleUploadedFile("all-plan.pdf", b"%PDF-1.4", content_type="application/pdf")
         request = self._multipart_request(
@@ -527,7 +587,7 @@ class InventoryHardeningViewTests(TestCase):
 
         with self._auth(self.staff), patch(
             "apps.domains.inventory.views.upload_fileobj_to_r2_storage"
-        ), patch(
+        ) as upload_r2, patch(
             "apps.domains.inventory.views.inv_repo.inventory_file_create",
             side_effect=RuntimeError("database unavailable"),
         ), patch(
@@ -538,6 +598,13 @@ class InventoryHardeningViewTests(TestCase):
 
         self.assertEqual(response.status_code, 502)
         self.assertEqual(json.loads(response.content)["code"], "inventory_storage_cleanup_failed")
+        uploaded_key = upload_r2.call_args.kwargs["key"]
+        intent = SubmissionStorageCleanupIntent.objects.get(
+            tenant=self.tenant,
+            bucket=SubmissionStorageCleanupIntent.Bucket.STORAGE,
+            object_key=uploaded_key,
+        )
+        self.assertEqual(intent.status, SubmissionStorageCleanupIntent.Status.PENDING)
 
 
 class InventoryHardeningMoveTests(TestCase):

@@ -128,11 +128,10 @@ def _wrong_note_owned_object_key(*, tenant_id: int, key: str) -> bool:
 def _student_inventory_owned_object_key(
     *,
     tenant_id: int,
-    student_ps: str,
     key: str,
 ) -> bool:
-    prefix = f"tenants/{tenant_id}/students/{student_ps}/"
-    return bool(student_ps) and key.startswith(prefix) and len(key) > len(prefix)
+    prefix = f"tenants/{tenant_id}/students/"
+    return key.startswith(prefix) and len(key) > len(prefix)
 
 
 def _lock_object_key(*, bucket: str, key: str) -> None:
@@ -216,6 +215,55 @@ def _other_storage_owner_references(
         if references.exists():
             return True
     return False
+
+
+def ensure_storage_inventory_key_attachable(*, tenant_id: int, key: str) -> None:
+    """Serialize a Storage PUT against cleanup and every canonical key owner."""
+    prefix = f"tenants/{int(tenant_id)}/"
+    if not key.startswith(prefix) or len(key) <= len(prefix):
+        raise ValueError("inventory object key is outside its tenant namespace")
+    _lock_object_key(bucket=SubmissionStorageCleanupIntent.Bucket.STORAGE, key=key)
+    if SubmissionStorageCleanupIntent.objects.filter(
+        tenant_id=tenant_id,
+        bucket=SubmissionStorageCleanupIntent.Bucket.STORAGE,
+        object_key=key,
+    ).exists():
+        raise ValueError("inventory object key is already scheduled for cleanup")
+    if _other_storage_owner_references(
+        bucket=SubmissionStorageCleanupIntent.Bucket.STORAGE,
+        key=key,
+    ):
+        raise ValueError("inventory object key already has a canonical owner")
+
+
+def schedule_unreferenced_storage_object_cleanup(*, tenant_id: int, key: str) -> int | None:
+    """Durably retry compensation for a tenant-owned Storage upload."""
+    prefix = f"tenants/{int(tenant_id)}/"
+    if not key.startswith(prefix) or len(key) <= len(prefix):
+        raise ValueError("inventory object key is outside its tenant namespace")
+    with transaction.atomic():
+        _lock_object_key(bucket=SubmissionStorageCleanupIntent.Bucket.STORAGE, key=key)
+        if _other_storage_owner_references(
+            bucket=SubmissionStorageCleanupIntent.Bucket.STORAGE,
+            key=key,
+        ):
+            return None
+        intent, _ = SubmissionStorageCleanupIntent.objects.get_or_create(
+            tenant_id=tenant_id,
+            bucket=SubmissionStorageCleanupIntent.Bucket.STORAGE,
+            object_key=key,
+        )
+        if intent.status == SubmissionStorageCleanupIntent.Status.CLEANED:
+            intent.status = SubmissionStorageCleanupIntent.Status.PENDING
+            intent.cleaned_at = None
+            intent.last_error = ""
+            intent.save(update_fields=["status", "cleaned_at", "last_error", "updated_at"])
+        transaction.on_commit(
+            lambda intent_ids=(intent.id,): _process_submission_storage_cleanup_safely(
+                intent_ids
+            )
+        )
+        return intent.id
 
 
 def _finish_claimed_storage_cleanup(
@@ -474,7 +522,6 @@ def delete_submission_storage_for_permanent_delete(
         key = str(item.r2_key or "").strip()
         if not _student_inventory_owned_object_key(
             tenant_id=tenant_id,
-            student_ps=str(item.student_ps or "").strip(),
             key=key,
         ):
             raise ValueError("inventory file key is outside its canonical namespace")

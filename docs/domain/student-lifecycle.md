@@ -114,8 +114,11 @@ SSOT: `permanently_delete_students(tenant=..., student_ids=[...])`
     제출 object는 AI 버킷 대상이므로 같은 문자열 key여도 버킷을 혼동하지 않는다.
   - 학생 scope `InventoryFile`은 삭제 대상 학생의 현재 `ps_number`와 `_del_`에서
     복구한 원래 `ps_number` 중 다른 학생이 재사용하지 않은 값으로만 exact ID를
-    조회한다. 각 key가 `tenants/{tenant_id}/students/{student_ps}/...`에 속하는지
-    확인한 뒤 Storage cleanup intent를 먼저 기록하고, `StudentReportedScore`를 지운
+    조회한다. 잠긴 exact `InventoryFile` 행이 canonical owner이고 R2 key는 locator다.
+    따라서 학생번호 변경 뒤 metadata의 `student_ps`와 key의 과거 PS segment가 달라도
+    key가 `tenants/{tenant_id}/students/...`에 속하면 정리할 수 있다. 다른 tenant
+    prefix는 `409`로 중단하고, 같은 key를 다른 canonical owner가 참조하면 보존한다.
+    Storage cleanup intent를 먼저 기록하고, `StudentReportedScore`를 지운
     다음 intent가 생성된 InventoryFile metadata만 같은 transaction에서 삭제한다.
     commit 뒤 R2 삭제가 성공하면 intent는 `cleaned`, provider 실패면 재시도 가능한
     `failed`로 남는다. 같은 Storage key를 Matchup 등 다른 canonical owner가 참조하면
@@ -129,6 +132,13 @@ SSOT: `permanently_delete_students(tenant=..., student_ids=[...])`
 안전 규칙:
 
 - 삭제 대상 학생은 반드시 같은 tenant의 soft-deleted 학생이어야 한다.
+- PostgreSQL에서는 `academy:student-ps-namespace:v1:{tenant_id}:{ps_number}` transaction
+  advisory lock이 학생번호 namespace의 생성·변경·Inventory attach·영구삭제 ownership
+  판정을 직렬화한다. 기존 학생 identity 경로는 교착을 피하려고 항상
+  `User row -> Student row -> sorted old/new namespace` 순서이고, 영구삭제도
+  `Tenant -> User -> Student -> sorted current/original namespace` 순서다. 신규 Student
+  insert는 target namespace를 먼저 잠근다. upload attach는 Student row를 잠그지 않고
+  namespace 뒤 활성 owner를 다시 읽는다.
 - 같은 사용자가 다른 테넌트나 같은 테넌트의 비학생 역할로 남아 있으면 User와 해당 멤버십을 보존한다.
 - 보존되는 사용자가 과거 soft delete 때문에 비활성화되어 있고 활성 멤버십이 남아 있으면 재활성화한다.
 - Student, Enrollment, Submission reverse graph의 tenant-bearing 직접 FK와 소유
@@ -183,7 +193,11 @@ python manage.py purge_deleted_students
   - fee/section/video-comment dependency cleanup
   - reported score/support session/video entitlement cleanup
   - reported-score 증빙 InventoryFile의 Storage intent, post-commit R2 삭제, 빈 folder
-    zero-readback, shared owner 및 재사용 `ps_number` 보존
+    zero-readback, shared owner 및 재사용 `ps_number` 보존, PS 변경 전 historical key 정리
+  - PostgreSQL create/rename과 permanent delete 경쟁에서 namespace 판정 직렬화 및
+    신규 owner Inventory/R2 보존
+  - 학생 Inventory PUT/attach와 soft/permanent delete 양 순서에서 attach 실패 exact
+    보상 또는 committed metadata 기반 cleanup zero-readback
   - detached submission media R2/row cleanup과 공유 object 보존
   - AI/Storage bucket 분리, DB rollback 전 object 미삭제, 부분 실패 재시도
   - 오답노트 PDF의 동일한 post-commit cleanup과 scheduled retry

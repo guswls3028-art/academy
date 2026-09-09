@@ -11,6 +11,7 @@ from datetime import timedelta
 from django.apps import apps
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, close_old_connections, connection
+from django.db.models.query import QuerySet
 from django.test import TestCase, TransactionTestCase
 from django.utils import timezone
 from unittest.mock import patch
@@ -165,6 +166,55 @@ class TestPsNumberUsernameSyncOnSave(TestCase):
         ifile.refresh_from_db()
         self.assertEqual(folder.student_ps, "C77777")
         self.assertEqual(ifile.student_ps, "C77777")
+
+    def test_ps_number_change_locks_user_student_then_namespace(self):
+        """Existing identity paths keep one deadlock-safe row/namespace lock order."""
+        lock_order = []
+        original_select_for_update = QuerySet.select_for_update
+
+        def record_namespace_lock(*, tenant_id, ps_numbers):
+            lock_order.append(("namespace", tenant_id, tuple(ps_numbers)))
+            return tuple(sorted(ps_numbers))
+
+        def record_lock(queryset, *args, **kwargs):
+            lock_order.append(queryset.model)
+            return original_select_for_update(queryset, *args, **kwargs)
+
+        with patch(
+            "apps.domains.students.models.lock_student_ps_namespaces",
+            side_effect=record_namespace_lock,
+        ), patch.object(QuerySet, "select_for_update", record_lock):
+            self.student.ps_number = "LOCK002"
+            self.student.save(update_fields=["ps_number"])
+
+        self.assertEqual(lock_order[:2], [User, Student])
+        self.assertEqual(lock_order[2][0], "namespace")
+        self.assertEqual(set(lock_order[2][2]), {"A12345", "LOCK002"})
+
+    def test_new_student_locks_ps_namespace_before_insert(self):
+        user = User.objects.create_user(
+            username=user_internal_username(self.tenant, "CREATE01"),
+            password="test1234",
+            tenant=self.tenant,
+        )
+
+        with patch(
+            "apps.domains.students.models.lock_student_ps_namespaces",
+            return_value=("CREATE01",),
+        ) as lock_namespace:
+            created = Student.objects.create(
+                tenant=self.tenant,
+                user=user,
+                ps_number="CREATE01",
+                name="생성 잠금",
+                omr_code="88000001",
+            )
+
+        self.assertIsNotNone(created.pk)
+        lock_namespace.assert_called_once_with(
+            tenant_id=self.tenant.id,
+            ps_numbers=("CREATE01",),
+        )
 
     def test_del_prefix_ps_does_not_cascade_inventory(self):
         """_del_ 접두사 ps_number 변경은 인벤토리 업데이트 안 함 (삭제 시)."""

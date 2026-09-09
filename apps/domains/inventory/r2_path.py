@@ -17,7 +17,7 @@ def safe_filename(original: str) -> str:
     else:
         base = original
     stamp = datetime.now().strftime("%y%m%d")
-    hash_s = secrets.token_hex(2)
+    hash_s = secrets.token_hex(16)
     return f"{base}_{stamp}_{hash_s}{ext}"
 
 

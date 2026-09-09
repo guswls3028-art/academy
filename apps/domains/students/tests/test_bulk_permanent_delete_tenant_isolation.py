@@ -1,3 +1,5 @@
+import threading
+import unittest
 import uuid
 from datetime import timedelta
 from io import StringIO
@@ -14,8 +16,8 @@ from django.apps import apps as django_apps
 from django.contrib.auth import get_user_model
 from django.contrib.auth.hashers import make_password
 from django.core.management import call_command
-from django.db import transaction
-from django.test import TestCase
+from django.db import close_old_connections, connection, transaction
+from django.test import TestCase, TransactionTestCase
 from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
@@ -79,6 +81,203 @@ SubmissionStorageCleanupIntent = django_apps.get_model(
     "SubmissionStorageCleanupIntent",
 )
 STORAGE_OBJECT_REFERENCE_FIELDS = submission_storage_reference_fields()
+
+
+class TestPermanentDeleteInventoryNamespaceConcurrencyPostgres(TransactionTestCase):
+    @classmethod
+    def setUpClass(cls):
+        if connection.vendor != "postgresql":
+            raise unittest.SkipTest(
+                "PostgreSQL is required for permanent-delete namespace lock verification."
+            )
+        super().setUpClass()
+
+    @patch("apps.infrastructure.storage.r2.delete_object_r2_storage")
+    def test_ps_rename_waits_for_delete_tenant_lock_and_preserves_new_owner_storage(
+        self,
+        delete_object_r2_storage,
+    ):
+        tenant = Tenant.objects.create(
+            name="Permanent Delete Namespace Race",
+            code="permanent-delete-namespace-race",
+            is_active=True,
+        )
+        target_user = User.objects.create_user(
+            username="delete-namespace-target",
+            password="test1234",
+            tenant=tenant,
+        )
+        target = Student.objects.create(
+            tenant=tenant,
+            user=target_user,
+            ps_number="OWNED01",
+            name="삭제 대상",
+            omr_code="91000001",
+        )
+        TenantMembership.ensure_active(tenant=tenant, user=target_user, role="student")
+        target.deleted_at = timezone.now()
+        target.ps_number = f"_del_{target.id}_OWNED01"
+        target.save(update_fields=["deleted_at", "ps_number"])
+
+        owner_user = User.objects.create_user(
+            username="delete-namespace-new-owner",
+            password="test1234",
+            tenant=tenant,
+        )
+        owner = Student.objects.create(
+            tenant=tenant,
+            user=owner_user,
+            ps_number="OWNER02",
+            name="신규 소유자",
+            omr_code="91000002",
+        )
+        TenantMembership.ensure_active(tenant=tenant, user=owner_user, role="student")
+        folder = InventoryFolder.objects.create(
+            tenant=tenant,
+            scope="student",
+            student_ps=owner.ps_number,
+            name="신규 소유자 파일",
+        )
+        object_key = (
+            f"tenants/{tenant.id}/students/{owner.ps_number}/inventory/preserved.pdf"
+        )
+        inventory_file = InventoryFile.objects.create(
+            tenant=tenant,
+            scope="student",
+            student_ps=owner.ps_number,
+            folder=folder,
+            display_name="보존.pdf",
+            r2_key=object_key,
+            original_name="preserved.pdf",
+            size_bytes=47,
+            content_type="application/pdf",
+        )
+
+        rename_started = threading.Event()
+        rename_finished = threading.Event()
+        rename_errors = []
+
+        def rename_into_released_namespace():
+            close_old_connections()
+            try:
+                thread_owner = Student.objects.get(pk=owner.pk)
+                thread_owner.ps_number = "OWNED01"
+                rename_started.set()
+                thread_owner.save(update_fields=["ps_number"])
+                rename_finished.set()
+            except BaseException as exc:  # pragma: no cover - asserted below
+                rename_errors.append(exc)
+            finally:
+                close_old_connections()
+
+        rename_thread = threading.Thread(target=rename_into_released_namespace)
+        with transaction.atomic():
+            result = permanently_delete_students(
+                tenant=tenant,
+                student_ids=[target.id],
+            )
+            self.assertEqual(result.deleted_count, 1)
+            rename_thread.start()
+            self.assertTrue(rename_started.wait(timeout=5))
+            self.assertFalse(
+                rename_finished.wait(timeout=1),
+                "PS rename crossed the tenant namespace lock before delete committed.",
+            )
+
+        rename_thread.join(timeout=10)
+        self.assertFalse(rename_thread.is_alive())
+        self.assertEqual(rename_errors, [])
+        self.assertTrue(rename_finished.is_set())
+        self.assertFalse(Student.objects.filter(pk=target.pk).exists())
+        owner.refresh_from_db()
+        folder.refresh_from_db()
+        inventory_file.refresh_from_db()
+        self.assertEqual(owner.ps_number, "OWNED01")
+        self.assertEqual(folder.student_ps, "OWNED01")
+        self.assertEqual(inventory_file.student_ps, "OWNED01")
+        self.assertEqual(inventory_file.r2_key, object_key)
+        self.assertFalse(
+            SubmissionStorageCleanupIntent.objects.filter(object_key=object_key).exists()
+        )
+        delete_object_r2_storage.assert_not_called()
+
+    def test_new_student_claim_waits_for_delete_namespace_decision(self):
+        tenant = Tenant.objects.create(
+            name="Permanent Delete Create Race",
+            code="permanent-delete-create-race",
+            is_active=True,
+        )
+        target_user = User.objects.create_user(
+            username="delete-create-target",
+            password="test1234",
+            tenant=tenant,
+        )
+        target = Student.objects.create(
+            tenant=tenant,
+            user=target_user,
+            ps_number="CREATE-RACE",
+            name="삭제 대상",
+            omr_code="92000001",
+        )
+        TenantMembership.ensure_active(tenant=tenant, user=target_user, role="student")
+        target.ps_number = f"_del_{target.id}_CREATE-RACE"
+        target.deleted_at = timezone.now()
+        target.save(update_fields=["ps_number", "deleted_at"])
+
+        new_user = User.objects.create_user(
+            username="delete-create-new-owner",
+            password="test1234",
+            tenant=tenant,
+        )
+        create_started = threading.Event()
+        create_finished = threading.Event()
+        create_errors = []
+        created_ids = []
+
+        def create_replacement():
+            close_old_connections()
+            try:
+                create_started.set()
+                created = Student.objects.create(
+                    tenant=tenant,
+                    user_id=new_user.id,
+                    ps_number="CREATE-RACE",
+                    name="새 학생",
+                    omr_code="92000002",
+                )
+                created_ids.append(created.id)
+                create_finished.set()
+            except BaseException as exc:  # pragma: no cover - asserted below
+                create_errors.append(exc)
+            finally:
+                close_old_connections()
+
+        create_thread = threading.Thread(target=create_replacement)
+        with transaction.atomic():
+            result = permanently_delete_students(
+                tenant=tenant,
+                student_ids=[target.id],
+            )
+            self.assertEqual(result.deleted_count, 1)
+            create_thread.start()
+            self.assertTrue(create_started.wait(timeout=5))
+            self.assertFalse(
+                create_finished.wait(timeout=1),
+                "New Student claimed the original PS before delete committed.",
+            )
+
+        create_thread.join(timeout=10)
+        self.assertFalse(create_thread.is_alive())
+        self.assertEqual(create_errors, [])
+        self.assertTrue(create_finished.is_set())
+        self.assertEqual(len(created_ids), 1)
+        self.assertTrue(
+            Student.objects.filter(
+                pk=created_ids[0],
+                tenant=tenant,
+                ps_number="CREATE-RACE",
+            ).exists()
+        )
 
 
 class TestBulkPermanentDeleteTenantIsolation(TestCase):
@@ -985,6 +1184,48 @@ class TestBulkPermanentDeleteTenantIsolation(TestCase):
         self.assertTrue(InventoryFile.objects.filter(id=evidence.id).exists())
         self.assertFalse(SubmissionStorageCleanupIntent.objects.filter(object_key=evidence.r2_key).exists())
         delete_object_r2_storage.assert_not_called()
+
+    @patch("apps.infrastructure.storage.r2.delete_object_r2_storage")
+    def test_permanent_delete_cleans_inventory_key_from_previous_ps_namespace(
+        self,
+        delete_object_r2_storage,
+    ):
+        """PS rename keeps the historical R2 key, which remains exact tenant-owned storage."""
+        previous_ps = self.student_a.ps_number
+        key = (
+            f"tenants/{self.tenant_a.id}/students/"
+            f"{previous_ps}/inventory/historical.pdf"
+        )
+        folder = InventoryFolder.objects.create(
+            tenant=self.tenant_a,
+            scope="student",
+            student_ps=previous_ps,
+            name="이전 학생번호",
+        )
+        inventory_file = InventoryFile.objects.create(
+            tenant=self.tenant_a,
+            scope="student",
+            student_ps=previous_ps,
+            folder=folder,
+            display_name="이전경로.pdf",
+            r2_key=key,
+            original_name="historical.pdf",
+            size_bytes=47,
+            content_type="application/pdf",
+        )
+        self.student_a.ps_number = "A001-RENAMED"
+        self.student_a.save(update_fields=["ps_number"])
+        inventory_file.refresh_from_db()
+        self.assertEqual(inventory_file.student_ps, "A001-RENAMED")
+        self.assertEqual(inventory_file.r2_key, key)
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self._call(self.tenant_a, self.admin_a, [self.student_a.id])
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertFalse(InventoryFile.objects.filter(id=inventory_file.id).exists())
+        intent = SubmissionStorageCleanupIntent.objects.get(object_key=key)
+        self.assertEqual(intent.status, SubmissionStorageCleanupIntent.Status.CLEANED)
+        delete_object_r2_storage.assert_called_once_with(key=key)
 
     @patch("apps.infrastructure.storage.r2.delete_object_r2_storage")
     def test_permanent_delete_rejects_inventory_key_outside_exact_student_namespace(

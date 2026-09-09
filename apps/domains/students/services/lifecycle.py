@@ -18,11 +18,10 @@ from apps.support.students.lifecycle_dependencies import (
     delete_submission_storage_for_permanent_delete,
     ensure_parent_for_student,
     inventory_file_ids_with_cleanup_intents,
+    lock_student_ps_namespaces,
     restore_enrollments_after_student_restore,
     submission_storage_cleanup_status_counts,
 )
-
-
 PERMANENT_DELETE_STUDENT_RELATIONS = frozenset({
     ("students_studenttag", "student_id"),
     ("student_support_session", "student_id"),
@@ -481,6 +480,10 @@ def permanently_delete_students(
                 )
                 if ps_number
             )
+        )
+        lock_student_ps_namespaces(
+            tenant_id=tenant.id,
+            ps_numbers=selected_student_ps_numbers,
         )
         if active_wrong_note_pdf_exists_for_students(
             tenant=tenant,
