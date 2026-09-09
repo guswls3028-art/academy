@@ -363,6 +363,49 @@ class TestBulkPermanentDeleteTenantIsolation(TestCase):
         delete_object_r2_ai.assert_not_called()
 
     @patch("apps.infrastructure.storage.r2.delete_object_r2_ai")
+    def test_permanent_delete_recovers_stale_media_upload_after_lease(
+        self,
+        delete_object_r2_ai,
+    ):
+        """중단된 오래된 PUT은 durable cleanup으로 회수해 삭제를 끝낸다."""
+        frozen_now = timezone.now()
+        key = (
+            f"tenants/{self.tenant_a.id}/ai/submissions/"
+            f"{self.sub_a.id}/stale-upload.jpg"
+        )
+        media = SubmissionMedia.objects.create(
+            tenant=self.tenant_a,
+            submission=self.sub_a,
+            client_upload_id=uuid.uuid4(),
+            upload_batch_id=uuid.uuid4(),
+            fingerprint="8" * 64,
+            object_key=key,
+            original_filename="stale-upload.jpg",
+            media_kind=SubmissionMedia.Kind.IMAGE,
+            mime_type="image/jpeg",
+            size=512,
+            position=0,
+            status=SubmissionMedia.Status.UPLOADING,
+            upload_started_at=frozen_now - timedelta(hours=2),
+        )
+
+        with patch(
+            "apps.domains.submissions.services.lifecycle.timezone.now",
+            return_value=frozen_now,
+        ):
+            with self.captureOnCommitCallbacks(execute=True):
+                response = self._call(self.tenant_a, self.admin_a, [self.student_a.id])
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertFalse(SubmissionMedia.objects.filter(id=media.id).exists())
+        intent = SubmissionStorageCleanupIntent.objects.get(
+            bucket=SubmissionStorageCleanupIntent.Bucket.AI,
+            object_key=key,
+        )
+        self.assertEqual(intent.status, SubmissionStorageCleanupIntent.Status.CLEANED)
+        delete_object_r2_ai.assert_called_once_with(key=key)
+
+    @patch("apps.infrastructure.storage.r2.delete_object_r2_ai")
     def test_legacy_submission_namespace_is_cleaned_after_commit(
         self,
         delete_object_r2_ai,
@@ -377,6 +420,34 @@ class TestBulkPermanentDeleteTenantIsolation(TestCase):
             fingerprint="7" * 64,
             object_key=key,
             original_filename="legacy.jpg",
+            media_kind=SubmissionMedia.Kind.IMAGE,
+            mime_type="image/jpeg",
+            size=512,
+            position=0,
+            status=SubmissionMedia.Status.UPLOADED,
+        )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self._call(self.tenant_a, self.admin_a, [self.student_a.id])
+
+        self.assertEqual(response.status_code, 200, response.data)
+        delete_object_r2_ai.assert_called_once_with(key=key)
+
+    @patch("apps.infrastructure.storage.r2.delete_object_r2_ai")
+    def test_historical_global_submission_key_is_cleaned_by_exact_owner(
+        self,
+        delete_object_r2_ai,
+    ):
+        """구 serializer의 submissions/{id}/ key도 exact DB owner일 때만 정리한다."""
+        key = f"submissions/{self.sub_a.id}/legacy-page.jpg"
+        SubmissionMedia.objects.create(
+            tenant=self.tenant_a,
+            submission=self.sub_a,
+            client_upload_id=uuid.uuid4(),
+            upload_batch_id=uuid.uuid4(),
+            fingerprint="9" * 64,
+            object_key=key,
+            original_filename="legacy-page.jpg",
             media_kind=SubmissionMedia.Kind.IMAGE,
             mime_type="image/jpeg",
             size=512,
@@ -631,29 +702,59 @@ class TestBulkPermanentDeleteTenantIsolation(TestCase):
         delete_object_r2_storage.assert_called_once_with(key=key)
 
     @patch("apps.infrastructure.storage.r2.delete_object_r2_ai")
-    def test_multi_role_single_student_detached_submission_is_deleted(
+    def test_multi_role_submission_for_other_student_is_preserved(
         self,
         delete_object_r2_ai,
     ):
-        """Submission.user는 유일 Student owner이고 Parent 역할은 계정만 보존한다."""
+        """같은 actor user만으로 다른 학생 제출을 대상 학생 소유로 추측하지 않는다."""
         Parent.objects.create(
             tenant=self.tenant_a,
             user=self.user_x,
             name="공유 학부모",
             phone="01056565656",
         )
-        Enrollment.objects.filter(id=self.enrollment_a.id).delete()
-        media = SubmissionMedia.objects.create(
+        other_user = User.objects.create_user(
+            username="same-tenant-other-student",
+            password="test1234",
             tenant=self.tenant_a,
-            submission=self.sub_a,
+            phone="01056560001",
+            name="다른 학생",
+        )
+        other_student = Student.objects.create(
+            tenant=self.tenant_a,
+            user=other_user,
+            ps_number="A002",
+            name="다른 학생",
+            phone="01056560001",
+            parent_phone="01056560002",
+            omr_code="56560001",
+        )
+        other_enrollment = Enrollment.objects.create(
+            tenant=self.tenant_a,
+            student=other_student,
+            lecture=self.lecture_a,
+            status="ACTIVE",
+        )
+        unrelated = Submission.objects.create(
+            tenant=self.tenant_a,
+            user=self.user_x,
+            enrollment=other_enrollment,
+            target_type=Submission.TargetType.EXAM,
+            target_id=77,
+            source=Submission.Source.OMR_SCAN,
+            status=Submission.Status.DONE,
+        )
+        unrelated_media = SubmissionMedia.objects.create(
+            tenant=self.tenant_a,
+            submission=unrelated,
             client_upload_id=uuid.uuid4(),
             upload_batch_id=uuid.uuid4(),
             fingerprint="e" * 64,
             object_key=(
                 f"tenants/{self.tenant_a.id}/ai/submissions/"
-                f"{self.sub_a.id}/ambiguous.jpg"
+                f"{unrelated.id}/other-student.jpg"
             ),
-            original_filename="ambiguous.jpg",
+            original_filename="other-student.jpg",
             media_kind=SubmissionMedia.Kind.IMAGE,
             mime_type="image/jpeg",
             size=512,
@@ -667,14 +768,12 @@ class TestBulkPermanentDeleteTenantIsolation(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.assertFalse(Student.objects.filter(id=self.student_a.id).exists())
         self.assertFalse(Submission.objects.filter(id=self.sub_a.id).exists())
-        self.assertFalse(SubmissionMedia.objects.filter(id=media.id).exists())
+        self.assertTrue(Submission.objects.filter(id=unrelated.id).exists())
+        self.assertTrue(SubmissionMedia.objects.filter(id=unrelated_media.id).exists())
+        self.assertTrue(Student.objects.filter(id=other_student.id).exists())
         self.assertTrue(Parent.objects.filter(tenant=self.tenant_a, user=self.user_x).exists())
         self.assertTrue(User.objects.filter(id=self.user_x.id).exists())
-        delete_object_r2_ai.assert_called_once_with(key=media.object_key)
-
-    def test_submission_user_has_unambiguous_single_student_owner(self):
-        """detached submission 소유권은 Student.user OneToOne 스키마가 보장한다."""
-        self.assertTrue(Student._meta.get_field("user").unique)
+        delete_object_r2_ai.assert_not_called()
 
     def test_permanent_delete_removes_reported_scores_and_preserves_other_tenant(self):
         """선택 학생의 자발 성적만 정리하고 다른 테넌트 학생 성적은 보존한다."""

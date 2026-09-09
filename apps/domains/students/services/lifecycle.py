@@ -777,11 +777,11 @@ def _permanently_delete_selected_students(
                 [*enrollment_id_params, tenant.id],
             )
             submission_ids.extend(row[0] for row in cursor.fetchall())
-        if user_ids:
+        if membership_removable_user_ids:
             cursor.execute(
                 f"SELECT id FROM submissions_submission "
-                f"WHERE user_id IN {user_id_clause} AND tenant_id = %s",
-                [*user_id_params, tenant.id],
+                f"WHERE user_id IN {removable_user_clause} AND tenant_id = %s",
+                [*removable_user_params, tenant.id],
             )
             submission_ids.extend(row[0] for row in cursor.fetchall())
         submission_ids = list(dict.fromkeys(submission_ids))

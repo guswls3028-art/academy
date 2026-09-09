@@ -28,7 +28,11 @@ from apps.domains.lectures.test_support import (
 )
 from apps.domains.parents.test_support import create_parent_account_fixture
 from apps.domains.students.test_support import create_student_fixture
-from apps.domains.submissions.models import Submission, SubmissionMedia
+from apps.domains.submissions.models import (
+    Submission,
+    SubmissionMedia,
+    SubmissionStorageCleanupIntent,
+)
 from apps.domains.submissions.services import dispatcher
 from apps.domains.submissions.views.homework_submission_media_view import (
     HomeworkSubmissionMediaCollectionView,
@@ -534,6 +538,38 @@ class HomeworkSubmissionMediaTests(TestCase):
         self.assertEqual(media.object_key, object_key)
         self.assertEqual(media.status, SubmissionMedia.Status.UPLOADED)
         self.assertEqual(upload_fileobj_to_r2.call_count, 2)
+
+    @patch("apps.infrastructure.storage.r2.delete_object_r2_ai")
+    @patch("apps.domains.submissions.services.homework_media.upload_fileobj_to_r2")
+    def test_stale_cleanup_wins_during_put_and_late_object_is_reaped(
+        self,
+        upload_fileobj_to_r2,
+        delete_object_r2_ai,
+    ):
+        """lease 회수 뒤 끝난 PUT은 row를 되살리지 않고 durable cleanup으로 정리한다."""
+        captured = {}
+
+        def simulate_cleanup_during_put(*, key, **_kwargs):
+            media = SubmissionMedia.objects.get(object_key=key)
+            captured["key"] = key
+            SubmissionStorageCleanupIntent.objects.create(
+                tenant=self.tenant,
+                bucket=SubmissionStorageCleanupIntent.Bucket.AI,
+                object_key=key,
+                status=SubmissionStorageCleanupIntent.Status.CLEANED,
+            )
+            media.delete()
+
+        upload_fileobj_to_r2.side_effect = simulate_cleanup_during_put
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self._post(file=_jpeg("late-put.jpg", body=b"late-put"))
+
+        self.assertEqual(response.status_code, 503, response.data)
+        self.assertFalse(SubmissionMedia.objects.filter(object_key=captured["key"]).exists())
+        intent = SubmissionStorageCleanupIntent.objects.get(object_key=captured["key"])
+        self.assertEqual(intent.status, SubmissionStorageCleanupIntent.Status.CLEANED)
+        self.assertEqual(intent.attempt_count, 1)
+        delete_object_r2_ai.assert_called_once_with(key=captured["key"])
 
     @patch("apps.domains.submissions.services.homework_media.upload_fileobj_to_r2")
     def test_accepts_extension_when_signature_or_browser_mime_is_unreliable(

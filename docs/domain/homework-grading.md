@@ -211,13 +211,17 @@ X를 나중에 다시 맞힌 뒤에도 남기려면 O·복습으로 바꾼다. �
   이전 worker는 token이 달라진 상태를 완료/실패로 덮어쓸 수 없다.
 - 현재 writer는 신규 제출 key를
   `tenants/{tenant}/ai/submissions/{submission_id}/{uuid}.{ext}`로 생성한다. 기존
-  tenant-scoped `tenants/{tenant}/ai/submissions/...` key도 삭제 대상으로 인정하되,
+  tenant-scoped `tenants/{tenant}/ai/submissions/...`와 구 serializer의 exact-owner
+  `submissions/{submission_id}/...` key도 삭제 대상으로 인정하되,
   다른 submission/media 및 등록된 AI 버킷 owner가 같은 key를 참조하면 object를
-  보존한다. caller-supplied/reused key writer와 cleanup은 같은 bucket+key advisory
-  lock을 사용하며 cleanup intent가 생긴 key의 재연결은 거부한다. 업로드 중인
-  `SubmissionMedia`가 있으면 PUT 완료/실패가 확정되기 전까지 영구삭제를 `409`로
-  중단한다. 제출 업로드 뒤 DB 저장/입학 처리가 롤백되고 즉시 AI 버킷 보상 삭제도
-  실패하면 같은 durable intent로 넘겨 orphan object를 재시도한다.
+  보존한다. 신규 caller-supplied key는 canonical tenant AI namespace만 허용하고
+  `submissions/...` legacy key의 새 연결은 거부한다. reused key writer와 cleanup은
+  같은 bucket+key advisory lock을 사용하며 cleanup intent가 생긴 key의 재연결도
+  거부한다. `SubmissionMedia.UPLOADING`은 1시간 lease 동안 영구삭제를 `409`로
+  중단하고, lease 만료 후에는 durable cleanup으로 회수한다. 늦게 끝난 PUT은 finalize
+  시 row/intent 소유권을 확인해 row를 되살리지 않고 다시 정리한다. 제출 업로드 뒤
+  DB 저장/입학 처리가 rollback 또는 commit 경계에서 실패하면 generic/admin/single
+  OMR caller도 uploaded key를 같은 durable intent로 넘겨 orphan object를 재시도한다.
 - 기존 `homework_image`·`homework_video` 단건 `Submission.file_key`는 그대로
   보존한다. 새 목록에서는 `legacy-{submission_id}`인 파일 하나로 투영하고, soft
   remove는 기존 행의 `meta`에 감사 시각을 기록한다. 구 단건 제출 생성 API도

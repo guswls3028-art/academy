@@ -128,6 +128,8 @@ class SubmissionCreateSerializer(serializers.ModelSerializer):
                     content_type=getattr(upload_file, "content_type", None),
                 )
                 uploaded = True
+                self.uploaded_object_key = key
+                self.uploaded_tenant_id = int(submission.tenant_id)
 
                 submission.file_key = key
                 submission.file_type = (
@@ -140,6 +142,7 @@ class SubmissionCreateSerializer(serializers.ModelSerializer):
                 if uploaded:
                     try:
                         delete_object_r2_ai(key=key)
+                        self.uploaded_object_key = None
                     except Exception:
                         logger.exception(
                             "Failed to compensate uploaded submission object",

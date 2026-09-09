@@ -18,6 +18,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import IntegrityError
 from django.test import TestCase
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIRequestFactory, force_authenticate
@@ -329,6 +330,45 @@ class TestC1bStudentCreateAllowed(_SecurityFixtureMixin, TestCase):
                          f"학생 본인 enrollment 제출이 권한에서 막힘: "
                          f"{resp.status_code} {getattr(resp, 'data', '')}")
 
+    @patch(
+        "apps.domains.submissions.views.submission_view.schedule_unreferenced_ai_object_cleanup"
+    )
+    @patch(
+        "apps.domains.submissions.views.submission_view.SubmissionCreateSerializer.save",
+        autospec=True,
+    )
+    def test_generic_create_commit_failure_schedules_uploaded_object_cleanup(
+        self,
+        serializer_save,
+        schedule_cleanup,
+    ):
+        key = f"tenants/{self.tenant.id}/ai/submissions/999/generic.jpg"
+
+        def fail_after_upload(serializer, **_kwargs):
+            serializer.uploaded_object_key = key
+            serializer.uploaded_tenant_id = self.tenant.id
+            raise IntegrityError("commit failed after upload")
+
+        serializer_save.side_effect = fail_after_upload
+        view = SubmissionViewSet.as_view({"post": "create"})
+        response = self._call(
+            lambda: view,
+            "post",
+            "/api/v1/submissions/submissions/",
+            user=self.student_user,
+            data={
+                "target_type": "exam",
+                "target_id": self.exam.id,
+                "source": "online",
+                "enrollment_id": self.enrollment.id,
+                "payload": {"answers": []},
+            },
+        )
+
+        self.assertEqual(response.status_code, 503, response.data)
+        self.assertEqual(response.data["code"], "submission_storage_cleanup_pending")
+        schedule_cleanup.assert_called_once_with(tenant_id=self.tenant.id, key=key)
+
     def test_student_create_peer_enrollment_blocked(self):
         """학생 → POST /submissions/submissions/ (타인 enrollment) → 403 (perform_create 소유권 검증)."""
         view = SubmissionViewSet.as_view({"post": "create"})
@@ -559,6 +599,51 @@ class TestC1bStudentCreateAllowed(_SecurityFixtureMixin, TestCase):
         self.assertEqual(resp.status_code, 403, resp.data)
         upload_fileobj_to_r2.assert_not_called()
         dispatch_submission.assert_not_called()
+
+    @patch(
+        "apps.domains.submissions.views.submission_view.schedule_unreferenced_ai_object_cleanup"
+    )
+    @patch(
+        "apps.domains.submissions.views.submission_view.SubmissionCreateSerializer.save",
+        autospec=True,
+    )
+    def test_admin_omr_commit_failure_schedules_uploaded_object_cleanup(
+        self,
+        serializer_save,
+        schedule_cleanup,
+    ):
+        Sheet.objects.create(exam=self.exam, name="MAIN", total_questions=1)
+        key = f"tenants/{self.tenant.id}/ai/submissions/998/admin.jpg"
+
+        def fail_after_upload(serializer, **_kwargs):
+            serializer.uploaded_object_key = key
+            serializer.uploaded_tenant_id = self.tenant.id
+            raise IntegrityError("commit failed after upload")
+
+        serializer_save.side_effect = fail_after_upload
+        view = SubmissionViewSet.as_view({"post": "admin_omr_upload"})
+        upload = SimpleUploadedFile(
+            "admin.png",
+            b"\x89PNG\r\n\x1a\nadmin",
+            content_type="image/png",
+        )
+        request = self.factory.post(
+            "/api/v1/submissions/submissions/admin/omr-upload/",
+            data={
+                "target_id": self.exam.id,
+                "enrollment_id": self.enrollment.id,
+                "file": upload,
+            },
+            format="multipart",
+        )
+        force_authenticate(request, user=self.admin)
+        request.tenant = self.tenant
+
+        response = view(request)
+
+        self.assertEqual(response.status_code, 503, response.data)
+        self.assertEqual(response.data["code"], "submission_storage_cleanup_pending")
+        schedule_cleanup.assert_called_once_with(tenant_id=self.tenant.id, key=key)
 
     @patch("apps.domains.submissions.views.submission_view.dispatch_submission")
     @patch("apps.domains.submissions.serializers.submission.upload_fileobj_to_r2")
@@ -873,6 +958,46 @@ class TestC3ExamOMRSubmitGuard(_SecurityFixtureMixin, TestCase):
         self.assertTrue(submission.file_key)
         upload_fileobj_to_r2.assert_called_once()
         dispatch_submission.assert_called_once_with(submission)
+
+    @patch(
+        "apps.domains.submissions.views.exam_omr_submit_view.schedule_unreferenced_ai_object_cleanup"
+    )
+    @patch(
+        "apps.domains.submissions.views.exam_omr_submit_view.SubmissionCreateSerializer.save",
+        autospec=True,
+    )
+    def test_single_omr_commit_failure_schedules_uploaded_object_cleanup(
+        self,
+        serializer_save,
+        schedule_cleanup,
+    ):
+        Sheet.objects.create(exam=self.exam, name="MAIN", total_questions=1)
+        key = f"tenants/{self.tenant.id}/ai/submissions/997/single.jpg"
+
+        def fail_after_upload(serializer, **_kwargs):
+            serializer.uploaded_object_key = key
+            serializer.uploaded_tenant_id = self.tenant.id
+            raise IntegrityError("commit failed after upload")
+
+        serializer_save.side_effect = fail_after_upload
+        view = ExamOMRSubmitView.as_view()
+        upload = SimpleUploadedFile(
+            "single.png",
+            b"\x89PNG\r\n\x1a\nsingle",
+            content_type="image/png",
+        )
+        request = self.factory.post(
+            f"/api/v1/submissions/submissions/exams/{self.exam.id}/omr/",
+            data={"enrollment_id": self.enrollment.id, "file": upload},
+            format="multipart",
+        )
+        force_authenticate(request, user=self.teacher)
+        request.tenant = self.tenant
+
+        response = view(request, exam_id=self.exam.id)
+
+        self.assertEqual(response.status_code, 503, response.data)
+        schedule_cleanup.assert_called_once_with(tenant_id=self.tenant.id, key=key)
 
     @patch("apps.domains.submissions.views.exam_omr_submit_view.dispatch_submission")
     def test_teacher_omr_submit_same_tenant_non_candidate_enrollment_blocked(self, dispatch_submission):

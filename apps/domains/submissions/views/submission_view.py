@@ -358,10 +358,20 @@ class SubmissionViewSet(ModelViewSet):
         try:
             with transaction.atomic():
                 submission = ser.save(user=request.user, tenant=tenant)
-        except SubmissionUploadCleanupRequired as exc:
+        except Exception as error:
+            if isinstance(error, SubmissionUploadCleanupRequired):
+                cleanup_error = error
+            else:
+                uploaded_key = getattr(ser, "uploaded_object_key", None)
+                if not uploaded_key:
+                    raise
+                cleanup_error = SubmissionUploadCleanupRequired(
+                    tenant_id=getattr(ser, "uploaded_tenant_id", tenant.id),
+                    key=uploaded_key,
+                )
             schedule_unreferenced_ai_object_cleanup(
-                tenant_id=exc.tenant_id,
-                key=exc.key,
+                tenant_id=cleanup_error.tenant_id,
+                key=cleanup_error.key,
             )
             return Response(
                 {
@@ -422,8 +432,19 @@ class SubmissionViewSet(ModelViewSet):
                 ensure_exam_enrollment=True,
             ):
                 raise PermissionDenied("해당 시험/과제에 등록되지 않은 수강 정보입니다.")
-        with transaction.atomic():
-            submission = serializer.save(user=self.request.user, tenant=tenant)
+        try:
+            with transaction.atomic():
+                submission = serializer.save(user=self.request.user, tenant=tenant)
+        except Exception as error:
+            if isinstance(error, SubmissionUploadCleanupRequired):
+                raise
+            uploaded_key = getattr(serializer, "uploaded_object_key", None)
+            if not uploaded_key:
+                raise
+            raise SubmissionUploadCleanupRequired(
+                tenant_id=getattr(serializer, "uploaded_tenant_id", tenant.id),
+                key=uploaded_key,
+            ) from error
         dispatch_submission(submission)
 
     @staticmethod

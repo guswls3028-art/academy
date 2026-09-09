@@ -103,9 +103,10 @@ SSOT: `permanently_delete_students(tenant=..., student_ids=[...])`
   - `StudentReportedScore`, 학생 지원 세션, 비활성 수강·직접 영상 권한을
     학생 행 삭제 전에 같은 tenant 범위로 정리한다.
   - 수강이 먼저 삭제되어 `Submission.enrollment=NULL`인 제출도 삭제 대상
-    학생의 `Submission.user`가 가리키는 tenant-scoped submission이면 포함한다.
-    `Student.user`는 OneToOne이므로 Parent/Staff 역할이 함께 있어도 submission의
-    학생 owner는 유일하며, 계정과 다른 역할은 보존하고 학생 제출만 삭제한다.
+    학생 전용 계정의 tenant-scoped submission이면 포함한다. 같은 tenant의
+    Parent/Staff/비학생 역할도 가진 계정은 `Submission.user`만으로 학생 owner를
+    추측하지 않고 삭제 대상 enrollment로 직접 귀속된 submission만 포함한다.
+    따라서 해당 계정이 다른 학생을 위해 만든 제출과 media는 보존한다.
     제출 도메인이 `SubmissionMedia`/legacy `file_key` cleanup intent와 child 행을
     먼저 기록한 뒤 부모 `Submission`을 삭제한다. OMR batch 이력은 보존하고 해당
     submission 참조만 `NULL`로 바꾼다.
@@ -133,6 +134,10 @@ SSOT: `permanently_delete_students(tenant=..., student_ids=[...])`
 - 영구삭제 API 성공 응답은 `deleted`와
   `storage_cleanup: {pending, failed}`를 반환한다. 저장 namespace 불일치 또는 진행 중
   media upload는 `409 storage_cleanup_scope_mismatch`로 전체 mutation을 중단한다.
+- `SubmissionMedia.UPLOADING`은 1시간 upload lease 동안 같은 `409`로 보호한다.
+  lease가 지난 row는 중단된 업로드로 회수해 durable AI cleanup intent에 넣고 DB
+  삭제를 진행한다. 늦게 끝난 PUT의 finalize는 row와 cleanup intent를 다시 잠가
+  확인하며, 소유권을 잃었으면 row를 되살리지 않고 key를 동일 intent로 재정리한다.
 - 현재 cross-domain 정리는 guarded raw SQL graph다. 장기 목표는 각 도메인 cleanup hook/event로 분해하는 것이다.
 
 ## 5. Retention 운영

@@ -62,6 +62,8 @@ STUCK_RECOVERABLE_STATUSES: tuple[str, ...] = (
     S.GRADING,
 )
 
+SUBMISSION_MEDIA_UPLOAD_LEASE = timedelta(hours=1)
+
 
 @dataclass(frozen=True)
 class SubmissionStorageCleanupResult:
@@ -103,9 +105,19 @@ STORAGE_OBJECT_REFERENCE_FIELDS = frozenset({
 })
 
 
-def _submission_owned_object_key(*, tenant_id: int, key: str) -> bool:
+def _submission_owned_object_key(
+    *,
+    tenant_id: int,
+    key: str,
+    submission_id: int | None = None,
+) -> bool:
     prefix = f"tenants/{tenant_id}/ai/submissions/"
-    return key.startswith(prefix) and len(key) > len(prefix)
+    if key.startswith(prefix) and len(key) > len(prefix):
+        return True
+    if submission_id is None:
+        return False
+    historical_prefix = f"submissions/{int(submission_id)}/"
+    return key.startswith(historical_prefix) and len(key) > len(historical_prefix)
 
 
 def _wrong_note_owned_object_key(*, tenant_id: int, key: str) -> bool:
@@ -375,10 +387,15 @@ def delete_submission_storage_for_permanent_delete(
     media = list(
         SubmissionMedia.objects.select_for_update()
         .filter(tenant_id=tenant_id, submission_id__in=exact_submission_ids)
-        .only("id", "object_key", "status")
+        .only("id", "object_key", "status", "upload_started_at")
         .order_by("id")
     )
-    if any(item.status == SubmissionMedia.Status.UPLOADING for item in media):
+    upload_lease_cutoff = timezone.now() - SUBMISSION_MEDIA_UPLOAD_LEASE
+    if any(
+        item.status == SubmissionMedia.Status.UPLOADING
+        and item.upload_started_at > upload_lease_cutoff
+        for item in media
+    ):
         raise ValueError("submission media upload is still in progress")
     media_ids = tuple(item.id for item in media)
     candidate_keys_by_bucket: dict[str, set[str]] = {
@@ -392,6 +409,7 @@ def delete_submission_storage_for_permanent_delete(
         if not _submission_owned_object_key(
             tenant_id=tenant_id,
             key=key,
+            submission_id=submission.id,
         ):
             raise ValueError("submission file key is outside its canonical namespace")
         candidate_keys_by_bucket[SubmissionStorageCleanupIntent.Bucket.AI].add(key)
@@ -402,6 +420,7 @@ def delete_submission_storage_for_permanent_delete(
         if not _submission_owned_object_key(
             tenant_id=tenant_id,
             key=key,
+            submission_id=item.submission_id,
         ):
             raise ValueError("submission media key is outside its canonical namespace")
         candidate_keys_by_bucket[SubmissionStorageCleanupIntent.Bucket.AI].add(key)
