@@ -1,7 +1,3 @@
-# PATH: apps/domains/results/views/admin_representative_attempt_view.py
-# (동작 변경 없음: 이미 스냅샷 재빌드 + progress 트리거 포함)
-# 아래 파일은 PHASE 7 종료 기준 문서만 보강하고 로직은 그대로 둔다.
-
 from __future__ import annotations
 
 from django.db import transaction
@@ -27,7 +23,7 @@ from apps.support.results.admin_exam_dependencies import (
     dispatch_progress_pipeline,
     get_enrollment_for_tenant,
     get_latest_session_submission_id,
-    get_regular_active_exam_for_tenant,
+    lock_regular_active_exam_for_tenant,
 )
 
 
@@ -50,38 +46,35 @@ class AdminRepresentativeAttemptView(APIView):
     @staticmethod
     def _rebuild_result_snapshot_from_attempt(
         *,
-        exam_id: int,
-        enrollment_id: int,
+        result: Result,
         attempt_id: int,
+        current_max_score: float,
     ) -> Result:
-        result = (
-            Result.objects
-            .select_for_update()
-            .filter(target_type="exam", target_id=exam_id, enrollment_id=enrollment_id)
+        attempt_facts = ResultFact.objects.filter(
+            target_type="exam",
+            target_id=result.target_id,
+            enrollment_id=result.enrollment_id,
+            attempt_id=attempt_id,
+        )
+        total_override = (
+            attempt_facts.filter(question_id=0, source="manual_total")
+            .order_by("-id")
             .first()
         )
-        if not result:
-            raise NotFound({"detail": "result snapshot not found", "code": "NOT_FOUND"})
 
         latest_fact_ids = (
-            ResultFact.objects
-            .filter(
-                target_type="exam",
-                target_id=exam_id,
-                enrollment_id=enrollment_id,
-                attempt_id=attempt_id,
-            )
+            attempt_facts.filter(question_id__gt=0)
             .values("question_id")
             .annotate(last_id=Max("id"))
             .values("last_id")
         )
 
         facts = list(ResultFact.objects.filter(id__in=latest_fact_ids))
-        if not facts:
+        if not facts and total_override is None:
             raise ValidationError({"detail": "no facts for this attempt; cannot rebuild snapshot", "code": "INVALID"})
 
-        total = 0.0
-        max_total = 0.0
+        ResultItem.objects.select_for_update().filter(result=result).delete()
+        question_total = 0.0
 
         for f in facts:
             score = float(f.score or 0.0)
@@ -103,12 +96,13 @@ class AdminRepresentativeAttemptView(APIView):
                     "source": str(f.source or ""),
                 },
             )
-            total += score
-            max_total += max_score
+            question_total += score
 
         result.attempt_id = int(attempt_id)
-        result.total_score = float(total)
-        result.max_score = float(max_total)
+        result.total_score = float(
+            total_override.score if total_override is not None else question_total
+        )
+        result.max_score = float(current_max_score)
         result.submitted_at = timezone.now()
         result.save(update_fields=["attempt_id", "total_score", "max_score", "submitted_at", "updated_at"])
 
@@ -119,7 +113,7 @@ class AdminRepresentativeAttemptView(APIView):
         exam_id = int(exam_id)
 
         # ✅ tenant isolation: verify exam belongs to tenant
-        exam = get_regular_active_exam_for_tenant(
+        exam = lock_regular_active_exam_for_tenant(
             exam_id=exam_id,
             tenant=request.tenant,
         )
@@ -155,6 +149,20 @@ class AdminRepresentativeAttemptView(APIView):
                 status=drf_status.HTTP_409_CONFLICT,
             )
 
+        result = (
+            Result.objects.select_for_update()
+            .filter(
+                target_type="exam",
+                target_id=exam_id,
+                enrollment_id=enrollment_id,
+            )
+            .first()
+        )
+        if not result:
+            raise NotFound(
+                {"detail": "result snapshot not found", "code": "NOT_FOUND"}
+            )
+
         attempts_qs = (
             ExamAttempt.objects
             .select_for_update()
@@ -180,9 +188,9 @@ class AdminRepresentativeAttemptView(APIView):
             target.save(update_fields=["is_representative"])
 
         self._rebuild_result_snapshot_from_attempt(
-            exam_id=exam_id,
-            enrollment_id=enrollment_id,
+            result=result,
             attempt_id=attempt_id,
+            current_max_score=float(exam.max_score or 100.0),
         )
 
         submission_id = get_latest_session_submission_id(

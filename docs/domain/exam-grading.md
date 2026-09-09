@@ -402,6 +402,14 @@ PATCH가 호환성을 위해 클라이언트의 `max_score`를 받더라도 유�
 점수가 각각 유지된다. 이후 재시험이 대표가 되어도 정정 전의 오래된 1차 값이
 되살아나지 않는다.
 
+대표 시도를 바꾸면 선택 attempt의 같은 시험·수강 범위 Fact만으로 `ResultItem`을
+교체한다. `question_id=0`, `source=manual_total`인 최신 합산 점수 Fact는 문항이 아니라
+canonical 총점 override이므로 `Result.total_score`에만 사용하고, 양수 문항 ID의 최신
+Fact만 `ResultItem`으로 만든다. 이전 대표에만 있던 문항 snapshot은 제거하며,
+`Result.max_score`는 Fact 당시 분모가 아니라 현재 `Exam.max_score`를 사용한다. 점수
+저장과 대표 전환은 모두 같은 transaction 잠금 순서인 tenant `Exam` → 해당 `Result`
+→ 해당 `ExamAttempt` 행을 지켜 서로 교차 실행돼도 역순 잠금 교착을 만들지 않는다.
+
 ### 성적 탭 오답 확인 요약
 
 `GET /results/admin/sessions/{session_id}/scores/`의 시험별
