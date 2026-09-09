@@ -185,6 +185,11 @@ class AdminExamSubjectiveScoreView(APIView):
                 "manual_subjective": True,
                 "subjective_score": new_subjective,
                 "subjective_max_score": subjective_max,
+                "result_snapshot": {
+                    "total_score": new_total,
+                    "objective_score": objective,
+                    "max_score": max_score,
+                },
                 "edited_at": timezone.now().isoformat(),
             },
         )

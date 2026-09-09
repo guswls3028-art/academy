@@ -188,6 +188,11 @@ class AdminExamObjectiveScoreView(APIView):
                 "manual_objective": True,
                 "objective_score": new_objective,
                 "objective_max_score": objective_max,
+                "result_snapshot": {
+                    "total_score": new_total,
+                    "objective_score": new_objective,
+                    "max_score": max_score,
+                },
                 "edited_at": timezone.now().isoformat(),
             },
         )

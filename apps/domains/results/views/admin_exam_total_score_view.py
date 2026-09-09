@@ -228,6 +228,7 @@ class AdminExamTotalScoreView(APIView):
                 ) or 0
             )
         )
+        sync_result = not explicit_first_attempt or bool(attempt.is_representative)
 
         ResultFact.objects.create(
             target_type="exam",
@@ -243,6 +244,17 @@ class AdminExamTotalScoreView(APIView):
             source="manual_total",
             meta={
                 "manual_total": True,
+                **(
+                    {
+                        "result_snapshot": {
+                            "total_score": new_score,
+                            "objective_score": float(result.objective_score or 0.0),
+                            "max_score": max_score,
+                        }
+                    }
+                    if sync_result
+                    else {}
+                ),
                 "edited_at": timezone.now().isoformat(),
             },
         )
@@ -250,7 +262,6 @@ class AdminExamTotalScoreView(APIView):
         # -------------------------------------------------
         # 5️⃣ Result 업데이트 (합산 입력 시 total만 변경, objective_score 유지)
         # -------------------------------------------------
-        sync_result = not explicit_first_attempt or bool(attempt.is_representative)
         if sync_result:
             result.total_score = float(new_score)
             result.max_score = float(max_score)

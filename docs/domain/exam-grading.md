@@ -407,13 +407,20 @@ PATCH가 호환성을 위해 클라이언트의 `max_score`를 받더라도 유�
 점수가 각각 유지된다. 이후 재시험이 대표가 되어도 정정 전의 오래된 1차 값이
 되살아나지 않는다.
 
-대표 시도를 바꾸면 선택 attempt의 같은 시험·수강 범위 Fact만으로 `ResultItem`을
-교체한다. `question_id=0`, `source=manual_total`인 최신 합산 점수 Fact는 문항이 아니라
-canonical 총점 override이므로 `Result.total_score`에만 사용하고, 양수 문항 ID의 최신
-Fact만 `ResultItem`으로 만든다. 이전 대표에만 있던 문항 snapshot은 제거하며,
-`Result.max_score`는 Fact 당시 분모가 아니라 현재 `Exam.max_score`를 사용한다. 점수
-저장과 대표 전환은 모두 같은 transaction 잠금 순서인 tenant `Exam` → 해당 `Result`
-→ 해당 `ExamAttempt` 행을 지켜 서로 교차 실행돼도 역순 잠금 교착을 만들지 않는다.
+대표 시도를 바꾸면 선택 attempt의 같은 시험·수강 범위 Fact를 ID 순서로 재생해
+snapshot을 복원한다. `question_id=0`인 `manual_objective`, `manual_subjective`,
+`manual_total`은 문항이 아니라 각각 객관식 합계, 서술형 합계, 전체 합계 이벤트다.
+새 합계 이벤트는 당시 `total_score`·`objective_score`·현재 만점 snapshot도 meta에
+보존하며, 과거 snapshot 없는 이벤트는 같은 순서의 점수 상태를 축약해 복원한다.
+Fact가 없는 과거 오프라인 attempt는 `meta.total_score`, `final_result_snapshot`,
+`initial_snapshot` 순서의 보존 상태로 복원하고 기존 제출 시각도 유지한다.
+양수 문항 ID의 최신 Fact만 `ResultItem`으로 만들고 이전 대표에만 있던 문항은
+제거한다. 계산된 총점과 객관식 점수가 유한수가 아니거나 현재 `Exam.max_score` 범위를
+벗어나면 대표 플래그와 `Result`/`ResultItem`을 바꾸기 전에 요청 전체를 거부한다.
+정상 복원 시 `Result.max_score`는 Fact 당시 분모가 아니라 현재 시험 만점을 사용한다.
+점수 저장과 대표 전환은 모두 tenant `Exam` → 해당 `Result` → 해당 `ExamAttempt` 순서로
+잠근다. 실제 submission이 없는 오프라인·수동 attempt도 저장을 409로 끝내지 않고
+commit 뒤 exam 기반 progress 재계산을 실행한다.
 
 ### 성적 탭 오답 확인 요약
 
