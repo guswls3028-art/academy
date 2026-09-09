@@ -1,7 +1,7 @@
 # 학생 생명주기 SSOT
 
 **상태:** Active
-**최종 점검:** 2026-08-27
+**최종 점검:** 2026-09-10
 **코드 기준:** `apps/domains/students/services/lifecycle.py`, `apps/domains/enrollment/services/lifecycle.py`, `apps/domains/students/views/student_views.py`
 
 ## 1. 상태
@@ -112,6 +112,17 @@ SSOT: `permanently_delete_students(tenant=..., student_ids=[...])`
     submission 참조만 `NULL`로 바꾼다.
   - `WrongNotePDF.file_path`도 같은 durable intent에 Storage 버킷 대상으로 기록한다.
     제출 object는 AI 버킷 대상이므로 같은 문자열 key여도 버킷을 혼동하지 않는다.
+  - 학생 scope `InventoryFile`은 삭제 대상 학생의 현재 `ps_number`와 `_del_`에서
+    복구한 원래 `ps_number` 중 다른 학생이 재사용하지 않은 값으로만 exact ID를
+    조회한다. 각 key가 `tenants/{tenant_id}/students/{student_ps}/...`에 속하는지
+    확인한 뒤 Storage cleanup intent를 먼저 기록하고, `StudentReportedScore`를 지운
+    다음 intent가 생성된 InventoryFile metadata만 같은 transaction에서 삭제한다.
+    commit 뒤 R2 삭제가 성공하면 intent는 `cleaned`, provider 실패면 재시도 가능한
+    `failed`로 남는다. 같은 Storage key를 Matchup 등 다른 canonical owner가 참조하면
+    intent와 metadata를 모두 만들거나 지우지 않고 보존한다.
+  - 위 exact student scope에서 파일 삭제 뒤 비어 있는 `InventoryFolder`는 leaf부터
+    정리한다. 다른 owner 때문에 파일이 보존된 folder tree와 다른 학생이 재사용한
+    `ps_number`의 파일·폴더는 삭제하지 않는다.
 - 삭제 대상 테넌트의 student 멤버십과 pending password reset
 - 다른 활성 멤버십·Parent·Staff·staff-role 멤버십이 없는 orphan `User`
 
@@ -171,6 +182,8 @@ python manage.py purge_deleted_students
   - same-tenant parent/staff/teacher 계정 보존
   - fee/section/video-comment dependency cleanup
   - reported score/support session/video entitlement cleanup
+  - reported-score 증빙 InventoryFile의 Storage intent, post-commit R2 삭제, 빈 folder
+    zero-readback, shared owner 및 재사용 `ps_number` 보존
   - detached submission media R2/row cleanup과 공유 object 보존
   - AI/Storage bucket 분리, DB rollback 전 object 미삭제, 부분 실패 재시도
   - 오답노트 PDF의 동일한 post-commit cleanup과 scheduled retry

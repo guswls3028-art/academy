@@ -125,6 +125,16 @@ def _wrong_note_owned_object_key(*, tenant_id: int, key: str) -> bool:
     return key.startswith(prefix) and len(key) > len(prefix)
 
 
+def _student_inventory_owned_object_key(
+    *,
+    tenant_id: int,
+    student_ps: str,
+    key: str,
+) -> bool:
+    prefix = f"tenants/{tenant_id}/students/{student_ps}/"
+    return bool(student_ps) and key.startswith(prefix) and len(key) > len(prefix)
+
+
 def _lock_object_key(*, bucket: str, key: str) -> None:
     if not transaction.get_connection().in_atomic_block:
         raise RuntimeError("object-key lock requires an atomic transaction")
@@ -187,6 +197,7 @@ def _other_storage_owner_references(
     excluded_submission_ids: tuple[int, ...] = tuple(),
     excluded_submission_media_ids: tuple[int, ...] = tuple(),
     excluded_wrong_note_pdf_ids: tuple[int, ...] = tuple(),
+    excluded_inventory_file_ids: tuple[int, ...] = tuple(),
 ) -> bool:
     for field_bucket, app_label, model_name, field_name in STORAGE_OBJECT_REFERENCE_FIELDS:
         if field_bucket != bucket:
@@ -200,6 +211,8 @@ def _other_storage_owner_references(
             references = references.exclude(id__in=excluded_submission_media_ids)
         elif owner == ("results", "WrongNotePDF"):
             references = references.exclude(id__in=excluded_wrong_note_pdf_ids)
+        elif owner == ("inventory", "InventoryFile"):
+            references = references.exclude(id__in=excluded_inventory_file_ids)
         if references.exists():
             return True
     return False
@@ -357,6 +370,7 @@ def delete_submission_storage_for_permanent_delete(
     tenant_id: int,
     submission_ids: Iterable[int],
     wrong_note_pdf_ids: Iterable[int] = tuple(),
+    inventory_file_ids: Iterable[int] = tuple(),
 ) -> tuple[int, ...]:
     """Persist cleanup intents and delete media rows before raw parent deletion.
 
@@ -367,7 +381,10 @@ def delete_submission_storage_for_permanent_delete(
     wrong_note_ids = tuple(
         dict.fromkeys(int(value) for value in wrong_note_pdf_ids if int(value) > 0)
     )
-    if not ids and not wrong_note_ids:
+    inventory_ids = tuple(
+        dict.fromkeys(int(value) for value in inventory_file_ids if int(value) > 0)
+    )
+    if not ids and not wrong_note_ids and not inventory_ids:
         return tuple()
 
     submissions = list(
@@ -442,6 +459,27 @@ def delete_submission_storage_for_permanent_delete(
         if not _wrong_note_owned_object_key(tenant_id=tenant_id, key=key):
             raise ValueError("wrong-note PDF key is outside its canonical namespace")
         candidate_keys_by_bucket[SubmissionStorageCleanupIntent.Bucket.STORAGE].add(key)
+
+    inventory_file_model = django_apps.get_model("inventory", "InventoryFile")
+    inventory_files = list(
+        inventory_file_model._base_manager.select_for_update()
+        .filter(id__in=inventory_ids, tenant_id=tenant_id, scope="student")
+        .only("id", "student_ps", "r2_key")
+        .order_by("id")
+    )
+    exact_inventory_ids = tuple(item.id for item in inventory_files)
+    if len(exact_inventory_ids) != len(inventory_ids):
+        raise ValueError("inventory file tenant does not match permanent-delete scope")
+    for item in inventory_files:
+        key = str(item.r2_key or "").strip()
+        if not _student_inventory_owned_object_key(
+            tenant_id=tenant_id,
+            student_ps=str(item.student_ps or "").strip(),
+            key=key,
+        ):
+            raise ValueError("inventory file key is outside its canonical namespace")
+        candidate_keys_by_bucket[SubmissionStorageCleanupIntent.Bucket.STORAGE].add(key)
+
     intent_ids: list[int] = []
     for bucket, candidate_keys in candidate_keys_by_bucket.items():
         if not candidate_keys:
@@ -457,6 +495,7 @@ def delete_submission_storage_for_permanent_delete(
                 excluded_submission_ids=exact_submission_ids,
                 excluded_submission_media_ids=media_ids,
                 excluded_wrong_note_pdf_ids=exact_wrong_note_ids,
+                excluded_inventory_file_ids=exact_inventory_ids,
             )
         }
 
@@ -484,6 +523,34 @@ def delete_submission_storage_for_permanent_delete(
             id__in=media_ids,
         ).delete()
     return tuple(intent_ids)
+
+
+def inventory_file_ids_with_cleanup_intents(
+    *,
+    tenant_id: int,
+    inventory_file_ids: Iterable[int],
+    intent_ids: Iterable[int],
+) -> tuple[int, ...]:
+    """Return exact InventoryFile rows whose Storage cleanup intent was persisted."""
+    ids = tuple(dict.fromkeys(int(value) for value in inventory_file_ids if int(value) > 0))
+    cleanup_ids = tuple(dict.fromkeys(int(value) for value in intent_ids if int(value) > 0))
+    if not ids or not cleanup_ids:
+        return tuple()
+    object_keys = SubmissionStorageCleanupIntent.objects.filter(
+        id__in=cleanup_ids,
+        tenant_id=tenant_id,
+        bucket=SubmissionStorageCleanupIntent.Bucket.STORAGE,
+    ).values_list("object_key", flat=True)
+    inventory_file_model = django_apps.get_model("inventory", "InventoryFile")
+    return tuple(
+        inventory_file_model._base_manager.filter(
+            id__in=ids,
+            tenant_id=tenant_id,
+            r2_key__in=object_keys,
+        )
+        .order_by("id")
+        .values_list("id", flat=True)
+    )
 
 
 def mark_dispatched(

@@ -956,6 +956,11 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
             command._remaining_for_code.return_value = {"tenants": 0, "users": 0}
             self.assertEqual(namespace["run"]()["status"], "YMATH_REALUSE_SCENARIO_ABSENT")
             self.assertEqual(destroy.call_count, 1, "absent cleanup must not call destroy")
+            self.assertEqual(command._non_database_residue.call_count, 2)
+            self.assertEqual(
+                command._non_database_residue.call_args_list[-1].kwargs,
+                {"tenant_id": None, "tenant_code": tenant},
+            )
 
     def test_managed_ssm_parameter_allow_is_explicitly_bounded(self):
         source = (ROOT / "scripts/v1/resources/iam.ps1").read_text(encoding="utf-8-sig")

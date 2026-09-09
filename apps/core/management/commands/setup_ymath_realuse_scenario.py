@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -77,6 +79,10 @@ SCENARIO_ACTIVITY_AUDIT_ACTIONS = (
     "student_activity.target_open",
 )
 SCENARIO_PROVENANCE_ACTION = "development.qa.scenario"
+FRONTEND_QA_OWNERSHIP_SCHEMA = "frontend-development-qa/v1"
+FRONTEND_QA_TENANT_RE = re.compile(
+    r"^qa-ymath-realuse-fe-[0-9]+-[0-9]+-[a-f0-9]{12}$"
+)
 SYNTHETIC_LONG_VIDEO_DURATION_SECONDS = 900
 SYNTHETIC_LONG_VIDEO_HLS_PATH = "qa-fixtures/video-long/master.m3u8"
 SYNTHETIC_LONG_VIDEO_TITLE = "장시간 재생 갱신 실사용 검증"
@@ -957,9 +963,84 @@ class Command(BaseCommand):
             )
 
     @staticmethod
+    def _frontend_qa_ownership_record(tenant_code: str) -> dict | None:
+        records = list(
+            OpsAuditLog.objects.filter(
+                action="development.qa.setup",
+                result="success",
+                payload__tenant_code=tenant_code,
+            ).values_list("payload", flat=True)[:2]
+        )
+        if not records:
+            return None
+        if len(records) != 1 or not isinstance(records[0], dict):
+            raise CommandError("Missing or ambiguous frontend QA ownership seal.")
+        record = records[0]
+        expected_keys = {
+            "schema",
+            "tenant_code",
+            "tenant_id",
+            "owner_sha256",
+        }
+        tenant_id = record.get("tenant_id")
+        owner_sha256 = record.get("owner_sha256")
+        if (
+            set(record) != expected_keys
+            or record.get("schema") != FRONTEND_QA_OWNERSHIP_SCHEMA
+            or record.get("tenant_code") != tenant_code
+            or isinstance(tenant_id, bool)
+            or not isinstance(tenant_id, int)
+            or tenant_id <= 0
+            or not isinstance(owner_sha256, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", owner_sha256)
+        ):
+            raise CommandError("Invalid frontend QA ownership seal.")
+        return record
+
+    @staticmethod
+    def _assert_frontend_qa_cleanup_capability(
+        *,
+        tenant_code: str,
+        tenant_id: int,
+        record: dict | None,
+    ) -> None:
+        capability = str(os.environ.get("QA_CAPABILITY") or "")
+        if (
+            not FRONTEND_QA_TENANT_RE.fullmatch(tenant_code)
+            or record is None
+            or record["tenant_id"] != tenant_id
+            or not re.fullmatch(r"[a-f0-9]{64}", capability)
+        ):
+            raise CommandError("Invalid frontend QA cleanup ownership capability.")
+        expected = hashlib.sha256(
+            f"{tenant_code}:{tenant_id}:{capability}".encode()
+        ).hexdigest()
+        if not hmac.compare_digest(record["owner_sha256"], expected):
+            raise CommandError("Frontend QA cleanup ownership capability mismatch.")
+
+    @staticmethod
     def _non_database_residue(*, tenant_id: int | None, tenant_code: str) -> dict[str, int]:
         import boto3
         from botocore.config import Config
+
+        ownership_record = None
+        if tenant_id is None:
+            ownership_record = Command._frontend_qa_ownership_record(tenant_code)
+            if ownership_record is not None:
+                tenant_id = ownership_record["tenant_id"]
+
+        cleanup_requested = os.environ.get("QA_ACTION") == "Cleanup"
+        if cleanup_requested and tenant_id is not None:
+            ownership_record = (
+                ownership_record
+                or Command._frontend_qa_ownership_record(tenant_code)
+            )
+            Command._assert_frontend_qa_cleanup_capability(
+                tenant_code=tenant_code,
+                tenant_id=tenant_id,
+                record=ownership_record,
+            )
+            assert_isolated_runtime()
 
         client = boto3.client(
             "s3",
@@ -973,7 +1054,8 @@ class Command(BaseCommand):
                 retries={"total_max_attempts": 2},
             ),
         )
-        r2_objects = 0
+        r2_keys = []
+        prefixes = ()
         if tenant_id is not None:
             prefixes = (
                 f"tenants/{tenant_id}/",
@@ -993,10 +1075,25 @@ class Command(BaseCommand):
                     if continuation_token:
                         request["ContinuationToken"] = continuation_token
                     page = client.list_objects_v2(**request)
-                    r2_objects += len(page.get("Contents") or [])
+                    page_keys = [item["Key"] for item in page.get("Contents") or []]
+                    if any(not key.startswith(prefix) for key in page_keys):
+                        raise CommandError("R2 returned an object outside the exact QA prefix.")
+                    r2_keys.extend(page_keys)
                     if not page.get("IsTruncated"):
                         break
                     continuation_token = page["NextContinuationToken"]
+
+        if cleanup_requested:
+            for key in r2_keys:
+                client.delete_object(Bucket=settings.R2_STORAGE_BUCKET, Key=key)
+            r2_keys = []
+            for prefix in prefixes:
+                page = client.list_objects_v2(
+                    Bucket=settings.R2_STORAGE_BUCKET,
+                    Prefix=prefix,
+                    MaxKeys=1,
+                )
+                r2_keys.extend(item["Key"] for item in page.get("Contents") or [])
 
         marker = f"QA_TENANT={tenant_code}".encode()
         processes = 0
@@ -1017,7 +1114,11 @@ class Command(BaseCommand):
                 columns = line.split()
                 if len(columns) >= 4 and columns[1].rsplit(":", 1)[-1] == expected_port and columns[3] == "0A":
                     listeners += 1
-        return {"listeners": listeners, "processes": processes, "r2_objects": r2_objects}
+        return {
+            "listeners": listeners,
+            "processes": processes,
+            "r2_objects": len(r2_keys),
+        }
 
     @staticmethod
     def _validate_login_uat_contract(*, tenant, teacher, students, parents, staffs) -> None:

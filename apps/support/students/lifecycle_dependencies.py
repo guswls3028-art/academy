@@ -100,6 +100,7 @@ def delete_submission_storage_for_permanent_delete(
     tenant_id: int,
     submission_ids: list[int],
     wrong_note_pdf_ids: list[int] | tuple[int, ...] = tuple(),
+    inventory_file_ids: list[int] | tuple[int, ...] = tuple(),
 ) -> tuple[int, ...]:
     from apps.domains.submissions.services.lifecycle import (
         delete_submission_storage_for_permanent_delete as _delete_submission_storage,
@@ -109,6 +110,7 @@ def delete_submission_storage_for_permanent_delete(
         tenant_id=tenant_id,
         submission_ids=submission_ids,
         wrong_note_pdf_ids=wrong_note_pdf_ids,
+        inventory_file_ids=inventory_file_ids,
     )
 
 
@@ -132,6 +134,23 @@ def submission_storage_cleanup_status_counts(
         elif status != SubmissionStorageCleanupIntent.Status.CLEANED:
             pending += 1
     return pending, failed
+
+
+def inventory_file_ids_with_cleanup_intents(
+    *,
+    tenant_id: int,
+    inventory_file_ids: list[int] | tuple[int, ...],
+    intent_ids: tuple[int, ...],
+) -> tuple[int, ...]:
+    from apps.domains.submissions.services.lifecycle import (
+        inventory_file_ids_with_cleanup_intents as _owned_inventory_file_ids,
+    )
+
+    return _owned_inventory_file_ids(
+        tenant_id=tenant_id,
+        inventory_file_ids=inventory_file_ids,
+        intent_ids=intent_ids,
+    )
 
 
 def process_pending_submission_storage_cleanup(

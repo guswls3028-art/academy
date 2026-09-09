@@ -17,6 +17,7 @@ from apps.support.students.lifecycle_dependencies import (
     deactivate_enrollments_for_student,
     delete_submission_storage_for_permanent_delete,
     ensure_parent_for_student,
+    inventory_file_ids_with_cleanup_intents,
     restore_enrollments_after_student_restore,
     submission_storage_cleanup_status_counts,
 )
@@ -470,6 +471,17 @@ def permanently_delete_students(
 
         selected_student_ids = tuple(s.id for s in to_delete)
         selected_user_ids = tuple(s.user_id for s in to_delete if s.user_id)
+        selected_student_ps_numbers = tuple(
+            dict.fromkeys(
+                ps_number
+                for student in to_delete
+                for ps_number in (
+                    str(student.ps_number or "").strip(),
+                    str(_deleted_ps_original(student.ps_number) or "").strip(),
+                )
+                if ps_number
+            )
+        )
         if active_wrong_note_pdf_exists_for_students(
             tenant=tenant,
             student_ids=selected_student_ids,
@@ -483,6 +495,7 @@ def permanently_delete_students(
             tenant=tenant,
             student_ids=selected_student_ids,
             user_ids=selected_user_ids,
+            student_ps_numbers=selected_student_ps_numbers,
         )
 
     cleanup_pending, cleanup_failed = submission_storage_cleanup_status_counts(
@@ -573,6 +586,7 @@ def _permanently_delete_selected_students(
     tenant,
     student_ids: tuple[int, ...],
     user_ids: tuple[int, ...],
+    student_ps_numbers: tuple[str, ...],
 ) -> tuple[int, ...]:
     _SAFE_TABLES = frozenset({
         "results_result_item", "results_result", "results_exam_attempt",
@@ -796,19 +810,52 @@ def _permanently_delete_selected_students(
             )
             wrong_note_pdf_ids = [row[0] for row in cursor.fetchall()]
 
+        inventory_file_ids: list[int] = []
+        owned_ps_numbers: tuple[str, ...] = tuple()
+        if student_ps_numbers:
+            reused_ps_numbers = set(
+                Student.objects.filter(
+                    tenant=tenant,
+                    ps_number__in=student_ps_numbers,
+                )
+                .exclude(id__in=student_ids)
+                .values_list("ps_number", flat=True)
+            )
+            owned_ps_numbers = tuple(
+                ps_number
+                for ps_number in student_ps_numbers
+                if ps_number not in reused_ps_numbers
+            )
+            if owned_ps_numbers:
+                inventory_file_model = apps.get_model("inventory", "InventoryFile")
+                inventory_file_ids = list(
+                    inventory_file_model._base_manager.filter(
+                        tenant=tenant,
+                        scope="student",
+                        student_ps__in=owned_ps_numbers,
+                    ).values_list("id", flat=True)
+                )
+
         cleanup_intent_ids: tuple[int, ...] = tuple()
+        deletable_inventory_file_ids: tuple[int, ...] = tuple()
         if submission_ids:
             submission_id_clause, submission_id_params = _in_clause(submission_ids)
             _assert_submission_relation_tenants(
                 submission_id_clause,
                 submission_id_params,
             )
-        if submission_ids or wrong_note_pdf_ids:
+        if submission_ids or wrong_note_pdf_ids or inventory_file_ids:
             try:
                 cleanup_intent_ids = delete_submission_storage_for_permanent_delete(
                     tenant_id=tenant.id,
                     submission_ids=submission_ids,
                     wrong_note_pdf_ids=wrong_note_pdf_ids,
+                    inventory_file_ids=inventory_file_ids,
+                )
+                deletable_inventory_file_ids = inventory_file_ids_with_cleanup_intents(
+                    tenant_id=tenant.id,
+                    inventory_file_ids=inventory_file_ids,
+                    intent_ids=cleanup_intent_ids,
                 )
             except ValueError as exc:
                 raise StudentLifecycleError(
@@ -870,6 +917,33 @@ def _permanently_delete_selected_students(
                     f"WHERE student_id IN {student_id_clause} AND tenant_id = %s",
                     [*student_id_params, tenant.id],
                 )
+
+        if deletable_inventory_file_ids:
+            inventory_file_model = apps.get_model("inventory", "InventoryFile")
+            inventory_file_model._base_manager.filter(
+                tenant=tenant,
+                id__in=deletable_inventory_file_ids,
+            ).delete()
+        if owned_ps_numbers:
+            inventory_folder_model = apps.get_model("inventory", "InventoryFolder")
+            while True:
+                empty_leaf_ids = tuple(
+                    inventory_folder_model._base_manager.filter(
+                        tenant=tenant,
+                        scope="student",
+                        student_ps__in=owned_ps_numbers,
+                        children__isnull=True,
+                        files__isnull=True,
+                    )
+                    .order_by("id")
+                    .values_list("id", flat=True)[:1000]
+                )
+                if not empty_leaf_ids:
+                    break
+                inventory_folder_model._base_manager.filter(
+                    tenant=tenant,
+                    id__in=empty_leaf_ids,
+                ).delete()
 
         if enrollment_ids:
             enrollment_id_clause, enrollment_id_params = _in_clause(enrollment_ids)

@@ -71,6 +71,8 @@ Exam = django_apps.get_model("exams", "Exam")
 ExamResult = django_apps.get_model("results", "ExamResult")
 SubmissionAnswer = django_apps.get_model("submissions", "SubmissionAnswer")
 InventoryFile = django_apps.get_model("inventory", "InventoryFile")
+InventoryFolder = django_apps.get_model("inventory", "InventoryFolder")
+MatchupDocument = django_apps.get_model("matchup", "MatchupDocument")
 WrongNotePDF = django_apps.get_model("results", "WrongNotePDF")
 SubmissionStorageCleanupIntent = django_apps.get_model(
     "submissions",
@@ -822,6 +824,193 @@ class TestBulkPermanentDeleteTenantIsolation(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.assertFalse(StudentReportedScore.objects.filter(id=target_score.id).exists())
         self.assertTrue(StudentReportedScore.objects.filter(id=foreign_score.id).exists())
+
+    @patch("apps.infrastructure.storage.r2.delete_object_r2_storage")
+    def test_permanent_delete_cleans_student_inventory_evidence_after_commit(
+        self,
+        delete_object_r2_storage,
+    ):
+        """학생 성적 증빙 InventoryFile도 durable intent와 함께 완전히 정리한다."""
+        key = (
+            f"tenants/{self.tenant_a.id}/students/"
+            f"{self.student_a.ps_number}/inventory/score.pdf"
+        )
+        folder = InventoryFolder.objects.create(
+            tenant=self.tenant_a,
+            scope="student",
+            student_ps=self.student_a.ps_number,
+            name="성적표",
+        )
+        evidence = InventoryFile.objects.create(
+            tenant=self.tenant_a,
+            scope="student",
+            student_ps=self.student_a.ps_number,
+            folder=folder,
+            display_name="성적표.pdf",
+            r2_key=key,
+            original_name="score.pdf",
+            size_bytes=47,
+            content_type="application/pdf",
+        )
+        score = StudentReportedScore.objects.create(
+            tenant=self.tenant_a,
+            student=self.student_a,
+            evidence_file=evidence,
+            source=StudentReportedScore.Source.SCHOOL_EXAM,
+            academic_year=2026,
+            semester=1,
+            exam_round=StudentReportedScore.ExamRound.FIRST,
+            subject="영어",
+            score=95,
+            max_score=100,
+            status=StudentReportedScore.Status.VERIFIED,
+        )
+        preserved = InventoryFile.objects.create(
+            tenant=self.tenant_b,
+            scope="student",
+            student_ps="B001",
+            display_name="보존.pdf",
+            r2_key=f"tenants/{self.tenant_b.id}/students/B001/inventory/keep.pdf",
+            original_name="keep.pdf",
+            size_bytes=47,
+            content_type="application/pdf",
+        )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self._call(self.tenant_a, self.admin_a, [self.student_a.id])
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["storage_cleanup"], {"pending": 1, "failed": 0})
+        self.assertFalse(StudentReportedScore.objects.filter(id=score.id).exists())
+        self.assertFalse(InventoryFile.objects.filter(id=evidence.id).exists())
+        self.assertFalse(InventoryFolder.objects.filter(id=folder.id).exists())
+        self.assertTrue(InventoryFile.objects.filter(id=preserved.id).exists())
+        intent = SubmissionStorageCleanupIntent.objects.get(
+            bucket=SubmissionStorageCleanupIntent.Bucket.STORAGE,
+            object_key=key,
+        )
+        self.assertEqual(intent.status, SubmissionStorageCleanupIntent.Status.CLEANED)
+        delete_object_r2_storage.assert_called_once_with(key=key)
+
+    @patch("apps.infrastructure.storage.r2.delete_object_r2_storage")
+    def test_permanent_delete_preserves_inventory_with_shared_storage_owner(
+        self,
+        delete_object_r2_storage,
+    ):
+        """다른 canonical owner가 같은 key를 보유하면 row와 R2 모두 보존한다."""
+        key = (
+            f"tenants/{self.tenant_a.id}/students/"
+            f"{self.student_a.ps_number}/inventory/shared.pdf"
+        )
+        folder = InventoryFolder.objects.create(
+            tenant=self.tenant_a,
+            scope="student",
+            student_ps=self.student_a.ps_number,
+            name="공유",
+        )
+        evidence = InventoryFile.objects.create(
+            tenant=self.tenant_a,
+            scope="student",
+            student_ps=self.student_a.ps_number,
+            folder=folder,
+            display_name="공유.pdf",
+            r2_key=key,
+            original_name="shared.pdf",
+            size_bytes=47,
+            content_type="application/pdf",
+        )
+        shared_owner = MatchupDocument.objects.create(
+            tenant=self.tenant_a,
+            inventory_file=evidence,
+            title="공유 분석 자료",
+            r2_key=key,
+            original_name="shared.pdf",
+            size_bytes=47,
+            content_type="application/pdf",
+        )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self._call(self.tenant_a, self.admin_a, [self.student_a.id])
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertTrue(InventoryFile.objects.filter(id=evidence.id).exists())
+        self.assertTrue(InventoryFolder.objects.filter(id=folder.id).exists())
+        self.assertTrue(MatchupDocument.objects.filter(id=shared_owner.id).exists())
+        self.assertFalse(SubmissionStorageCleanupIntent.objects.filter(object_key=key).exists())
+        delete_object_r2_storage.assert_not_called()
+
+    @patch("apps.infrastructure.storage.r2.delete_object_r2_storage")
+    def test_permanent_delete_preserves_inventory_when_original_ps_is_reused(
+        self,
+        delete_object_r2_storage,
+    ):
+        """복구 가능한 원래 아이디를 새 학생이 쓰면 Inventory 소유자를 추측하지 않는다."""
+        original_ps = self.student_a.ps_number
+        self.student_a.ps_number = f"_del_{self.student_a.id}_{original_ps}"
+        self.student_a.save(update_fields=["ps_number"])
+        replacement_user = User.objects.create_user(
+            username="replacement-student",
+            password="test1234",
+            tenant=self.tenant_a,
+        )
+        replacement = Student.objects.create(
+            tenant=self.tenant_a,
+            user=replacement_user,
+            ps_number=original_ps,
+            name="대체학생",
+            phone="01077770001",
+            parent_phone="01077770002",
+            omr_code="77770001",
+        )
+        evidence = InventoryFile.objects.create(
+            tenant=self.tenant_a,
+            scope="student",
+            student_ps=original_ps,
+            display_name="소유자모호.pdf",
+            r2_key=(
+                f"tenants/{self.tenant_a.id}/students/"
+                f"{original_ps}/inventory/ambiguous.pdf"
+            ),
+            original_name="ambiguous.pdf",
+            size_bytes=47,
+            content_type="application/pdf",
+        )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self._call(self.tenant_a, self.admin_a, [self.student_a.id])
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertFalse(Student.objects.filter(id=self.student_a.id).exists())
+        self.assertTrue(Student.objects.filter(id=replacement.id).exists())
+        self.assertTrue(InventoryFile.objects.filter(id=evidence.id).exists())
+        self.assertFalse(SubmissionStorageCleanupIntent.objects.filter(object_key=evidence.r2_key).exists())
+        delete_object_r2_storage.assert_not_called()
+
+    @patch("apps.infrastructure.storage.r2.delete_object_r2_storage")
+    def test_permanent_delete_rejects_inventory_key_outside_exact_student_namespace(
+        self,
+        delete_object_r2_storage,
+    ):
+        """DB metadata가 오염돼도 다른 tenant/prefix 객체를 추측 삭제하지 않는다."""
+        evidence = InventoryFile.objects.create(
+            tenant=self.tenant_a,
+            scope="student",
+            student_ps=self.student_a.ps_number,
+            display_name="잘못된경로.pdf",
+            r2_key=f"tenants/{self.tenant_b.id}/students/B001/inventory/foreign.pdf",
+            original_name="foreign.pdf",
+            size_bytes=47,
+            content_type="application/pdf",
+        )
+
+        response = self._call(self.tenant_a, self.admin_a, [self.student_a.id])
+
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertEqual(response.data["code"], "storage_cleanup_scope_mismatch")
+        self.assertTrue(Student.objects.filter(id=self.student_a.id).exists())
+        self.assertTrue(InventoryFile.objects.filter(id=evidence.id).exists())
+        self.assertFalse(SubmissionStorageCleanupIntent.objects.exists())
+        delete_object_r2_storage.assert_not_called()
 
     def test_permanent_delete_covers_support_and_video_student_relations(self):
         """지원 세션과 영상 예외 권한이 남아도 선택 학생을 완전 정리한다."""
