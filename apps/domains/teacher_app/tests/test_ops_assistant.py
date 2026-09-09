@@ -247,85 +247,6 @@ class TeacherOpsAssistantApiTests(TestCase):
         self.assertEqual(lock_order[:2], [User, Student])
 
 
-class TeacherOpsStudentLockConcurrencyPostgresTests(TransactionTestCase):
-    @classmethod
-    def setUpClass(cls):
-        if connection.vendor != "postgresql":
-            raise unittest.SkipTest("PostgreSQL is required for assistant/student lock ordering.")
-        super().setUpClass()
-
-    def test_assistant_student_lock_and_delete_complete_without_deadlock(self):
-        tenant = Tenant.objects.create(name="Teacher Ops Lock", code="teacher-ops-lock")
-        created = create_student_account(
-            tenant=tenant,
-            password="safe-pass",
-            student_data={
-                "name": "잠금 학생",
-                "phone": "01033334444",
-                "parent_phone": "01011112222",
-                "ps_number": "OPS-LOCK",
-                "omr_code": "33334444",
-                "uses_identifier": False,
-                "school_type": "HIGH",
-                "grade": 1,
-            },
-        )
-        assistant_locked = threading.Event()
-        release_assistant = threading.Event()
-        delete_started = threading.Event()
-        delete_finished = threading.Event()
-        errors = []
-
-        def assistant_worker():
-            close_old_connections()
-            try:
-                with transaction.atomic():
-                    _lock_existing_students_for_execution(
-                        tenant=tenant,
-                        student_ids={created.student.id},
-                    )
-                    assistant_locked.set()
-                    if not release_assistant.wait(timeout=10):
-                        raise TimeoutError("assistant lock release timed out")
-            except BaseException as exc:  # pragma: no cover - asserted below
-                errors.append(exc)
-            finally:
-                close_old_connections()
-
-        def delete_worker():
-            from apps.support.students.lifecycle import (
-                permanently_delete_students,
-                soft_delete_student,
-            )
-
-            close_old_connections()
-            try:
-                delete_started.set()
-                student = Student.objects.get(pk=created.student.id)
-                soft_delete_student(student, tenant=tenant)
-                permanently_delete_students(tenant=tenant, student_ids=[student.id])
-                delete_finished.set()
-            except BaseException as exc:  # pragma: no cover - asserted below
-                errors.append(exc)
-            finally:
-                close_old_connections()
-
-        assistant_thread = threading.Thread(target=assistant_worker)
-        delete_thread = threading.Thread(target=delete_worker)
-        assistant_thread.start()
-        self.assertTrue(assistant_locked.wait(timeout=5))
-        delete_thread.start()
-        self.assertTrue(delete_started.wait(timeout=5))
-        self.assertFalse(delete_finished.wait(timeout=1))
-        release_assistant.set()
-        assistant_thread.join(timeout=10)
-        delete_thread.join(timeout=10)
-
-        self.assertFalse(assistant_thread.is_alive())
-        self.assertFalse(delete_thread.is_alive())
-        self.assertEqual(errors, [])
-        self.assertTrue(delete_finished.is_set())
-
     def test_parent_phone_match_allows_sibling_with_same_parent_and_blank_phone(self):
         target = create_student_account(
             tenant=self.tenant,
@@ -434,3 +355,83 @@ class TeacherOpsStudentLockConcurrencyPostgresTests(TransactionTestCase):
         with self.assertRaisesMessage(Exception, "자동으로 삭제할 수 없습니다"):
             delete_disposable_enrollment(tenant=self.tenant, enrollment_id=wrong.id, student_id=student.id)
         self.assertTrue(Enrollment.objects.filter(id=wrong.id).exists())
+
+
+class TeacherOpsStudentLockConcurrencyPostgresTests(TransactionTestCase):
+    @classmethod
+    def setUpClass(cls):
+        if connection.vendor != "postgresql":
+            raise unittest.SkipTest("PostgreSQL is required for assistant/student lock ordering.")
+        super().setUpClass()
+
+    def test_assistant_student_lock_and_delete_complete_without_deadlock(self):
+        tenant = Tenant.objects.create(name="Teacher Ops Lock", code="teacher-ops-lock")
+        created = create_student_account(
+            tenant=tenant,
+            password="safe-pass",
+            student_data={
+                "name": "잠금 학생",
+                "phone": "01033334444",
+                "parent_phone": "01011112222",
+                "ps_number": "OPS-LOCK",
+                "omr_code": "33334444",
+                "uses_identifier": False,
+                "school_type": "HIGH",
+                "grade": 1,
+            },
+        )
+        assistant_locked = threading.Event()
+        release_assistant = threading.Event()
+        delete_started = threading.Event()
+        delete_finished = threading.Event()
+        errors = []
+
+        def assistant_worker():
+            close_old_connections()
+            try:
+                with transaction.atomic():
+                    _lock_existing_students_for_execution(
+                        tenant=tenant,
+                        student_ids={created.student.id},
+                    )
+                    assistant_locked.set()
+                    if not release_assistant.wait(timeout=10):
+                        raise TimeoutError("assistant lock release timed out")
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        def delete_worker():
+            from apps.support.students.lifecycle import (
+                permanently_delete_students,
+                soft_delete_student,
+            )
+
+            close_old_connections()
+            try:
+                delete_started.set()
+                student = Student.objects.get(pk=created.student.id)
+                soft_delete_student(student, tenant=tenant)
+                permanently_delete_students(tenant=tenant, student_ids=[student.id])
+                delete_finished.set()
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        assistant_thread = threading.Thread(target=assistant_worker)
+        delete_thread = threading.Thread(target=delete_worker)
+        assistant_thread.start()
+        self.assertTrue(assistant_locked.wait(timeout=5))
+        delete_thread.start()
+        self.assertTrue(delete_started.wait(timeout=5))
+        self.assertFalse(delete_finished.wait(timeout=1))
+        release_assistant.set()
+        assistant_thread.join(timeout=10)
+        delete_thread.join(timeout=10)
+
+        self.assertFalse(assistant_thread.is_alive())
+        self.assertFalse(delete_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(delete_finished.is_set())
