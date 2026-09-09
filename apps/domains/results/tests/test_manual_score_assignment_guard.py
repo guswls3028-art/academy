@@ -770,6 +770,168 @@ class ManualExamScoreAssignmentGuardTests(TestCase):
         self.assertFalse(ResultItem.objects.filter(result=result).exists())
         dispatch_progress.assert_called_once_with(exam_id=self.exam.id)
 
+    def test_representative_rebuild_aggregate_state_matrix(self):
+        cases = (
+            (
+                "objective-only initializes total",
+                (("manual_objective", 40, {"objective_score": 40}),),
+                200,
+                40.0,
+                40.0,
+            ),
+            (
+                "subjective-only initializes total",
+                (("manual_subjective", 30, {"subjective_score": 30}),),
+                200,
+                30.0,
+                0.0,
+            ),
+            (
+                "known components combine",
+                (
+                    ("manual_objective", 40, {"objective_score": 40}),
+                    ("manual_subjective", 30, {"subjective_score": 30}),
+                ),
+                200,
+                70.0,
+                40.0,
+            ),
+            (
+                "explicit total survives later objective",
+                (
+                    ("manual_total", 90, {"manual_total": True}),
+                    ("manual_objective", 50, {"objective_score": 50}),
+                ),
+                200,
+                90.0,
+                50.0,
+            ),
+            (
+                "explicit total decrease survives later objective decrease",
+                (
+                    ("manual_objective", 60, {"objective_score": 60}),
+                    ("manual_total", 40, {"manual_total": True}),
+                    ("manual_objective", 30, {"objective_score": 30}),
+                ),
+                200,
+                40.0,
+                30.0,
+            ),
+            (
+                "explicit total clears prior component decomposition",
+                (
+                    ("manual_objective", 40, {"objective_score": 40}),
+                    ("manual_subjective", 30, {"subjective_score": 30}),
+                    ("manual_total", 90, {"manual_total": True}),
+                    ("manual_objective", 50, {"objective_score": 50}),
+                ),
+                200,
+                90.0,
+                50.0,
+            ),
+            (
+                "objective above explicit total is invalid",
+                (
+                    ("manual_total", 30, {"manual_total": True}),
+                    ("manual_objective", 50, {"objective_score": 50}),
+                ),
+                400,
+                80.0,
+                80.0,
+            ),
+            (
+                "objective above full snapshot total is invalid",
+                (
+                    (
+                        "manual_total",
+                        30,
+                        {
+                            "result_snapshot": {
+                                "total_score": 30,
+                                "objective_score": 20,
+                                "max_score": 100,
+                            }
+                        },
+                    ),
+                    ("manual_objective", 50, {"objective_score": 50}),
+                ),
+                400,
+                80.0,
+                80.0,
+            ),
+        )
+
+        for index, (name, facts, status_code, total, objective) in enumerate(cases):
+            with self.subTest(name=name):
+                exam, _questions = self._create_structured_exam(
+                    f"Aggregate state matrix {index}",
+                    [100],
+                    [],
+                )
+                first_attempt = ExamAttempt.objects.create(
+                    exam=exam,
+                    enrollment=self.assigned_enrollment,
+                    submission_id=0,
+                    attempt_index=1,
+                    is_retake=False,
+                    is_representative=False,
+                    status="done",
+                )
+                second_attempt = ExamAttempt.objects.create(
+                    exam=exam,
+                    enrollment=self.assigned_enrollment,
+                    submission_id=0,
+                    attempt_index=2,
+                    is_retake=True,
+                    is_representative=True,
+                    status="done",
+                )
+                result = Result.objects.create(
+                    target_type="exam",
+                    target_id=exam.id,
+                    enrollment=self.assigned_enrollment,
+                    attempt=second_attempt,
+                    total_score=80,
+                    max_score=100,
+                    objective_score=80,
+                )
+                for source, score, meta in facts:
+                    ResultFact.objects.create(
+                        target_type="exam",
+                        target_id=exam.id,
+                        enrollment=self.assigned_enrollment,
+                        submission_id=0,
+                        attempt=first_attempt,
+                        question_id=0,
+                        answer="",
+                        is_correct=True,
+                        score=score,
+                        max_score=100,
+                        source=source,
+                        meta=meta,
+                    )
+
+                response = self._set_representative_attempt(
+                    enrollment=self.assigned_enrollment,
+                    attempt=first_attempt,
+                    exam=exam,
+                )
+
+                self.assertEqual(response.status_code, status_code, response.data)
+                result.refresh_from_db()
+                first_attempt.refresh_from_db()
+                second_attempt.refresh_from_db()
+                self.assertEqual(result.total_score, total)
+                self.assertEqual(result.objective_score, objective)
+                self.assertEqual(
+                    first_attempt.is_representative,
+                    status_code == 200,
+                )
+                self.assertEqual(
+                    second_attempt.is_representative,
+                    status_code != 200,
+                )
+
     @patch(
         "apps.domains.results.views.admin_representative_attempt_view."
         "dispatch_progress_pipeline"

@@ -169,6 +169,7 @@ class AdminRepresentativeAttemptView(APIView):
             total_score = 0.0
             objective_score = 0.0
             subjective_score = _score_float(attempt_meta.get("subjective_score"))
+            total_is_explicit = False
             subjective_is_explicit = attempt_meta.get("subjective_score") is not None
 
             replay_question_facts: dict[int, ResultFact] = {}
@@ -184,6 +185,7 @@ class AdminRepresentativeAttemptView(APIView):
                 }.issubset(snapshot):
                     total_score = _score_float(snapshot["total_score"])
                     objective_score = _score_float(snapshot["objective_score"])
+                    total_is_explicit = True
                     if source == "manual_subjective":
                         subjective_score = _score_float(
                             meta.get("subjective_score", score)
@@ -215,6 +217,7 @@ class AdminRepresentativeAttemptView(APIView):
                             _score_float(item.score)
                             for item in replay_question_facts.values()
                         )
+                        total_is_explicit = False
                     else:
                         if choice_facts:
                             objective_score = sum(
@@ -228,18 +231,22 @@ class AdminRepresentativeAttemptView(APIView):
                         total_score = objective_score + (
                             subjective_score if subjective_is_explicit else 0.0
                         )
+                        total_is_explicit = False
                 elif source == "manual_objective":
                     objective_score = _score_float(meta.get("objective_score", score))
                     if subjective_is_explicit:
                         total_score = objective_score + subjective_score
-                    else:
-                        total_score = max(total_score, objective_score)
+                        total_is_explicit = False
+                    elif not total_is_explicit:
+                        total_score = objective_score
                 elif source == "manual_subjective":
                     subjective_score = _score_float(meta.get("subjective_score", score))
                     subjective_is_explicit = True
                     total_score = objective_score + subjective_score
+                    total_is_explicit = False
                 elif source == "manual_total":
                     total_score = score
+                    total_is_explicit = True
                     subjective_is_explicit = False
 
         submitted_at_value = (

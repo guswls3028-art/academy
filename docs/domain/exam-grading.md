@@ -425,6 +425,21 @@ snapshot을 복원한다. `question_id=0`인 `manual_objective`, `manual_subject
 잠근다. 실제 submission이 없는 오프라인·수동 attempt도 저장을 409로 끝내지 않고
 commit 뒤 exam 기반 progress 재계산을 실행한다.
 
+최종 상태가 없는 legacy aggregate replay는 값뿐 아니라 값의 근거 상태를 함께
+추적한다.
+
+| 이벤트 | 전체 합계 상태 | 서술형 상태 | 다음 상태 |
+|---|---|---|---|
+| full `result_snapshot` | 명시값으로 고정 | `manual_subjective`가 명시한 경우만 확정 | snapshot의 total/objective 유지 |
+| `manual_total` | 명시값으로 고정 | 기존 분해를 폐기해 미확정 | 이후 component-only 이벤트가 전체 합계를 덮지 않음 |
+| `manual_objective` | 서술형이 확정이면 파생, 명시 합계가 있으면 보존, 둘 다 없으면 객관식과 같음 | 변경 없음 | objective만 교체 |
+| `manual_subjective` | objective + subjective 파생값 | 명시값으로 확정 | subjective를 교체하고 합계 재계산 |
+| 실제 문항 Fact | 문항 종류를 알 때 component 합으로 파생 | 서술형 문항 합이 있을 때만 확정 | 최신 문항별 Fact만 반영 |
+
+따라서 전체 합계 30 뒤 객관식 50처럼 객관식이 명시 합계를 초과하면 50으로 합계를
+늘려 모순을 숨기지 않고, mutation 전 `objective_score <= total_score` 검증에서 전체
+대표 전환을 거부한다.
+
 ### 성적 탭 오답 확인 요약
 
 `GET /results/admin/sessions/{session_id}/scores/`의 시험별
