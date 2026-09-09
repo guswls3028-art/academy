@@ -1,5 +1,7 @@
+import uuid
 from datetime import timedelta
 from io import StringIO
+from unittest.mock import patch
 
 # PATH: apps/domains/students/tests/test_bulk_permanent_delete_tenant_isolation.py
 """
@@ -8,6 +10,7 @@ from io import StringIO
 시나리오: User X가 Tenant A(학생), Tenant B(teacher Membership + Submission).
   Tenant A에서 영구삭제 시 Tenant B 데이터 보존 증명.
 """
+from django.apps import apps as django_apps
 from django.contrib.auth import get_user_model
 from django.contrib.auth.hashers import make_password
 from django.core.management import call_command
@@ -31,18 +34,32 @@ from apps.domains.submissions.models import (
     OMRDetectedAnswer,
     OMRRecognitionRun,
     OMRStudentMatch,
+    OmrUploadBatch,
+    OmrUploadBatchItem,
     Submission,
+    SubmissionMedia,
 )
-from apps.domains.students.models import Student
+from apps.domains.students.models import Student, StudentSupportSession
 from apps.domains.students.services import (
     StudentLifecycleError,
     permanently_delete_students,
     soft_delete_student,
 )
+from apps.domains.students.services.lifecycle import (
+    PERMANENT_DELETE_STUDENT_RELATIONS,
+    PERMANENT_DELETE_SUBMISSION_RELATIONS,
+)
 from apps.domains.students.views import StudentViewSet
-from apps.domains.video.models import Video, VideoComment
+from apps.domains.video.models import (
+    AccessMode,
+    DirectVideoEntitlement,
+    InactiveVideoEntitlement,
+    Video,
+    VideoComment,
+)
 
 User = get_user_model()
+StudentReportedScore = django_apps.get_model("results", "StudentReportedScore")
 
 
 class TestBulkPermanentDeleteTenantIsolation(TestCase):
@@ -151,6 +168,206 @@ class TestBulkPermanentDeleteTenantIsolation(TestCase):
             PendingPasswordReset.objects.filter(tenant=self.tenant_b, user=self.user_x).exists(),
             "❌ CRITICAL: 다른 테넌트 pending password reset이 삭제됨!"
         )
+
+    @patch("apps.infrastructure.storage.r2.delete_object_r2_storage")
+    def test_permanent_delete_removes_detached_homework_media_and_preserves_shared_object(
+        self,
+        delete_object_r2_storage,
+    ):
+        """수강 연결이 먼저 삭제된 제출도 media FK/R2 잔여 없이 정리한다."""
+        target_key = "tenants/testa/ai/submissions/target/homework.jpg"
+        shared_key = "shared/legacy-import/homework.jpg"
+        target_media = SubmissionMedia.objects.create(
+            tenant=self.tenant_a,
+            submission=self.sub_a,
+            client_upload_id=uuid.uuid4(),
+            upload_batch_id=uuid.uuid4(),
+            fingerprint="a" * 64,
+            object_key=target_key,
+            original_filename="풀이.jpg",
+            media_kind=SubmissionMedia.Kind.IMAGE,
+            mime_type="image/jpeg",
+            size=1024,
+            position=0,
+            status=SubmissionMedia.Status.UPLOADED,
+        )
+        shared_target_media = SubmissionMedia.objects.create(
+            tenant=self.tenant_a,
+            submission=self.sub_a,
+            client_upload_id=uuid.uuid4(),
+            upload_batch_id=uuid.uuid4(),
+            fingerprint="b" * 64,
+            object_key=shared_key,
+            original_filename="공유.jpg",
+            media_kind=SubmissionMedia.Kind.IMAGE,
+            mime_type="image/jpeg",
+            size=2048,
+            position=1,
+            status=SubmissionMedia.Status.UPLOADED,
+        )
+        foreign_media = SubmissionMedia.objects.create(
+            tenant=self.tenant_b,
+            submission=self.sub_b,
+            client_upload_id=uuid.uuid4(),
+            upload_batch_id=uuid.uuid4(),
+            fingerprint="c" * 64,
+            object_key=shared_key,
+            original_filename="보존.jpg",
+            media_kind=SubmissionMedia.Kind.IMAGE,
+            mime_type="image/jpeg",
+            size=2048,
+            position=0,
+            status=SubmissionMedia.Status.UPLOADED,
+        )
+        Enrollment.objects.filter(id=self.enrollment_a.id).delete()
+        self.sub_a.refresh_from_db()
+        self.assertIsNone(self.sub_a.enrollment_id)
+
+        response = self._call(self.tenant_a, self.admin_a, [self.student_a.id])
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertFalse(SubmissionMedia.objects.filter(id=target_media.id).exists())
+        self.assertFalse(SubmissionMedia.objects.filter(id=shared_target_media.id).exists())
+        self.assertTrue(SubmissionMedia.objects.filter(id=foreign_media.id).exists())
+        delete_object_r2_storage.assert_called_once_with(key=target_key)
+
+    def test_permanent_delete_removes_reported_scores_and_preserves_other_tenant(self):
+        """선택 학생의 자발 성적만 정리하고 다른 테넌트 학생 성적은 보존한다."""
+        target_score = StudentReportedScore.objects.create(
+            tenant=self.tenant_a,
+            student=self.student_a,
+            source=StudentReportedScore.Source.SCHOOL_EXAM,
+            academic_year=2026,
+            semester=1,
+            exam_round=StudentReportedScore.ExamRound.FIRST,
+            subject="영어",
+            score=95,
+            max_score=100,
+            status=StudentReportedScore.Status.REJECTED,
+        )
+        foreign_user = User.objects.create_user(
+            username="reported-score-foreign",
+            password="test1234",
+            tenant=self.tenant_b,
+            name="보존학생",
+        )
+        foreign_student = Student.objects.create(
+            tenant=self.tenant_b,
+            user=foreign_user,
+            ps_number="B-REPORTED",
+            name="보존학생",
+            phone="01077778888",
+            parent_phone="01099998888",
+            omr_code="77778888",
+        )
+        foreign_score = StudentReportedScore.objects.create(
+            tenant=self.tenant_b,
+            student=foreign_student,
+            source=StudentReportedScore.Source.SCHOOL_EXAM,
+            academic_year=2026,
+            semester=1,
+            exam_round=StudentReportedScore.ExamRound.FIRST,
+            subject="영어",
+            score=88,
+            max_score=100,
+            status=StudentReportedScore.Status.REJECTED,
+        )
+
+        response = self._call(self.tenant_a, self.admin_a, [self.student_a.id])
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertFalse(StudentReportedScore.objects.filter(id=target_score.id).exists())
+        self.assertTrue(StudentReportedScore.objects.filter(id=foreign_score.id).exists())
+
+    def test_permanent_delete_covers_support_and_video_student_relations(self):
+        """지원 세션과 영상 예외 권한이 남아도 선택 학생을 완전 정리한다."""
+        support = StudentSupportSession.objects.create(
+            tenant=self.tenant_a,
+            student=self.student_a,
+            operator=self.admin_a,
+            expires_at=timezone.now() + timedelta(hours=1),
+        )
+        video = Video.objects.create(
+            tenant=self.tenant_a,
+            title="영상 권한 정리",
+            status=Video.Status.READY,
+        )
+        inactive = InactiveVideoEntitlement.objects.create(
+            tenant=self.tenant_a,
+            student=self.student_a,
+            enrollment=self.enrollment_a,
+            video=video,
+            access_mode=AccessMode.FREE_REVIEW,
+            source=InactiveVideoEntitlement.Source.STAFF_AUTHORIZATION,
+            source_reference="cleanup-test-inactive",
+            reason="영구 삭제 테스트",
+            granted_by=self.admin_a,
+            granted_by_reference="cleanup-test-admin",
+        )
+        direct = DirectVideoEntitlement.objects.create(
+            tenant=self.tenant_a,
+            student=self.student_a,
+            video=video,
+            source=DirectVideoEntitlement.Source.STAFF_AUTHORIZATION,
+            source_reference="cleanup-test-direct",
+            reason="영구 삭제 테스트",
+            granted_by=self.admin_a,
+            granted_by_reference="cleanup-test-admin",
+        )
+
+        response = self._call(self.tenant_a, self.admin_a, [self.student_a.id])
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertFalse(StudentSupportSession.objects.filter(id=support.id).exists())
+        self.assertFalse(InactiveVideoEntitlement.objects.filter(id=inactive.id).exists())
+        self.assertFalse(DirectVideoEntitlement.objects.filter(id=direct.id).exists())
+
+    def test_permanent_delete_nulls_omr_batch_submission_references(self):
+        """OMR 배치 이력은 보존하되 삭제 제출 참조는 비운다."""
+        batch = OmrUploadBatch.objects.create(
+            tenant=self.tenant_a,
+            created_by=self.admin_a,
+            exam_id=1,
+            total_count=2,
+        )
+        submission_item = OmrUploadBatchItem.objects.create(
+            tenant=self.tenant_a,
+            exam_id=1,
+            batch=batch,
+            ordinal=0,
+            submission=self.sub_a,
+            admission_status=OmrUploadBatchItem.AdmissionStatus.RECEIVED,
+        )
+        duplicate_item = OmrUploadBatchItem.objects.create(
+            tenant=self.tenant_a,
+            exam_id=1,
+            batch=batch,
+            ordinal=1,
+            duplicate_of_submission=self.sub_a,
+            admission_status=OmrUploadBatchItem.AdmissionStatus.DUPLICATE,
+        )
+
+        response = self._call(self.tenant_a, self.admin_a, [self.student_a.id])
+
+        self.assertEqual(response.status_code, 200, response.data)
+        submission_item.refresh_from_db()
+        duplicate_item.refresh_from_db()
+        self.assertIsNone(submission_item.submission_id)
+        self.assertIsNone(duplicate_item.duplicate_of_submission_id)
+
+    def test_permanent_delete_relation_contract_matches_model_graph(self):
+        """신규 Student/Submission FK가 수동 삭제 그래프에서 누락되지 않게 한다."""
+        student_relations = {
+            (relation.related_model._meta.db_table, relation.field.column)
+            for relation in Student._meta.related_objects
+        }
+        submission_relations = {
+            (relation.related_model._meta.db_table, relation.field.column)
+            for relation in Submission._meta.related_objects
+        }
+
+        self.assertEqual(student_relations, PERMANENT_DELETE_STUDENT_RELATIONS)
+        self.assertEqual(submission_relations, PERMANENT_DELETE_SUBMISSION_RELATIONS)
 
     def test_deleted_tenant_pending_reset_removed_even_when_user_retained(self):
         """삭제되는 테넌트의 pending reset은 User가 다른 테넌트에 남아도 정리."""

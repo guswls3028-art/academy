@@ -15,10 +15,42 @@ from apps.support.students.lifecycle_dependencies import (
     active_wrong_note_pdf_exists_for_students,
     cancel_active_participants_for_student,
     deactivate_enrollments_for_student,
+    delete_submission_storage_for_permanent_delete,
     delete_wrong_note_pdf_storage_or_raise,
     ensure_parent_for_student,
     restore_enrollments_after_student_restore,
 )
+
+
+PERMANENT_DELETE_STUDENT_RELATIONS = frozenset({
+    ("students_studenttag", "student_id"),
+    ("student_support_session", "student_id"),
+    ("students_studentregistrationrequest", "student_id"),
+    ("enrollment_enrollment", "student_id"),
+    ("community_postentity", "created_by_id"),
+    ("community_postreply", "created_by_id"),
+    ("results_student_reported_score", "student_id"),
+    ("clinic_sessionparticipant", "student_id"),
+    ("clinic_submission", "student_id"),
+    ("student_fee", "student_id"),
+    ("student_invoice", "student_id"),
+    ("fee_payment", "student_id"),
+    ("video_inactivevideoentitlement", "student_id"),
+    ("video_directvideoentitlement", "student_id"),
+    ("video_videolike", "student_id"),
+    ("video_videocomment", "author_student_id"),
+})
+
+PERMANENT_DELETE_SUBMISSION_RELATIONS = frozenset({
+    ("submissions_submissionmedia", "submission_id"),
+    ("submissions_submissionanswer", "submission_id"),
+    ("submissions_omr_recognition_run", "submission_id"),
+    ("submissions_omr_detected_answer", "submission_id"),
+    ("submissions_omr_student_match", "submission_id"),
+    ("submissions_omruploadbatchitem", "submission_id"),
+    ("submissions_omruploadbatchitem", "duplicate_of_submission_id"),
+    ("results_exam_result", "submission_id"),
+})
 
 
 class StudentLifecycleError(ValueError):
@@ -509,12 +541,15 @@ def _permanently_delete_selected_students(
         "results_fact", "results_wrong_note_pdf", "results_exam_result",
         "submissions_omr_detected_answer", "submissions_omr_student_match",
         "submissions_omr_recognition_run", "submissions_submissionanswer",
+        "submissions_submissionmedia", "submissions_omruploadbatchitem",
         "submissions_submission",
+        "results_student_reported_score", "student_support_session",
         "homework_results_homeworkscore", "homework_assignment", "homework_enrollment",
         "lectures_sectionassignment",
         "student_fee", "student_invoice", "student_invoice_item", "fee_payment",
         "attendance_attendance", "enrollment_sessionenrollment",
         "exams_exam_enrollment", "video_videopermission", "video_videoprogress",
+        "video_inactivevideoentitlement", "video_directvideoentitlement",
         "video_videoplaybacksession", "video_videoplaybackevent",
         "progress_sessionprogress", "progress_lectureprogress",
         "progress_cliniclink", "progress_risklog",
@@ -529,7 +564,7 @@ def _permanently_delete_selected_students(
     })
     _SAFE_COLS = frozenset({
         "enrollment_id", "student_id", "author_student_id",
-        "created_by_id", "user_id",
+        "created_by_id", "user_id", "submission_id", "duplicate_of_submission_id",
     })
 
     def _safe_tbl(name: str) -> str:
@@ -574,6 +609,10 @@ def _permanently_delete_selected_students(
                 ("video_videocomment", "author_student_id"),
                 ("community_postentity", "created_by_id"),
                 ("community_postreply", "created_by_id"),
+                ("results_student_reported_score", "student_id"),
+                ("student_support_session", "student_id"),
+                ("video_inactivevideoentitlement", "student_id"),
+                ("video_directvideoentitlement", "student_id"),
             ]:
                 if not _table_exists(_safe_tbl(tbl)):
                     continue
@@ -592,6 +631,14 @@ def _permanently_delete_selected_students(
 
         student_id_clause, student_id_params = _in_clause(student_ids)
         user_id_clause, user_id_params = _in_clause(user_ids)
+        membership_removable_user_ids = _tenant_account_cleanup_user_ids(
+            tenant=tenant,
+            user_ids=user_ids,
+            exclude_student_ids=student_ids,
+        )
+        removable_user_clause, removable_user_params = _in_clause(
+            membership_removable_user_ids
+        )
 
         _assert_no_cross_tenant_student_refs(student_id_clause, student_id_params)
 
@@ -600,6 +647,72 @@ def _permanently_delete_selected_students(
             [*student_id_params, tenant.id],
         )
         enrollment_ids = [row[0] for row in cursor.fetchall()]
+
+        submission_ids: list[int] = []
+        if enrollment_ids:
+            enrollment_id_clause, enrollment_id_params = _in_clause(enrollment_ids)
+            cursor.execute(
+                f"SELECT id FROM submissions_submission "
+                f"WHERE enrollment_id IN {enrollment_id_clause} AND tenant_id = %s",
+                [*enrollment_id_params, tenant.id],
+            )
+            submission_ids.extend(row[0] for row in cursor.fetchall())
+        if membership_removable_user_ids:
+            cursor.execute(
+                f"SELECT id FROM submissions_submission "
+                f"WHERE user_id IN {removable_user_clause} AND tenant_id = %s",
+                [*removable_user_params, tenant.id],
+            )
+            submission_ids.extend(row[0] for row in cursor.fetchall())
+        submission_ids = list(dict.fromkeys(submission_ids))
+
+        if submission_ids:
+            submission_id_clause, submission_id_params = _in_clause(submission_ids)
+            if _table_exists(_safe_tbl("submissions_omruploadbatchitem")):
+                cursor.execute(
+                    f"SELECT id FROM submissions_omruploadbatchitem WHERE "
+                    f"(submission_id IN {submission_id_clause} "
+                    f"OR duplicate_of_submission_id IN {submission_id_clause}) "
+                    "AND (tenant_id IS NULL OR tenant_id <> %s) LIMIT 1",
+                    [*submission_id_params, *submission_id_params, tenant.id],
+                )
+                if cursor.fetchone():
+                    raise StudentLifecycleError(
+                        "cross_tenant_reference",
+                        "submissions_omruploadbatchitem has a cross-tenant submission reference",
+                    )
+            try:
+                delete_submission_storage_for_permanent_delete(
+                    tenant_id=tenant.id,
+                    submission_ids=submission_ids,
+                )
+            except ValueError as exc:
+                raise StudentLifecycleError("cross_tenant_reference", str(exc)) from exc
+            if _table_exists(_safe_tbl("submissions_omruploadbatchitem")):
+                cursor.execute(
+                    f"UPDATE submissions_omruploadbatchitem SET submission_id = NULL "
+                    f"WHERE submission_id IN {submission_id_clause} AND tenant_id = %s",
+                    [*submission_id_params, tenant.id],
+                )
+                cursor.execute(
+                    "UPDATE submissions_omruploadbatchitem "
+                    "SET duplicate_of_submission_id = NULL "
+                    f"WHERE duplicate_of_submission_id IN {submission_id_clause} AND tenant_id = %s",
+                    [*submission_id_params, tenant.id],
+                )
+
+        for tbl in [
+            "results_student_reported_score",
+            "student_support_session",
+            "video_inactivevideoentitlement",
+            "video_directvideoentitlement",
+        ]:
+            if _table_exists(_safe_tbl(tbl)):
+                cursor.execute(
+                    f"DELETE FROM {_safe_tbl(tbl)} "
+                    f"WHERE student_id IN {student_id_clause} AND tenant_id = %s",
+                    [*student_id_params, tenant.id],
+                )
 
         if enrollment_ids:
             delete_wrong_note_pdf_storage_or_raise(
@@ -758,12 +871,6 @@ def _permanently_delete_selected_students(
             return
 
         tenant_id = tenant.id
-        membership_removable_user_ids = _tenant_account_cleanup_user_ids(
-            tenant=tenant,
-            user_ids=user_ids,
-        )
-        removable_user_clause, removable_user_params = _in_clause(membership_removable_user_ids)
-
         if membership_removable_user_ids and _table_exists(_safe_tbl("submissions_submission")):
             sub_ids_sql = (
                 f"SELECT id FROM submissions_submission WHERE user_id IN {removable_user_clause} AND tenant_id = %s"

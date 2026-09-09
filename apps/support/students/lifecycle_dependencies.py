@@ -111,6 +111,21 @@ def delete_wrong_note_pdf_storage_or_raise(
         delete_object_r2_storage(key=str(key))
 
 
+def delete_submission_storage_for_permanent_delete(
+    *,
+    tenant_id: int,
+    submission_ids: list[int],
+) -> None:
+    from apps.domains.submissions.services.lifecycle import (
+        delete_submission_storage_for_permanent_delete as _delete_submission_storage,
+    )
+
+    _delete_submission_storage(
+        tenant_id=tenant_id,
+        submission_ids=submission_ids,
+    )
+
+
 def active_wrong_note_pdf_exists_for_students(
     *,
     tenant: Any,

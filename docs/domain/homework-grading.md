@@ -197,6 +197,11 @@ X를 나중에 다시 맞힌 뒤에도 남기려면 O·복습으로 바꾼다. �
   정리도 tenant·행·보존기간을 확정한 별도 exact-target 작업에서만 수행한다. 이번
   expand migration은 child table만 만들며 기존 행, constraint, object를 바꾸거나
   지우지 않는다.
+- 학생 계정을 명시적으로 영구 삭제하거나 30일 보관 후 purge할 때는 예외다. 학생 lifecycle이
+  exact tenant/submission ID를 제출 도메인에 넘기면, 제출 도메인이 유일한
+  `SubmissionMedia.object_key`와 legacy `Submission.file_key`를 R2에서 지운 뒤 media
+  행을 먼저 삭제한다. 다른 submission/media가 같은 key를 참조하면 object는
+  보존하며, parent submission 삭제는 이 cleanup이 완료된 후에만 수행한다.
 - 기존 `homework_image`·`homework_video` 단건 `Submission.file_key`는 그대로
   보존한다. 새 목록에서는 `legacy-{submission_id}`인 파일 하나로 투영하고, soft
   remove는 기존 행의 `meta`에 감사 시각을 기록한다. 구 단건 제출 생성 API도

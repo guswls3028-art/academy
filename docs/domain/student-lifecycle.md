@@ -100,6 +100,13 @@ SSOT: `permanently_delete_students(tenant=..., student_ids=[...])`
 - lecture section assignment
 - fees: `StudentFee`, `StudentInvoice`, `InvoiceItem`, `FeePayment`
 - submissions/results/homework/progress/video/clinic/community의 학생 참조
+  - `StudentReportedScore`, 학생 지원 세션, 비활성 수강·직접 영상 권한을
+    학생 행 삭제 전에 같은 tenant 범위로 정리한다.
+  - 수강이 먼저 삭제되어 `Submission.enrollment=NULL`인 제출도 삭제 대상
+    학생 전용 계정의 tenant-scoped submission이면 포함한다. 제출 도메인이
+    `SubmissionMedia`/legacy `file_key` object를 정리하고 child 행을 먼저 삭제한
+    뒤 부모 `Submission`을 삭제한다. OMR batch 이력은 보존하고 해당
+    submission 참조만 `NULL`로 바꾼다.
 - 삭제 대상 테넌트의 student 멤버십과 pending password reset
 - 다른 활성 멤버십·Parent·Staff·staff-role 멤버십이 없는 orphan `User`
 
@@ -109,6 +116,9 @@ SSOT: `permanently_delete_students(tenant=..., student_ids=[...])`
 - 같은 사용자가 다른 테넌트나 같은 테넌트의 비학생 역할로 남아 있으면 User와 해당 멤버십을 보존한다.
 - 보존되는 사용자가 과거 soft delete 때문에 비활성화되어 있고 활성 멤버십이 남아 있으면 재활성화한다.
 - tenant-owned child row가 다른 tenant로 깨져 있으면 조용히 삭제하지 않고 `cross_tenant_reference`로 중단한다.
+- 삭제 대상 object key를 다른 submission/media가 참조하면 R2 object는 보존한다.
+  대상 테넌트·submission·media 행만 정리하며 다른 테넌트 행을 키로
+  추측해 삭제하지 않는다.
 - 현재 cross-domain 정리는 guarded raw SQL graph다. 장기 목표는 각 도메인 cleanup hook/event로 분해하는 것이다.
 
 ## 5. Retention 운영
@@ -137,5 +147,9 @@ python manage.py purge_deleted_students
   - cross-tenant User 보존 및 재활성화
   - same-tenant parent/staff/teacher 계정 보존
   - fee/section/video-comment dependency cleanup
+  - reported score/support session/video entitlement cleanup
+  - detached submission media R2/row cleanup과 공유 object 보존
+  - OMR batch submission 참조 nulling
+  - `Student`/`Submission` reverse FK graph contract drift
   - corrupt cross-tenant child reference 차단
   - purge/duplicate cleanup command routing
