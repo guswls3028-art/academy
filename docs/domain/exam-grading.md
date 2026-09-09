@@ -381,6 +381,17 @@ PATCH가 호환성을 위해 클라이언트의 `max_score`를 받더라도 유�
 `GET /results/admin/sessions/{session_id}/scores/`도 모든 현재 행의
 `block.max_score`를 시험 만점으로 투영한다. 다만 1차·재시험 당시의 분모는
 `attempts[].max_score`에 그대로 보존해 과거 응시 이력을 소급 변경하지 않는다.
+오답 확인 완료 여부의 지문도 이 현재 시험 만점을 사용하므로, 과거
+`Result.max_score`가 남아 있어도 현재 성적표의 `PENDING`을 완료한 뒤 새로고침하면
+동일하게 `COMPLETED`가 유지된다.
+
+합산 점수 PATCH는 tenant가 확정한 `Exam` 행을 `SELECT FOR UPDATE`로 먼저 잠근
+뒤 만점을 읽는다. 따라서 같은 시험의 만점 PATCH와 점수 저장이 겹치면 두 작업은
+직렬화되고, 점수 저장은 자신보다 먼저 커밋된 만점을 사용한다. 만점을 낮출 때는
+현재 대표 `Result.total_score`와 보존된 1차 점수 중 어느 하나라도 새 만점을
+초과하면 `max_score` 필드 오류로 거부한다. 교사는 현재 점수를 먼저 바로잡은 뒤
+다시 만점을 낮춰야 하며, 이 검사는 기존 `ExamAttempt` 이력을 수정하거나 삭제하지
+않는다.
 
 ### 성적 탭 오답 확인 요약
 

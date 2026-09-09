@@ -364,7 +364,7 @@ class SessionScoresRosterScopeTests(TestCase):
                 "max_score": 97.0,
             },
         )
-        Result.objects.create(
+        result = Result.objects.create(
             target_type="exam",
             target_id=self.exam.id,
             enrollment=self.active_enrollment,
@@ -387,6 +387,45 @@ class SessionScoresRosterScopeTests(TestCase):
         self.assertEqual(exam_meta["max_score"], 105.0)
         self.assertEqual(exam_row["block"]["max_score"], 105.0)
         self.assertEqual(exam_row["attempts"][0]["max_score"], 97.0)
+        self.assertEqual(exam_row["block"]["correction_status"], "PENDING")
+
+        correction_request = self.factory.patch(
+            f"/api/v1/results/admin/sessions/{self.session.id}/score-correction/",
+            {
+                "enrollment_id": self.active_enrollment.id,
+                "source_type": "exam",
+                "source_id": self.exam.id,
+                "completed": True,
+                "note": "현재 만점 기준으로 오답 확인 완료",
+            },
+            format="json",
+        )
+        correction_request.tenant = self.tenant
+        force_authenticate(correction_request, user=self.admin)
+        completion = SessionScoreCorrectionView.as_view()(
+            correction_request,
+            session_id=self.session.id,
+        )
+
+        self.assertEqual(completion.status_code, 200, completion.data)
+        self.assertEqual(completion.data["correction_status"], "COMPLETED")
+
+        reload_request = self.factory.get(
+            f"/api/v1/results/admin/sessions/{self.session.id}/scores/"
+        )
+        reload_request.tenant = self.tenant
+        force_authenticate(reload_request, user=self.admin)
+        reloaded = SessionScoresView.as_view()(
+            reload_request,
+            session_id=self.session.id,
+        )
+        reloaded_block = reloaded.data["rows"][0]["exams"][0]["block"]
+        self.assertEqual(reloaded_block["max_score"], 105.0)
+        self.assertEqual(reloaded_block["correction_status"], "COMPLETED")
+        result.refresh_from_db()
+        self.assertEqual(result.max_score, 97.0)
+        attempt.refresh_from_db()
+        self.assertEqual(attempt.meta["initial_snapshot"]["max_score"], 97.0)
 
     def test_session_scores_exposes_homework_cell_version(self):
         score = HomeworkScore.objects.create(

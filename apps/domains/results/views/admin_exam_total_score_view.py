@@ -28,7 +28,7 @@ from apps.domains.results.guards.score_edit_lease_guard import (
 from apps.support.results.admin_exam_dependencies import (
     dispatch_progress_pipeline,
     get_latest_exam_submission_id,
-    get_regular_active_exam_for_tenant,
+    lock_regular_active_exam_for_tenant,
     lock_enrollment_for_exam_state_transition,
     resolve_exam_not_submitted_clinic_links,
 )
@@ -55,7 +55,7 @@ class AdminExamTotalScoreView(APIView):
         enrollment_id = int(enrollment_id)
 
         # ✅ tenant isolation: verify exam belongs to tenant
-        exam = get_regular_active_exam_for_tenant(
+        exam = lock_regular_active_exam_for_tenant(
             exam_id=exam_id,
             tenant=request.tenant,
         )

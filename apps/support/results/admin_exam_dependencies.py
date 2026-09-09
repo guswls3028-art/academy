@@ -59,6 +59,25 @@ def get_regular_active_exam_for_tenant(*, exam_id: int, tenant: Any) -> Any:
     )
 
 
+def lock_regular_active_exam_for_tenant(*, exam_id: int, tenant: Any) -> Any:
+    """Lock one tenant-owned exam before reading mutable score policy."""
+    from django.http import Http404
+
+    from apps.domains.exams.models import Exam
+
+    exam = get_object_or_404(
+        Exam.objects.select_for_update().filter(
+            tenant=tenant,
+            exam_type=Exam.ExamType.REGULAR,
+            is_active=True,
+        ),
+        id=int(exam_id),
+    )
+    if not exam.sessions.filter(lecture__tenant=tenant).exists():
+        raise Http404
+    return exam
+
+
 def get_enrollment_for_tenant(*, enrollment_id: int, tenant: Any) -> Any | None:
     from apps.domains.enrollment.models import Enrollment
 

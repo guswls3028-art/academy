@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 from django.shortcuts import get_object_or_404
 
 from apps.domains.results.permissions import IsTeacherOrAdmin
@@ -210,6 +212,52 @@ def dispatch_progress_for_exam(*, exam_id: int) -> None:
     from apps.domains.progress.dispatcher import dispatch_progress_pipeline
 
     dispatch_progress_pipeline(exam_id=exam_id)
+
+
+def highest_current_or_initial_exam_score(*, exam) -> float | None:
+    """Return the highest live representative or preserved first-attempt score."""
+    from apps.domains.results.models import ExamAttempt, Result
+    from apps.domains.results.utils.initial_exam_score import load_initial_exam_scores
+
+    current_results = list(
+        Result.objects.filter(
+            target_type="exam",
+            target_id=int(exam.id),
+            enrollment__tenant=exam.tenant,
+        ).only("enrollment_id", "total_score")
+    )
+    enrollment_ids = {
+        int(result.enrollment_id)
+        for result in current_results
+        if result.enrollment_id is not None
+    }
+    enrollment_ids.update(
+        int(enrollment_id)
+        for enrollment_id in ExamAttempt.objects.filter(
+            exam=exam,
+            attempt_index=1,
+            enrollment__tenant=exam.tenant,
+        ).values_list("enrollment_id", flat=True)
+    )
+    initial_states = load_initial_exam_scores(
+        exam_ids=[int(exam.id)],
+        enrollment_ids=enrollment_ids,
+    )
+    candidates = [result.total_score for result in current_results]
+    candidates.extend(
+        state.total_score
+        for state in initial_states.values()
+        if not state.not_submitted
+    )
+    normalized = []
+    for value in candidates:
+        try:
+            score = float(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(score) and score >= 0:
+            normalized.append(score)
+    return max(normalized) if normalized else None
 
 
 def refresh_exam_target_projections(*, exam):
