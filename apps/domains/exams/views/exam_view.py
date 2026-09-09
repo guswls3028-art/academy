@@ -25,6 +25,7 @@ from apps.support.exams.view_dependencies import (
     IsTeacherOrAdmin,
     active_enrollment_ids_for_exam_assignment,
     dispatch_progress_for_exam,
+    highest_current_or_initial_exam_score,
     refresh_exam_target_projections,
     get_session_model,
     regular_exam_delete_blocker,
@@ -273,6 +274,21 @@ class ExamViewSet(ModelViewSet):
                 partial=partial,
             )
             serializer.is_valid(raise_exception=True)
+            next_max_score = serializer.validated_data.get("max_score")
+            if (
+                next_max_score is not None
+                and float(next_max_score) < float(obj.max_score or 0)
+            ):
+                highest_score = highest_current_or_initial_exam_score(exam=obj)
+                if highest_score is not None and highest_score > float(next_max_score):
+                    raise ValidationError(
+                        {
+                            "max_score": (
+                                f"현재 대표 또는 1차 점수({highest_score:g})보다 "
+                                "낮게 설정할 수 없습니다. 점수를 먼저 수정해 주세요."
+                            )
+                        }
+                    )
             self.perform_update(serializer)
             updated = serializer.instance
             response = Response(

@@ -19,6 +19,7 @@ from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 from apps.api.common.auth_jwt import TenantAwareTokenObtainPairSerializer
 from apps.core.management.commands.setup_ymath_realuse_scenario import (
     Command,
+    ensure_development_clinic_cancellation_fixture,
     ensure_development_messaging_baseline,
 )
 from apps.core.models import OpsAuditLog, Program, Tenant, TenantMembership
@@ -182,6 +183,39 @@ class SetupYmathRealuseScenarioTests(TestCase):
         self.assertEqual(owner.name, "Academy Development Owner")
         self.assertTrue(owner.is_active)
         self.assertEqual(AutoSendConfig.objects.filter(tenant=owner).count(), 4)
+
+    def test_development_clinic_cancellation_fixture_is_idempotent_and_tenant_scoped(self):
+        tenant = Tenant.objects.create(
+            code="qa-ymath-realuse-clinic-fixture",
+            name="Clinic Fixture",
+            is_active=True,
+        )
+
+        with (
+            patch(
+                "apps.core.management.commands.setup_ymath_realuse_scenario._is_persistent_development_runtime",
+                return_value=True,
+            ),
+            patch.dict(os.environ, {"SOLAPI_MOCK": "true"}),
+        ):
+            ensure_development_clinic_cancellation_fixture(tenant)
+            ensure_development_clinic_cancellation_fixture(tenant)
+
+        config = AutoSendConfig.objects.select_related("template").get(
+            tenant=tenant,
+            trigger="clinic_cancelled",
+        )
+        self.assertTrue(config.enabled)
+        self.assertEqual(config.message_mode, "alimtalk")
+        self.assertEqual(config.template.tenant_id, tenant.id)
+        self.assertEqual(config.template.category, MessageTemplate.Category.CLINIC)
+        self.assertEqual(
+            MessageTemplate.objects.filter(
+                tenant=tenant,
+                name=config.template.name,
+            ).count(),
+            1,
+        )
 
     def test_development_messaging_baseline_rejects_owner_identity_drift(self):
         owner = Tenant.objects.create(pk=1, code="unexpected-owner", name="Unexpected Owner")

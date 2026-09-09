@@ -374,6 +374,72 @@ submission ID만 유일성을 검사한다. `NULL`은 클리닉 직접 입력 �
 제외한다. 무결성 감사는 전체 `ExamResult.manual_overrides`를 순회하므로 뒤쪽 행의
 `max_score` 누락도 표본 제한 없이 보고한다.
 
+차시 성적표의 현재 점수 분모는 `Exam.max_score`가 단일 진실이다. 합산 점수
+PATCH가 호환성을 위해 클라이언트의 `max_score`를 받더라도 유한수 형식만
+검증하고 저장에는 현재 시험 만점을 사용한다. 따라서 시험 만점을 바꾼 뒤 오래
+열어 둔 화면에서 점수를 저장해도 학생별 `Result.max_score`가 갈라지지 않는다.
+객관식 합계·서술형 합계·문항별 점수 PATCH도 tenant의 같은 `Exam` 행을 먼저 잠근다.
+각 선택형·서술형·문항 점수는 OMR score shape의 구성요소별 상한을 계속 검증하되,
+합산한 최종 총점은 현재 `Exam.max_score`를 넘을 수 없고 성공 시
+`Result.max_score`도 그 현재 만점으로 저장한다. 따라서 만점 하향과 점수 저장이
+겹쳐도 과거 shape 분모로 현재 시험 만점을 우회하지 않는다.
+`GET /results/admin/sessions/{session_id}/scores/`도 모든 현재 행의
+`block.max_score`를 시험 만점으로 투영한다. 다만 1차·재시험 당시의 분모는
+`attempts[].max_score`에 그대로 보존해 과거 응시 이력을 소급 변경하지 않는다.
+오답 확인 완료 여부의 지문도 이 현재 시험 만점을 사용하므로, 과거
+`Result.max_score`가 남아 있어도 현재 성적표의 `PENDING`을 완료한 뒤 새로고침하면
+동일하게 `COMPLETED`가 유지된다. 이 지문 규칙은 차시 성적표뿐 아니라 시험별
+관리자 결과, 학생 상세·요약, progress의 수동 해소 유효성 검사까지 공통이다.
+어느 화면으로 이동해도 과거 결과 분모로 다시 계산해 완료 상태를 되돌리지 않는다.
+
+합산 점수 PATCH는 tenant가 확정한 `Exam` 행을 `SELECT FOR UPDATE`로 먼저 잠근
+뒤 만점을 읽는다. 따라서 같은 시험의 만점 PATCH와 점수 저장이 겹치면 두 작업은
+직렬화되고, 점수 저장은 자신보다 먼저 커밋된 만점을 사용한다. 만점을 낮출 때는
+현재 대표 `Result.total_score`와 보존된 1차 점수 중 어느 하나라도 새 만점을
+초과하면 `max_score` 필드 오류로 거부한다. 교사는 현재 점수를 먼저 바로잡은 뒤
+다시 만점을 낮춰야 하며, 이 검사는 기존 `ExamAttempt` 이력을 수정하거나 삭제하지
+않는다. 합산 점수 PATCH에서 `attempt_index`를 생략하면 기존 표 편집 계약대로 현재
+대표 시도를 수정한다. drawer에서 `attempt_index=1`을 명시하면 같은 시험·수강의 1차
+`ExamAttempt`를 잠가 그 시도의 `meta.total_score`와 `initial_snapshot` 점수·만점을
+함께 정정하고, append-only `ResultFact`도 그 1차 attempt와 submission에 귀속한다.
+1차가 현재 대표일 때만 `Result`를 동기화한다. 재시험이 대표이면 그 재시험의 meta와
+대표 `Result`는 건드리지 않으므로 저장 뒤 다시 조회해도 정정한 1차 값과 현재 재시험
+점수가 각각 유지된다. 이후 재시험이 대표가 되어도 정정 전의 오래된 1차 값이
+되살아나지 않는다.
+
+대표 시도를 바꾸면 선택 attempt의 같은 시험·수강 범위 Fact를 ID 순서로 재생해
+snapshot을 복원한다. `question_id=0`인 `manual_objective`, `manual_subjective`,
+`manual_total`은 문항이 아니라 각각 객관식 합계, 서술형 합계, 전체 합계 이벤트다.
+새 합계 이벤트는 당시 `total_score`·`objective_score`·현재 만점 snapshot도 meta에
+보존한다. `meta.total_score`, `final_result_snapshot`, `initial_snapshot` 중 보존된 최종
+상태가 있으면 이를 authoritative terminal state로 사용하고 과거 Fact를 점수에 다시
+적용하지 않는다. 이때 Fact는 최신 실제 문항 snapshot과, terminal에 객관식 점수가
+없는 과거 데이터의 객관식 근거만 복원한다. 보존된 최종 상태가 없는 legacy attempt만
+명시된 합계 이벤트를 ID 순서로 재생하며, 서술형 점수를 전체 점수의 잔여분으로
+추측하지 않는다. Fact가 없는 과거 오프라인 attempt도 보존 상태와 제출 시각을 유지한다.
+양수 문항 ID의 최신 Fact만 `ResultItem`으로 만들고 이전 대표에만 있던 문항은
+제거한다. 계산된 총점과 객관식 점수가 유한수가 아니거나 현재 `Exam.max_score` 범위를
+벗어나면 대표 플래그와 `Result`/`ResultItem`을 바꾸기 전에 요청 전체를 거부한다.
+정상 복원 시 `Result.max_score`는 Fact 당시 분모가 아니라 현재 시험 만점을 사용한다.
+점수 저장과 대표 전환은 모두 tenant `Exam` → 해당 `Result` → 해당 `ExamAttempt` 순서로
+잠근다. 실제 submission이 없는 오프라인·수동 attempt도 저장을 409로 끝내지 않고
+commit 뒤 exam 기반 progress 재계산을 실행한다.
+
+최종 상태가 없는 legacy aggregate replay는 값뿐 아니라 값의 근거 상태를 함께
+추적한다.
+
+| 이벤트 | 전체 합계 상태 | 서술형 상태 | 다음 상태 |
+|---|---|---|---|
+| full `result_snapshot` | 명시값으로 고정 | `manual_subjective`가 명시한 경우만 확정 | snapshot의 total/objective 유지 |
+| `manual_total` | 명시값으로 고정 | 기존 분해를 폐기해 미확정 | 이후 component-only 이벤트가 전체 합계를 덮지 않음 |
+| `manual_objective` | 서술형이 확정이면 파생, 명시 합계가 있으면 보존, 둘 다 없으면 객관식과 같음 | 변경 없음 | objective만 교체 |
+| `manual_subjective` | objective + subjective 파생값 | 명시값으로 확정 | subjective를 교체하고 합계 재계산 |
+| 실제 문항 Fact | 문항 종류를 알 때 component 합으로 파생 | 서술형 문항 합이 있을 때만 확정 | 최신 문항별 Fact만 반영 |
+
+따라서 전체 합계 30 뒤 객관식 50처럼 객관식이 명시 합계를 초과하면 50으로 합계를
+늘려 모순을 숨기지 않고, mutation 전 `objective_score <= total_score` 검증에서 전체
+대표 전환을 거부한다.
+
 ### 성적 탭 오답 확인 요약
 
 `GET /results/admin/sessions/{session_id}/scores/`의 시험별

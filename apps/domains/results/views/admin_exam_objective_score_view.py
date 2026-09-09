@@ -34,7 +34,7 @@ from apps.support.omr.score_shape import get_exam_score_shape
 from apps.support.results.admin_exam_dependencies import (
     dispatch_progress_pipeline,
     get_latest_exam_submission_id,
-    get_regular_active_exam_for_tenant,
+    lock_regular_active_exam_for_tenant,
 )
 from django.db.models import Max
 
@@ -48,7 +48,7 @@ class AdminExamObjectiveScoreView(APIView):
         enrollment_id = int(enrollment_id)
 
         # ✅ tenant isolation: verify exam belongs to tenant
-        exam = get_regular_active_exam_for_tenant(
+        exam = lock_regular_active_exam_for_tenant(
             exam_id=exam_id,
             tenant=request.tenant,
         )
@@ -73,11 +73,7 @@ class AdminExamObjectiveScoreView(APIView):
             raise ValidationError({"detail": "score must be >= 0", "code": "INVALID"})
 
         score_shape = get_exam_score_shape(exam)
-        max_score = float(
-            score_shape.total_max_score
-            or getattr(exam, "max_score", 100.0)
-            or 100.0
-        )
+        max_score = float(getattr(exam, "max_score", 100.0) or 100.0)
         objective_max = float(score_shape.objective_max_score)
         if objective_max <= 0 and score_shape.shape_source != "no_sheet" and new_objective > 0:
             raise ValidationError(
@@ -145,7 +141,11 @@ class AdminExamObjectiveScoreView(APIView):
                 result.objective_score = 0.0
                 result.save(update_fields=["attempt_id", "max_score", "objective_score", "updated_at"])
 
-        attempt = ExamAttempt.objects.filter(id=int(result.attempt_id)).first()
+        attempt = (
+            ExamAttempt.objects.select_for_update()
+            .filter(id=int(result.attempt_id))
+            .first()
+        )
         if not attempt:
             raise NotFound({"detail": "attempt not found", "code": "NOT_FOUND"})
         if attempt.status == "grading":
@@ -188,6 +188,11 @@ class AdminExamObjectiveScoreView(APIView):
                 "manual_objective": True,
                 "objective_score": new_objective,
                 "objective_max_score": objective_max,
+                "result_snapshot": {
+                    "total_score": new_total,
+                    "objective_score": new_objective,
+                    "max_score": max_score,
+                },
                 "edited_at": timezone.now().isoformat(),
             },
         )

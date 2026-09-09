@@ -8,7 +8,7 @@ from apps.support.results.admin_exam_dependencies import (
     dispatch_progress_pipeline,
     get_enrollment_for_tenant,
     get_latest_exam_submission_id,
-    get_regular_active_exam_for_tenant,
+    lock_regular_active_exam_for_tenant,
 )
 
 

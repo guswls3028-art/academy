@@ -2,6 +2,7 @@ from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from django.utils.dateparse import parse_datetime
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps.core.models import Tenant, TenantMembership
@@ -18,6 +19,9 @@ from apps.domains.results.models import (
 from apps.domains.results.views.admin_exam_item_score_view import AdminExamItemScoreView
 from apps.domains.results.views.admin_exam_objective_score_view import AdminExamObjectiveScoreView
 from apps.domains.results.views.admin_exam_result_detail_view import AdminExamResultDetailView
+from apps.domains.results.views.admin_representative_attempt_view import (
+    AdminRepresentativeAttemptView,
+)
 from apps.domains.results.views.admin_exam_subjective_score_view import AdminExamSubjectiveScoreView
 from apps.domains.results.views.admin_exam_total_score_view import AdminExamTotalScoreView
 from apps.domains.results.views.session_scores_view import SessionScoresView
@@ -142,6 +146,19 @@ class ManualExamScoreAssignmentGuardTests(TestCase):
         force_authenticate(request, user=self.admin)
         return SessionScoresView.as_view()(request, session_id=self.session.id)
 
+    def _set_representative_attempt(self, *, enrollment, attempt, exam=None):
+        request = self.factory.post(
+            "/results/admin/exams/representative-attempt/",
+            {"enrollment_id": enrollment.id, "attempt_id": attempt.id},
+            format="json",
+        )
+        request.tenant = self.tenant
+        force_authenticate(request, user=self.admin)
+        return AdminRepresentativeAttemptView.as_view()(
+            request,
+            exam_id=(exam or self.exam).id,
+        )
+
     def _create_structured_exam(self, title: str, choice_scores: list[float], essay_scores: list[float]):
         exam = Exam.objects.create(
             tenant=self.tenant,
@@ -251,6 +268,1088 @@ class ManualExamScoreAssignmentGuardTests(TestCase):
 
         self.assertEqual(response.status_code, 400, response.data)
         self._assert_no_manual_score_side_effects()
+
+    def test_total_score_uses_current_exam_max_instead_of_client_snapshot(self):
+        self.exam.max_score = 105
+        self.exam.save(update_fields=["max_score", "updated_at"])
+
+        response = self._patch(
+            AdminExamTotalScoreView,
+            {"score": 97, "max_score": 97},
+            enrollment=self.assigned_enrollment,
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["max_score"], 105.0)
+        result = Result.objects.get(
+            target_type="exam",
+            target_id=self.exam.id,
+            enrollment=self.assigned_enrollment,
+        )
+        self.assertEqual(result.max_score, 105.0)
+        self.assertEqual(
+            ResultFact.objects.get(
+                target_type="exam",
+                target_id=self.exam.id,
+                enrollment=self.assigned_enrollment,
+                source="manual_total",
+            ).max_score,
+            105.0,
+        )
+        self.assertEqual(
+            result.attempt.meta["initial_snapshot"]["max_score"],
+            105.0,
+        )
+        corrected = self._patch(
+            AdminExamTotalScoreView,
+            {"score": 80, "max_score": 105},
+            enrollment=self.assigned_enrollment,
+        )
+
+        self.assertEqual(corrected.status_code, 200, corrected.data)
+        result.refresh_from_db()
+        result.attempt.refresh_from_db()
+        self.assertEqual(
+            result.attempt.meta["initial_snapshot"]["total_score"],
+            80.0,
+        )
+        self.assertEqual(
+            result.attempt.meta["initial_snapshot"]["max_score"],
+            105.0,
+        )
+        self.assertEqual(
+            ResultFact.objects.filter(
+                target_id=self.exam.id,
+                enrollment=self.assigned_enrollment,
+                source="manual_total",
+            )
+            .latest("id")
+            .meta["result_snapshot"],
+            {"total_score": 80.0, "objective_score": 0.0, "max_score": 105.0},
+        )
+
+    def test_objective_score_rejects_aggregate_above_current_exam_max(self):
+        exam, _questions = self._create_structured_exam(
+            "Objective current max",
+            [50],
+            [50],
+        )
+        result = self._create_result(exam, objective_score=40)
+        result.total_score = 80
+        result.max_score = 100
+        result.save(update_fields=["total_score", "max_score", "updated_at"])
+        exam.max_score = 85
+        exam.save(update_fields=["max_score", "updated_at"])
+
+        response = self._patch_for_exam(
+            AdminExamObjectiveScoreView,
+            exam,
+            {"score": 50},
+        )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        result.refresh_from_db()
+        self.assertEqual(result.total_score, 80.0)
+        self.assertEqual(result.max_score, 100.0)
+
+        accepted = self._patch_for_exam(
+            AdminExamObjectiveScoreView,
+            exam,
+            {"score": 45},
+        )
+        self.assertEqual(accepted.status_code, 200, accepted.data)
+        result.refresh_from_db()
+        self.assertEqual(result.total_score, 85.0)
+        self.assertEqual(result.max_score, 85.0)
+        self.assertEqual(
+            ResultFact.objects.filter(
+                target_id=exam.id,
+                enrollment=self.assigned_enrollment,
+                source="manual_objective",
+            )
+            .latest("id")
+            .meta["result_snapshot"],
+            {"total_score": 85.0, "objective_score": 45.0, "max_score": 85.0},
+        )
+
+    def test_subjective_score_rejects_aggregate_above_current_exam_max(self):
+        exam, _questions = self._create_structured_exam(
+            "Subjective current max",
+            [50],
+            [50],
+        )
+        result = self._create_result(exam, objective_score=40)
+        result.total_score = 80
+        result.max_score = 100
+        result.save(update_fields=["total_score", "max_score", "updated_at"])
+        exam.max_score = 85
+        exam.save(update_fields=["max_score", "updated_at"])
+
+        response = self._patch_for_exam(
+            AdminExamSubjectiveScoreView,
+            exam,
+            {"score": 50},
+        )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        result.refresh_from_db()
+        self.assertEqual(result.total_score, 80.0)
+        self.assertEqual(result.max_score, 100.0)
+
+        accepted = self._patch_for_exam(
+            AdminExamSubjectiveScoreView,
+            exam,
+            {"score": 45},
+        )
+        self.assertEqual(accepted.status_code, 200, accepted.data)
+        result.refresh_from_db()
+        self.assertEqual(result.total_score, 85.0)
+        self.assertEqual(result.max_score, 85.0)
+        self.assertEqual(
+            ResultFact.objects.filter(
+                target_id=exam.id,
+                enrollment=self.assigned_enrollment,
+                source="manual_subjective",
+            )
+            .latest("id")
+            .meta["result_snapshot"],
+            {"total_score": 85.0, "objective_score": 40.0, "max_score": 85.0},
+        )
+
+    def test_item_score_rejects_aggregate_above_current_exam_max(self):
+        exam, questions = self._create_structured_exam(
+            "Item current max",
+            [50, 50],
+            [],
+        )
+        result = self._create_result(exam, objective_score=80)
+        for question in questions:
+            ResultItem.objects.create(
+                result=result,
+                question=question,
+                answer="",
+                is_correct=False,
+                score=40,
+                max_score=50,
+                source="manual",
+            )
+        exam.max_score = 85
+        exam.save(update_fields=["max_score", "updated_at"])
+
+        response = self._patch_for_exam(
+            AdminExamItemScoreView,
+            exam,
+            {"score": 50},
+            question_id=questions[1].id,
+        )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        result.refresh_from_db()
+        self.assertEqual(result.total_score, 80.0)
+        self.assertEqual(result.max_score, 100.0)
+
+        accepted = self._patch_for_exam(
+            AdminExamItemScoreView,
+            exam,
+            {"score": 45},
+            question_id=questions[1].id,
+        )
+        self.assertEqual(accepted.status_code, 200, accepted.data)
+        result.refresh_from_db()
+        self.assertEqual(result.total_score, 85.0)
+        self.assertEqual(result.max_score, 85.0)
+
+    def test_total_score_edits_explicit_first_attempt_without_touching_representative_retake(self):
+        SessionEnrollment.objects.get_or_create(
+            tenant=self.tenant,
+            session=self.session,
+            enrollment=self.assigned_enrollment,
+        )
+        Attendance.objects.create(
+            tenant=self.tenant,
+            session=self.session,
+            enrollment=self.assigned_enrollment,
+            status="PRESENT",
+        )
+        first_attempt = ExamAttempt.objects.create(
+            exam=self.exam,
+            enrollment=self.assigned_enrollment,
+            submission_id=11,
+            attempt_index=1,
+            is_retake=False,
+            is_representative=False,
+            status="done",
+            meta={
+                "total_score": 90.0,
+                "max_score": 100.0,
+                "initial_snapshot": {
+                    "total_score": 90.0,
+                    "max_score": 100.0,
+                    "source": "omr",
+                },
+            },
+        )
+        second_meta = {"total_score": 80.0, "max_score": 100.0}
+        second_attempt = ExamAttempt.objects.create(
+            exam=self.exam,
+            enrollment=self.assigned_enrollment,
+            submission_id=12,
+            attempt_index=2,
+            is_retake=True,
+            is_representative=True,
+            status="done",
+            meta=second_meta,
+        )
+        result = Result.objects.create(
+            target_type="exam",
+            target_id=self.exam.id,
+            enrollment=self.assigned_enrollment,
+            attempt=second_attempt,
+            total_score=80,
+            max_score=100,
+            objective_score=40,
+        )
+
+        response = self._patch(
+            AdminExamTotalScoreView,
+            {"score": 70, "max_score": 100, "attempt_index": 1},
+            enrollment=self.assigned_enrollment,
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        first_attempt.refresh_from_db()
+        second_attempt.refresh_from_db()
+        result.refresh_from_db()
+        self.assertEqual(first_attempt.meta["total_score"], 70.0)
+        self.assertEqual(first_attempt.meta["initial_snapshot"]["total_score"], 70.0)
+        self.assertEqual(second_attempt.meta, second_meta)
+        self.assertEqual(result.attempt_id, second_attempt.id)
+        self.assertEqual(result.total_score, 80.0)
+        self.assertEqual(result.max_score, 100.0)
+        fact = ResultFact.objects.get(
+            target_type="exam",
+            target_id=self.exam.id,
+            enrollment=self.assigned_enrollment,
+            source="manual_total",
+        )
+        self.assertEqual(fact.attempt_id, first_attempt.id)
+        self.assertEqual(fact.submission_id, first_attempt.submission_id)
+        self.assertEqual(fact.score, 70.0)
+
+        reloaded = self._get_session_scores()
+        self.assertEqual(reloaded.status_code, 200, reloaded.data)
+        row = next(
+            item
+            for item in reloaded.data["rows"]
+            if item["enrollment_id"] == self.assigned_enrollment.id
+        )
+        exam_row = next(
+            item
+            for item in row["exams"]
+            if item["exam_id"] == self.exam.id
+        )
+        self.assertEqual(exam_row["block"]["score"], 70.0)
+        self.assertEqual(
+            [attempt["score"] for attempt in exam_row["attempts"]],
+            [70.0, 80.0],
+        )
+
+    @patch(
+        "apps.domains.results.views.admin_representative_attempt_view."
+        "dispatch_progress_pipeline"
+    )
+    @patch(
+        "apps.domains.results.views.admin_representative_attempt_view."
+        "get_latest_exam_submission_id",
+        return_value=99,
+    )
+    def test_representative_rebuild_uses_first_attempt_total_override_without_qid_zero_item(
+        self,
+        _get_submission_id,
+        _dispatch_progress,
+    ):
+        SessionEnrollment.objects.get_or_create(
+            tenant=self.tenant,
+            session=self.session,
+            enrollment=self.assigned_enrollment,
+        )
+        Attendance.objects.create(
+            tenant=self.tenant,
+            session=self.session,
+            enrollment=self.assigned_enrollment,
+            status="PRESENT",
+        )
+        self.exam.max_score = 105
+        self.exam.save(update_fields=["max_score", "updated_at"])
+        first_attempt = ExamAttempt.objects.create(
+            exam=self.exam,
+            enrollment=self.assigned_enrollment,
+            submission_id=11,
+            attempt_index=1,
+            is_retake=False,
+            is_representative=False,
+            status="done",
+            meta={
+                "total_score": 60.0,
+                "max_score": 100.0,
+                "initial_snapshot": {
+                    "total_score": 60.0,
+                    "max_score": 100.0,
+                    "source": "omr",
+                },
+            },
+        )
+        second_attempt = ExamAttempt.objects.create(
+            exam=self.exam,
+            enrollment=self.assigned_enrollment,
+            submission_id=12,
+            attempt_index=2,
+            is_retake=True,
+            is_representative=True,
+            status="done",
+            meta={"total_score": 80.0, "max_score": 100.0},
+        )
+        result = Result.objects.create(
+            target_type="exam",
+            target_id=self.exam.id,
+            enrollment=self.assigned_enrollment,
+            attempt=second_attempt,
+            total_score=80,
+            max_score=100,
+            objective_score=40,
+        )
+        stale_question = ExamQuestion.objects.create(
+            sheet=self.sheet,
+            number=2,
+            score=5,
+        )
+        ResultItem.objects.create(
+            result=result,
+            question=stale_question,
+            answer="stale retake answer",
+            is_correct=True,
+            score=5,
+            max_score=5,
+            source="manual",
+        )
+        ResultFact.objects.create(
+            target_type="exam",
+            target_id=self.exam.id,
+            enrollment=self.assigned_enrollment,
+            submission_id=first_attempt.submission_id,
+            attempt=first_attempt,
+            question_id=self.question.id,
+            answer="1",
+            is_correct=True,
+            score=60,
+            max_score=100,
+            source="omr",
+        )
+        corrected = self._patch(
+            AdminExamTotalScoreView,
+            {"score": 70, "max_score": 105, "attempt_index": 1},
+            enrollment=self.assigned_enrollment,
+        )
+        self.assertEqual(corrected.status_code, 200, corrected.data)
+        ResultFact.objects.create(
+            target_type="exam",
+            target_id=self.exam.id + 10000,
+            enrollment=self.assigned_enrollment,
+            submission_id=first_attempt.submission_id,
+            attempt=first_attempt,
+            question_id=0,
+            answer="",
+            is_correct=True,
+            score=999,
+            max_score=999,
+            source="manual_total",
+            meta={"manual_total": True},
+        )
+
+        switched = self._set_representative_attempt(
+            enrollment=self.assigned_enrollment,
+            attempt=first_attempt,
+        )
+
+        self.assertEqual(switched.status_code, 200, switched.data)
+        result.refresh_from_db()
+        first_attempt.refresh_from_db()
+        second_attempt.refresh_from_db()
+        self.assertEqual(result.attempt_id, first_attempt.id)
+        self.assertEqual(result.total_score, 70.0)
+        self.assertEqual(result.max_score, 105.0)
+        self.assertTrue(first_attempt.is_representative)
+        self.assertFalse(second_attempt.is_representative)
+        items = list(ResultItem.objects.filter(result=result))
+        self.assertEqual([item.question_id for item in items], [self.question.id])
+        self.assertEqual(items[0].score, 60.0)
+
+        reloaded = self._get_session_scores()
+        self.assertEqual(reloaded.status_code, 200, reloaded.data)
+        row = next(
+            item
+            for item in reloaded.data["rows"]
+            if item["enrollment_id"] == self.assigned_enrollment.id
+        )
+        exam_row = next(
+            item for item in row["exams"] if item["exam_id"] == self.exam.id
+        )
+        self.assertEqual(exam_row["block"]["score"], 70.0)
+        self.assertEqual(exam_row["block"]["max_score"], 105.0)
+
+    @patch(
+        "apps.domains.results.views.admin_representative_attempt_view."
+        "dispatch_progress_pipeline"
+    )
+    def test_representative_rebuild_replays_aggregate_facts_and_offline_dispatch(
+        self,
+        dispatch_progress,
+    ):
+        first_attempt = ExamAttempt.objects.create(
+            exam=self.exam,
+            enrollment=self.assigned_enrollment,
+            submission_id=0,
+            attempt_index=1,
+            is_retake=False,
+            is_representative=False,
+            status="done",
+            meta={},
+        )
+        second_attempt = ExamAttempt.objects.create(
+            exam=self.exam,
+            enrollment=self.assigned_enrollment,
+            submission_id=0,
+            attempt_index=2,
+            is_retake=True,
+            is_representative=True,
+            status="done",
+            meta={"total_score": 80.0, "max_score": 100.0},
+        )
+        result = Result.objects.create(
+            target_type="exam",
+            target_id=self.exam.id,
+            enrollment=self.assigned_enrollment,
+            attempt=second_attempt,
+            total_score=80,
+            max_score=100,
+            objective_score=80,
+        )
+        for source, score, meta in (
+            ("manual_objective", 40, {"objective_score": 40}),
+            ("manual_subjective", 30, {"subjective_score": 30}),
+            ("manual_total", 90, {"manual_total": True}),
+            ("manual_objective", 50, {"objective_score": 50}),
+        ):
+            ResultFact.objects.create(
+                target_type="exam",
+                target_id=self.exam.id,
+                enrollment=self.assigned_enrollment,
+                submission_id=0,
+                attempt=first_attempt,
+                question_id=0,
+                answer="",
+                is_correct=True,
+                score=score,
+                max_score=100,
+                source=source,
+                meta=meta,
+            )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self._set_representative_attempt(
+                enrollment=self.assigned_enrollment,
+                attempt=first_attempt,
+            )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        result.refresh_from_db()
+        self.assertEqual(result.attempt_id, first_attempt.id)
+        self.assertEqual(result.objective_score, 50.0)
+        self.assertEqual(result.total_score, 90.0)
+        self.assertEqual(result.max_score, 100.0)
+        self.assertFalse(ResultItem.objects.filter(result=result).exists())
+        dispatch_progress.assert_called_once_with(exam_id=self.exam.id)
+
+    def test_representative_rebuild_aggregate_state_matrix(self):
+        cases = (
+            (
+                "objective-only initializes total",
+                (("manual_objective", 40, {"objective_score": 40}),),
+                200,
+                40.0,
+                40.0,
+            ),
+            (
+                "subjective-only initializes total",
+                (("manual_subjective", 30, {"subjective_score": 30}),),
+                200,
+                30.0,
+                0.0,
+            ),
+            (
+                "known components combine",
+                (
+                    ("manual_objective", 40, {"objective_score": 40}),
+                    ("manual_subjective", 30, {"subjective_score": 30}),
+                ),
+                200,
+                70.0,
+                40.0,
+            ),
+            (
+                "explicit total survives later objective",
+                (
+                    ("manual_total", 90, {"manual_total": True}),
+                    ("manual_objective", 50, {"objective_score": 50}),
+                ),
+                200,
+                90.0,
+                50.0,
+            ),
+            (
+                "explicit total decrease survives later objective decrease",
+                (
+                    ("manual_objective", 60, {"objective_score": 60}),
+                    ("manual_total", 40, {"manual_total": True}),
+                    ("manual_objective", 30, {"objective_score": 30}),
+                ),
+                200,
+                40.0,
+                30.0,
+            ),
+            (
+                "explicit total clears prior component decomposition",
+                (
+                    ("manual_objective", 40, {"objective_score": 40}),
+                    ("manual_subjective", 30, {"subjective_score": 30}),
+                    ("manual_total", 90, {"manual_total": True}),
+                    ("manual_objective", 50, {"objective_score": 50}),
+                ),
+                200,
+                90.0,
+                50.0,
+            ),
+            (
+                "objective above explicit total is invalid",
+                (
+                    ("manual_total", 30, {"manual_total": True}),
+                    ("manual_objective", 50, {"objective_score": 50}),
+                ),
+                400,
+                80.0,
+                80.0,
+            ),
+            (
+                "objective above full snapshot total is invalid",
+                (
+                    (
+                        "manual_total",
+                        30,
+                        {
+                            "result_snapshot": {
+                                "total_score": 30,
+                                "objective_score": 20,
+                                "max_score": 100,
+                            }
+                        },
+                    ),
+                    ("manual_objective", 50, {"objective_score": 50}),
+                ),
+                400,
+                80.0,
+                80.0,
+            ),
+        )
+
+        for index, (name, facts, status_code, total, objective) in enumerate(cases):
+            with self.subTest(name=name):
+                exam, _questions = self._create_structured_exam(
+                    f"Aggregate state matrix {index}",
+                    [100],
+                    [],
+                )
+                first_attempt = ExamAttempt.objects.create(
+                    exam=exam,
+                    enrollment=self.assigned_enrollment,
+                    submission_id=0,
+                    attempt_index=1,
+                    is_retake=False,
+                    is_representative=False,
+                    status="done",
+                )
+                second_attempt = ExamAttempt.objects.create(
+                    exam=exam,
+                    enrollment=self.assigned_enrollment,
+                    submission_id=0,
+                    attempt_index=2,
+                    is_retake=True,
+                    is_representative=True,
+                    status="done",
+                )
+                result = Result.objects.create(
+                    target_type="exam",
+                    target_id=exam.id,
+                    enrollment=self.assigned_enrollment,
+                    attempt=second_attempt,
+                    total_score=80,
+                    max_score=100,
+                    objective_score=80,
+                )
+                for source, score, meta in facts:
+                    ResultFact.objects.create(
+                        target_type="exam",
+                        target_id=exam.id,
+                        enrollment=self.assigned_enrollment,
+                        submission_id=0,
+                        attempt=first_attempt,
+                        question_id=0,
+                        answer="",
+                        is_correct=True,
+                        score=score,
+                        max_score=100,
+                        source=source,
+                        meta=meta,
+                    )
+
+                response = self._set_representative_attempt(
+                    enrollment=self.assigned_enrollment,
+                    attempt=first_attempt,
+                    exam=exam,
+                )
+
+                self.assertEqual(response.status_code, status_code, response.data)
+                result.refresh_from_db()
+                first_attempt.refresh_from_db()
+                second_attempt.refresh_from_db()
+                self.assertEqual(result.total_score, total)
+                self.assertEqual(result.objective_score, objective)
+                self.assertEqual(
+                    first_attempt.is_representative,
+                    status_code == 200,
+                )
+                self.assertEqual(
+                    second_attempt.is_representative,
+                    status_code != 200,
+                )
+
+    @patch(
+        "apps.domains.results.views.admin_representative_attempt_view."
+        "dispatch_progress_pipeline"
+    )
+    def test_representative_rebuild_accepts_meta_only_offline_attempt(
+        self,
+        dispatch_progress,
+    ):
+        submitted_at = "2026-09-01T09:00:00+09:00"
+        first_attempt = ExamAttempt.objects.create(
+            exam=self.exam,
+            enrollment=self.assigned_enrollment,
+            submission_id=0,
+            attempt_index=1,
+            is_retake=False,
+            is_representative=False,
+            status="done",
+            meta={
+                "total_score": 65.0,
+                "final_result_snapshot": {
+                    "total_score": 65.0,
+                    "objective_score": 40.0,
+                    "max_score": 100.0,
+                    "submitted_at": submitted_at,
+                },
+            },
+        )
+        second_attempt = ExamAttempt.objects.create(
+            exam=self.exam,
+            enrollment=self.assigned_enrollment,
+            submission_id=0,
+            attempt_index=2,
+            is_retake=True,
+            is_representative=True,
+            status="done",
+        )
+        result = Result.objects.create(
+            target_type="exam",
+            target_id=self.exam.id,
+            enrollment=self.assigned_enrollment,
+            attempt=second_attempt,
+            total_score=80,
+            max_score=100,
+            objective_score=80,
+        )
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self._set_representative_attempt(
+                enrollment=self.assigned_enrollment,
+                attempt=first_attempt,
+            )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        result.refresh_from_db()
+        self.assertEqual(result.attempt_id, first_attempt.id)
+        self.assertEqual(result.total_score, 65.0)
+        self.assertEqual(result.objective_score, 40.0)
+        self.assertEqual(result.submitted_at, parse_datetime(submitted_at))
+        self.assertFalse(ResultItem.objects.filter(result=result).exists())
+        dispatch_progress.assert_called_once_with(exam_id=self.exam.id)
+
+    @patch(
+        "apps.domains.results.views.admin_representative_attempt_view."
+        "dispatch_progress_pipeline"
+    )
+    def test_representative_rebuild_combines_question_and_aggregate_facts(
+        self,
+        _dispatch_progress,
+    ):
+        exam, questions = self._create_structured_exam(
+            "Mixed representative rebuild",
+            [40],
+            [60],
+        )
+        first_attempt = ExamAttempt.objects.create(
+            exam=exam,
+            enrollment=self.assigned_enrollment,
+            submission_id=0,
+            attempt_index=1,
+            is_retake=False,
+            is_representative=False,
+            status="done",
+        )
+        second_attempt = ExamAttempt.objects.create(
+            exam=exam,
+            enrollment=self.assigned_enrollment,
+            submission_id=0,
+            attempt_index=2,
+            is_retake=True,
+            is_representative=True,
+            status="done",
+        )
+        result = Result.objects.create(
+            target_type="exam",
+            target_id=exam.id,
+            enrollment=self.assigned_enrollment,
+            attempt=second_attempt,
+            total_score=80,
+            max_score=100,
+            objective_score=80,
+        )
+        for question, score in zip(questions, (30, 20), strict=True):
+            ResultFact.objects.create(
+                target_type="exam",
+                target_id=exam.id,
+                enrollment=self.assigned_enrollment,
+                submission_id=0,
+                attempt=first_attempt,
+                question_id=question.id,
+                answer="1",
+                is_correct=True,
+                score=score,
+                max_score=question.score,
+                source="omr",
+            )
+        for source, score, meta in (
+            ("manual_objective", 35, {"objective_score": 35}),
+            ("manual_subjective", 25, {"subjective_score": 25}),
+        ):
+            ResultFact.objects.create(
+                target_type="exam",
+                target_id=exam.id,
+                enrollment=self.assigned_enrollment,
+                submission_id=0,
+                attempt=first_attempt,
+                question_id=0,
+                answer="",
+                is_correct=True,
+                score=score,
+                max_score=100,
+                source=source,
+                meta=meta,
+            )
+
+        response = self._set_representative_attempt(
+            enrollment=self.assigned_enrollment,
+            attempt=first_attempt,
+            exam=exam,
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        result.refresh_from_db()
+        self.assertEqual(result.objective_score, 35.0)
+        self.assertEqual(result.total_score, 60.0)
+        self.assertEqual(
+            list(
+                ResultItem.objects.filter(result=result)
+                .order_by("question_id")
+                .values_list("score", flat=True)
+            ),
+            [30.0, 20.0],
+        )
+
+    def test_representative_rebuild_keeps_terminal_total_for_item_only_attempt(self):
+        exam, questions = self._create_structured_exam(
+            "Item-only representative rebuild",
+            [100],
+            [],
+        )
+        first_attempt = ExamAttempt.objects.create(
+            exam=exam,
+            enrollment=self.assigned_enrollment,
+            submission_id=0,
+            attempt_index=1,
+            is_retake=False,
+            is_representative=False,
+            status="done",
+            meta={"total_score": 30.0, "max_score": 100.0},
+        )
+        second_attempt = ExamAttempt.objects.create(
+            exam=exam,
+            enrollment=self.assigned_enrollment,
+            submission_id=0,
+            attempt_index=2,
+            is_retake=True,
+            is_representative=True,
+            status="done",
+        )
+        result = Result.objects.create(
+            target_type="exam",
+            target_id=exam.id,
+            enrollment=self.assigned_enrollment,
+            attempt=second_attempt,
+            total_score=80,
+            max_score=100,
+            objective_score=80,
+        )
+        ResultFact.objects.create(
+            target_type="exam",
+            target_id=exam.id,
+            enrollment=self.assigned_enrollment,
+            submission_id=0,
+            attempt=first_attempt,
+            question_id=questions[0].id,
+            answer="1",
+            is_correct=False,
+            score=30,
+            max_score=100,
+            source="manual",
+        )
+
+        response = self._set_representative_attempt(
+            enrollment=self.assigned_enrollment,
+            attempt=first_attempt,
+            exam=exam,
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        result.refresh_from_db()
+        self.assertEqual(result.total_score, 30.0)
+        self.assertEqual(result.objective_score, 30.0)
+        self.assertEqual(
+            list(ResultItem.objects.filter(result=result).values_list("score", flat=True)),
+            [30.0],
+        )
+
+    def test_representative_rebuild_does_not_replay_facts_over_final_snapshot(self):
+        first_attempt = ExamAttempt.objects.create(
+            exam=self.exam,
+            enrollment=self.assigned_enrollment,
+            submission_id=0,
+            attempt_index=1,
+            is_retake=False,
+            is_representative=False,
+            status="done",
+            meta={
+                "final_result_snapshot": {
+                    "total_score": 70.0,
+                    "objective_score": 40.0,
+                    "max_score": 100.0,
+                }
+            },
+        )
+        second_attempt = ExamAttempt.objects.create(
+            exam=self.exam,
+            enrollment=self.assigned_enrollment,
+            submission_id=0,
+            attempt_index=2,
+            is_retake=True,
+            is_representative=True,
+            status="done",
+        )
+        result = Result.objects.create(
+            target_type="exam",
+            target_id=self.exam.id,
+            enrollment=self.assigned_enrollment,
+            attempt=second_attempt,
+            total_score=80,
+            max_score=100,
+            objective_score=80,
+        )
+        ResultFact.objects.create(
+            target_type="exam",
+            target_id=self.exam.id,
+            enrollment=self.assigned_enrollment,
+            submission_id=0,
+            attempt=first_attempt,
+            question_id=0,
+            answer="",
+            is_correct=True,
+            score=20,
+            max_score=100,
+            source="manual_subjective",
+            meta={"subjective_score": 20.0},
+        )
+
+        response = self._set_representative_attempt(
+            enrollment=self.assigned_enrollment,
+            attempt=first_attempt,
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        result.refresh_from_db()
+        self.assertEqual(result.total_score, 70.0)
+        self.assertEqual(result.objective_score, 40.0)
+
+    def test_representative_rebuild_uses_choice_evidence_for_initial_snapshot(self):
+        exam, questions = self._create_structured_exam(
+            "Initial snapshot representative rebuild",
+            [50],
+            [50],
+        )
+        first_attempt = ExamAttempt.objects.create(
+            exam=exam,
+            enrollment=self.assigned_enrollment,
+            submission_id=0,
+            attempt_index=1,
+            is_retake=False,
+            is_representative=False,
+            status="done",
+            meta={
+                "initial_snapshot": {
+                    "total_score": 70.0,
+                    "max_score": 100.0,
+                    "source": "omr",
+                }
+            },
+        )
+        second_attempt = ExamAttempt.objects.create(
+            exam=exam,
+            enrollment=self.assigned_enrollment,
+            submission_id=0,
+            attempt_index=2,
+            is_retake=True,
+            is_representative=True,
+            status="done",
+        )
+        result = Result.objects.create(
+            target_type="exam",
+            target_id=exam.id,
+            enrollment=self.assigned_enrollment,
+            attempt=second_attempt,
+            total_score=80,
+            max_score=100,
+            objective_score=80,
+        )
+        for question, score in zip(questions, (40, 30), strict=True):
+            ResultFact.objects.create(
+                target_type="exam",
+                target_id=exam.id,
+                enrollment=self.assigned_enrollment,
+                submission_id=0,
+                attempt=first_attempt,
+                question_id=question.id,
+                answer="1",
+                is_correct=True,
+                score=score,
+                max_score=question.score,
+                source="omr",
+            )
+
+        response = self._set_representative_attempt(
+            enrollment=self.assigned_enrollment,
+            attempt=first_attempt,
+            exam=exam,
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        result.refresh_from_db()
+        self.assertEqual(result.total_score, 70.0)
+        self.assertEqual(result.objective_score, 40.0)
+
+    @patch(
+        "apps.domains.results.views.admin_representative_attempt_view."
+        "dispatch_progress_pipeline"
+    )
+    def test_representative_rejects_invalid_historical_total_without_mutation(
+        self,
+        dispatch_progress,
+    ):
+        first_attempt = ExamAttempt.objects.create(
+            exam=self.exam,
+            enrollment=self.assigned_enrollment,
+            submission_id=0,
+            attempt_index=1,
+            is_retake=False,
+            is_representative=False,
+            status="done",
+        )
+        second_attempt = ExamAttempt.objects.create(
+            exam=self.exam,
+            enrollment=self.assigned_enrollment,
+            submission_id=0,
+            attempt_index=2,
+            is_retake=True,
+            is_representative=True,
+            status="done",
+        )
+        result = Result.objects.create(
+            target_type="exam",
+            target_id=self.exam.id,
+            enrollment=self.assigned_enrollment,
+            attempt=second_attempt,
+            total_score=80,
+            max_score=100,
+            objective_score=40,
+        )
+        stale_item = ResultItem.objects.create(
+            result=result,
+            question=self.question,
+            answer="2",
+            is_correct=True,
+            score=5,
+            max_score=5,
+            source="manual",
+        )
+        ResultFact.objects.create(
+            target_type="exam",
+            target_id=self.exam.id,
+            enrollment=self.assigned_enrollment,
+            submission_id=0,
+            attempt=first_attempt,
+            question_id=0,
+            answer="",
+            is_correct=True,
+            score=110,
+            max_score=100,
+            source="manual_total",
+            meta={"manual_total": True},
+        )
+
+        response = self._set_representative_attempt(
+            enrollment=self.assigned_enrollment,
+            attempt=first_attempt,
+        )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        first_attempt.refresh_from_db()
+        second_attempt.refresh_from_db()
+        result.refresh_from_db()
+        stale_item.refresh_from_db()
+        self.assertFalse(first_attempt.is_representative)
+        self.assertTrue(second_attempt.is_representative)
+        self.assertEqual(result.attempt_id, second_attempt.id)
+        self.assertEqual(result.total_score, 80.0)
+        self.assertEqual(result.objective_score, 40.0)
+        self.assertEqual(stale_item.score, 5.0)
+        dispatch_progress.assert_not_called()
 
     def test_total_score_accepts_linked_session_roster_and_materializes_exam_enrollment(self):
         ExamEnrollment.objects.filter(exam=self.exam).delete()

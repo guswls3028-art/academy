@@ -287,6 +287,7 @@ def build_student_exam_history(
         exam_list.append({
             "_result_id": result["id"],
             "_structure_exam_id": row["info"]["effective_structure_exam_id"],
+            "_current_max_score": row["info"]["max_score"],
             "exam_id": exam_id,
             "enrollment_id": enrollment_id,
             "title": row["info"]["title"],

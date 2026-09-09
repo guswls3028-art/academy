@@ -75,6 +75,7 @@ from apps.support.results.session_scores_dependencies import (
     AssessmentCorrection,
     ClinicLink,
     Enrollment,
+    Exam,
     ExamEnrollment,
     ExamQuestion,
     Homework,
@@ -758,7 +759,7 @@ class SessionScoresView(APIView):
                     omr_review_meta = omr_review_map.get((exid, eid))
                     block = {
                         "score": None,
-                        "max_score": None,
+                        "max_score": exam_max_score_map.get(exid, 100.0),
                         "passed": None,
                         "clinic_required": clinic_required,
                         "is_locked": False,
@@ -848,7 +849,12 @@ class SessionScoresView(APIView):
 
                     block = {
                         "score": None if is_not_submitted else float(initial_score or 0.0),
-                        "max_score": float(initial_max_score or 0.0),
+                        # 현재 성적표의 분모는 시험 정책을 따른다. 1차/재시험의
+                        # 당시 분모는 attempts에 별도 보존해 이력 의미를 잃지 않는다.
+                        "max_score": exam_max_score_map.get(
+                            exid,
+                            float(initial_max_score or 0.0),
+                        ),
                         "passed": passed,
                         "clinic_required": clinic_required,
                         "is_locked": locked,
@@ -861,6 +867,7 @@ class SessionScoresView(APIView):
                     source_fingerprint = exam_correction_fingerprint(
                         result=r,
                         items=items_list,
+                        current_max_score=block.get("max_score"),
                     )
 
                 if updated_at:
@@ -1097,6 +1104,10 @@ class SessionScoreCorrectionView(APIView):
                 raise ValidationError(
                     {"source_id": "이 차시에 등록된 시험이 아닙니다."}
                 )
+            exam = Exam.objects.select_for_update().get(
+                id=source_id,
+                tenant=tenant,
+            )
             # Lock only the representative Result row. Joining the nullable
             # attempt FK here makes PostgreSQL reject FOR UPDATE because the
             # nullable side of an outer join cannot be locked.
@@ -1120,11 +1131,12 @@ class SessionScoreCorrectionView(APIView):
                     {"source_id": "점수가 입력된 시험만 오답 확인 상태를 바꿀 수 있습니다."}
                 )
             score = _float_or_none(result.total_score)
-            max_score = _float_or_none(result.max_score)
+            max_score = _float_or_none(exam.max_score)
             source_updated_at = result.updated_at
             source_fingerprint = exam_correction_fingerprint(
                 result=result,
                 items=result.items.all(),
+                current_max_score=max_score,
             )
         else:
             homework = (

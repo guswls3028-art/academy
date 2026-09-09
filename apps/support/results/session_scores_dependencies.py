@@ -5,7 +5,7 @@ from __future__ import annotations
 from apps.domains.attendance.models import Attendance
 from apps.domains.clinic.models import SessionParticipant
 from apps.domains.enrollment.models import Enrollment, SessionEnrollment
-from apps.domains.exams.models import ExamEnrollment, ExamQuestion
+from apps.domains.exams.models import Exam, ExamEnrollment, ExamQuestion
 from apps.domains.exams.models.sheet import Sheet
 from apps.domains.exams.services.template_resolver import resolve_template_exam
 from apps.domains.homework.models import HomeworkAssignment

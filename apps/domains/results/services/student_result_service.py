@@ -225,10 +225,13 @@ def get_my_exam_result_data(request, exam_id: int, tenant=None) -> dict:
         assessment_correction_payload(
             source_type=AssessmentCorrection.SourceType.EXAM,
             score=data.get("total_score"),
-            max_score=data.get("max_score"),
+            max_score=float(getattr(exam, "max_score", 100.0) or 100.0),
             source_fingerprint=exam_correction_fingerprint(
                 result=result,
                 items=result.items.all(),
+                current_max_score=float(
+                    getattr(exam, "max_score", 100.0) or 100.0
+                ),
             ),
             correction=correction,
         )["correction_status"]

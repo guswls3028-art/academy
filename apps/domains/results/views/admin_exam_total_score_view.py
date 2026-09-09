@@ -28,7 +28,7 @@ from apps.domains.results.guards.score_edit_lease_guard import (
 from apps.support.results.admin_exam_dependencies import (
     dispatch_progress_pipeline,
     get_latest_exam_submission_id,
-    get_regular_active_exam_for_tenant,
+    lock_regular_active_exam_for_tenant,
     lock_enrollment_for_exam_state_transition,
     resolve_exam_not_submitted_clinic_links,
 )
@@ -55,7 +55,7 @@ class AdminExamTotalScoreView(APIView):
         enrollment_id = int(enrollment_id)
 
         # ✅ tenant isolation: verify exam belongs to tenant
-        exam = get_regular_active_exam_for_tenant(
+        exam = lock_regular_active_exam_for_tenant(
             exam_id=exam_id,
             tenant=request.tenant,
         )
@@ -84,12 +84,24 @@ class AdminExamTotalScoreView(APIView):
         if new_score < 0:
             raise ValidationError({"detail": "score must be >= 0", "code": "INVALID"})
 
-        # max_score: 프론트에서 전달하면 사용, 없으면 시험 모델에서 가져옴 (기본 100)
+        # max_score는 시험 정책의 단일 진실이다. 오래 열린 화면이 과거 만점을
+        # 보내더라도 학생별 Result가 서로 다른 만점으로 저장되면 안 된다.
+        # 필드가 있으면 형식만 검증해 기존 요청 오류 계약은 유지한다.
         req_max = request.data.get("max_score")
         if req_max is not None:
-            max_score = parse_finite_score(req_max, field_name="max_score")
-        else:
-            max_score = float(getattr(exam, "max_score", 100.0) or 100.0)
+            parse_finite_score(req_max, field_name="max_score")
+        max_score = float(getattr(exam, "max_score", 100.0) or 100.0)
+        raw_attempt_index = request.data.get("attempt_index")
+        explicit_first_attempt = raw_attempt_index is not None
+        if explicit_first_attempt:
+            if isinstance(raw_attempt_index, bool) or raw_attempt_index not in (1, "1"):
+                raise ValidationError(
+                    {
+                        "attempt_index": (
+                            "합산 점수에서 명시적으로 수정할 수 있는 이력은 1차 시험입니다."
+                        )
+                    }
+                )
 
         # -------------------------------------------------
         # 1️⃣ Result (대표 스냅샷)
@@ -104,7 +116,26 @@ class AdminExamTotalScoreView(APIView):
             )
             .first()
         )
-        if not result or not result.attempt_id:
+        explicit_attempt = None
+        if explicit_first_attempt:
+            explicit_attempt = (
+                ExamAttempt.objects.select_for_update()
+                .filter(
+                    exam_id=exam_id,
+                    enrollment_id=enrollment_id,
+                    attempt_index=1,
+                )
+                .first()
+            )
+            if explicit_attempt is None:
+                raise NotFound(
+                    {"detail": "first attempt not found", "code": "NOT_FOUND"}
+                )
+            if result is None:
+                raise NotFound(
+                    {"detail": "result snapshot not found", "code": "NOT_FOUND"}
+                )
+        elif not result or not result.attempt_id:
             # 과제 quick patch처럼 "없으면 생성" (수동 입력용 attempt/result 생성)
             qs = (
                 ExamAttempt.objects
@@ -154,7 +185,11 @@ class AdminExamTotalScoreView(APIView):
         # -------------------------------------------------
         # 2️⃣ Attempt LOCK 상태 확인
         # -------------------------------------------------
-        attempt = ExamAttempt.objects.filter(id=int(result.attempt_id)).first()
+        attempt = explicit_attempt or (
+            ExamAttempt.objects.select_for_update()
+            .filter(id=int(result.attempt_id))
+            .first()
+        )
         if not attempt:
             raise NotFound({"detail": "attempt not found", "code": "NOT_FOUND"})
 
@@ -183,17 +218,24 @@ class AdminExamTotalScoreView(APIView):
 
         # submission은 있을 수도/없을 수도 있음 (오프라인 입력 허용)
         # Submission 모델에는 session_id 없음 → exam+enrollment 기준으로 최신 제출 조회
-        submission_id = get_latest_exam_submission_id(
-            enrollment_id=enrollment_id,
-            exam_id=exam_id,
-        ) or 0
+        fact_submission_id = (
+            int(attempt.submission_id or 0)
+            if explicit_first_attempt
+            else (
+                get_latest_exam_submission_id(
+                    enrollment_id=enrollment_id,
+                    exam_id=exam_id,
+                ) or 0
+            )
+        )
+        sync_result = not explicit_first_attempt or bool(attempt.is_representative)
 
         ResultFact.objects.create(
             target_type="exam",
             target_id=exam_id,
             enrollment_id=enrollment_id,
-            submission_id=submission_id,
-            attempt_id=int(result.attempt_id),
+            submission_id=fact_submission_id,
+            attempt_id=int(attempt.id),
             question_id=0,  # total override marker
             answer="",
             is_correct=bool(float(new_score) >= float(pass_score)),
@@ -202,6 +244,17 @@ class AdminExamTotalScoreView(APIView):
             source="manual_total",
             meta={
                 "manual_total": True,
+                **(
+                    {
+                        "result_snapshot": {
+                            "total_score": new_score,
+                            "objective_score": float(result.objective_score or 0.0),
+                            "max_score": max_score,
+                        }
+                    }
+                    if sync_result
+                    else {}
+                ),
                 "edited_at": timezone.now().isoformat(),
             },
         )
@@ -209,18 +262,36 @@ class AdminExamTotalScoreView(APIView):
         # -------------------------------------------------
         # 5️⃣ Result 업데이트 (합산 입력 시 total만 변경, objective_score 유지)
         # -------------------------------------------------
-        result.total_score = float(new_score)
-        result.max_score = float(max_score)
-        result.save(update_fields=["total_score", "max_score", "updated_at"])
+        if sync_result:
+            result.total_score = float(new_score)
+            result.max_score = float(max_score)
+            result.save(update_fields=["total_score", "max_score", "updated_at"])
 
         # -------------------------------------------------
         # 5-b) Representative ExamAttempt 점수 동기화 + NOT_SUBMITTED 해제
         # -------------------------------------------------
-        if attempt and attempt.is_representative:
-            attempt.meta = attempt.meta or {}
-            attempt.meta["total_score"] = float(new_score)
-            attempt.meta["synced_from_result"] = True
-            attempt.meta.pop("status", None)  # 정상 점수 입력 시 NOT_SUBMITTED 해제
+        if attempt and (attempt.is_representative or explicit_first_attempt):
+            attempt_meta = dict(attempt.meta or {})
+            attempt_meta["total_score"] = float(new_score)
+            attempt_meta["max_score"] = float(max_score)
+            if sync_result:
+                attempt_meta["synced_from_result"] = True
+            attempt_meta.pop("status", None)  # 정상 점수 입력 시 NOT_SUBMITTED 해제
+            if int(attempt.attempt_index) == 1:
+                initial_snapshot = dict(
+                    attempt_meta.get("initial_snapshot")
+                    if isinstance(attempt_meta.get("initial_snapshot"), dict)
+                    else {}
+                )
+                initial_snapshot["total_score"] = float(new_score)
+                initial_snapshot["max_score"] = float(max_score)
+                initial_snapshot.setdefault(
+                    "submitted_at",
+                    timezone.now().isoformat(),
+                )
+                initial_snapshot.setdefault("source", "admin_manual_total")
+                attempt_meta["initial_snapshot"] = initial_snapshot
+            attempt.meta = attempt_meta
             attempt.save(update_fields=["meta", "updated_at"])
 
         # -------------------------------------------------
@@ -231,6 +302,11 @@ class AdminExamTotalScoreView(APIView):
         progress_ok = False
         progress_error = None
         progress_debug = {}
+        progress_submission_id = (
+            0
+            if explicit_first_attempt and not attempt.is_representative
+            else fact_submission_id
+        )
         try:
             # 디버그: pipeline 실행 전 상태 확인
             from apps.domains.results.models import Result as _R
@@ -242,13 +318,17 @@ class AdminExamTotalScoreView(APIView):
                 "sessions_for_exam": _session_ids,
             }
 
-            if submission_id:
-                dispatch_progress_pipeline(submission_id=int(submission_id))
+            if progress_submission_id:
+                dispatch_progress_pipeline(submission_id=int(progress_submission_id))
             else:
                 dispatch_progress_pipeline(exam_id=int(exam_id))
             progress_ok = True
         except Exception as exc:
-            logger.exception("progress pipeline failed (exam=%s, submission=%s)", exam_id, submission_id)
+            logger.exception(
+                "progress pipeline failed (exam=%s, submission=%s)",
+                exam_id,
+                progress_submission_id,
+            )
             progress_error = str(exc)[:200]
 
         # 정책 SSOT: messaging-policy.md "저장과 발송은 분리" — 점수 저장 자체는 알림 트리거 아님.
@@ -259,8 +339,13 @@ class AdminExamTotalScoreView(APIView):
                 "ok": True,
                 "exam_id": exam_id,
                 "enrollment_id": enrollment_id,
-                "total_score": float(result.total_score or 0.0),
-                "max_score": float(result.max_score or 0.0),
+                "total_score": (
+                    float(new_score)
+                    if explicit_first_attempt and not attempt.is_representative
+                    else float(result.total_score or 0.0)
+                ),
+                "max_score": float(max_score),
+                "attempt_index": int(attempt.attempt_index),
                 "progress": {"dispatched": progress_ok, "error": progress_error, "debug": progress_debug},
             },
             status=drf_status.HTTP_200_OK,
