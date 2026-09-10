@@ -4,7 +4,7 @@
 
 # Test runner and coverage reporting
 pytest==9.1.1
-pytest-django==4.12.0
+pytest-django==4.14.0
 coverage==7.15.4
 
 # PDF fixtures exercised by the broad suite but not required by the API runtime
