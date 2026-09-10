@@ -217,6 +217,7 @@ class WorkRecordViewSet(viewsets.ModelViewSet):
                         "adjustment_amount",
                     }
                 )
+                evidence_fields = sorted(set(audited_fields) | {"date", "staff"})
                 old_values = {
                     field: str(
                         getattr(
@@ -226,7 +227,7 @@ class WorkRecordViewSet(viewsets.ModelViewSet):
                             else field,
                         )
                     )
-                    for field in audited_fields
+                    for field in evidence_fields
                 }
                 locked_staff_by_id = staff_repo.staff_map_for_update(
                     instance.tenant_id,
@@ -277,14 +278,11 @@ class WorkRecordViewSet(viewsets.ModelViewSet):
                 else:
                     saved_record = serializer.save(**save_kwargs)
                 if audited_fields:
-                    from apps.core.services.ops_audit import record_audit
-
-                    record_audit(
+                    _record_required_work_record_audit(
                         self.request,
                         action="staff.work_record_updated",
-                        target_tenant=self.request.tenant,
-                        summary=f"work_record_id={saved_record.id}",
                         payload={
+                            "source": "payroll_manager_manual",
                             "work_record_id": saved_record.id,
                             "fields": audited_fields,
                             "old": old_values,
@@ -297,7 +295,7 @@ class WorkRecordViewSet(viewsets.ModelViewSet):
                                         else field,
                                     )
                                 )
-                                for field in audited_fields
+                                for field in evidence_fields
                             },
                         },
                     )
