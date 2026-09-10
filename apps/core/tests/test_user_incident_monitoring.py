@@ -336,19 +336,24 @@ class UserIncidentAlertRuleTests(TestCase):
     def test_dry_run_never_dispatches_or_consumes_incidents(self, post_mock):
         self._backend_incident()
 
-        call_command(
-            "check_dev_alerts",
-            "--rule",
-            "user_incidents",
-            "--dry-run",
-            stdout=StringIO(),
-        )
+        with self.assertRaisesMessage(CommandError, "were not delivered"):
+            call_command(
+                "check_dev_alerts",
+                "--rule",
+                "user_incidents",
+                "--dry-run",
+                stdout=StringIO(),
+            )
 
         post_mock.assert_not_called()
         self.assertFalse(
             OpsAuditLog.objects.filter(action=SLACK_DELIVERY_ACTION).exists()
         )
         self.assertIsNotNone(rule_user_incidents())
+        self.assertEqual(
+            OpsAuditLog.objects.get(action="cron.check_dev_alerts").result,
+            "failed",
+        )
 
 
 class DevAlertsWorkflowContractTests(SimpleTestCase):

@@ -779,9 +779,16 @@ class Command(BaseCommand):
             for row in (data.get("rows") or [])[:10]:
                 self.stdout.write("  " + json.dumps(row, ensure_ascii=False))
 
+        user_incidents_triggered = any(
+            rule.key == "user_incidents" for rule, _data in triggered
+        )
         if dry_run:
             delivery_status = "dry_run"
             self.stdout.write(self.style.NOTICE("\n--dry-run: Slack 전송 생략."))
+            if user_incidents_triggered:
+                failures.append(
+                    "Actionable user incidents were not delivered (--dry-run)"
+                )
         else:
             webhook_url = (getattr(settings, "DEV_ALERTS_WEBHOOK_URL", "") or "").strip()
             webhook_required = bool(
@@ -789,9 +796,6 @@ class Command(BaseCommand):
             )
             if not webhook_url:
                 delivery_status = "not_configured"
-                user_incidents_triggered = any(
-                    rule.key == "user_incidents" for rule, _data in triggered
-                )
                 if webhook_required or user_incidents_triggered:
                     failures.append(
                         "DEV_ALERTS_WEBHOOK_URL is not configured"
