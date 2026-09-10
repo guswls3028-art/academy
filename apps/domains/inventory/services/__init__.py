@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-import uuid
 from django.db import transaction
 
 from ..models import InventoryFolder, InventoryFile
@@ -14,9 +13,16 @@ from academy.adapters.db.django import repositories_inventory as inv_repo
 from apps.support.inventory.matchup_dependencies import (
     cleanup_matchup_problem_images,
     get_matchup_document_for_inventory_file,
+    lock_matchup_delete_protection_result,
     matchup_delete_protection_result,
 )
+from apps.support.inventory.storage_cleanup_dependencies import (
+    compensate_unattached_storage_object,
+    ensure_storage_inventory_key_attachable,
+)
+from apps.support.inventory.student_dependencies import active_student_id_for_storage
 from apps.support.results.student_reported_scores import inventory_files_have_any_reported_score
+from apps.support.students.namespace_lock import lock_student_ps_namespaces
 
 try:
     from apps.infrastructure.storage.r2 import (
@@ -47,38 +53,77 @@ def _filename_from_r2_key(r2_key: str) -> str:
     return r2_key.split("/")[-1] if r2_key else ""
 
 
-def _move_backup_key(tenant: Tenant, original_key: str) -> str:
-    filename = safe_filename(_filename_from_r2_key(original_key) or "object")
-    return f"tenants/{tenant.id}/inventory/.move-backup/{uuid.uuid4().hex}/{filename}"
-
-
-def _cleanup_backup_keys(backup_plans: list[tuple[str, str]]) -> None:
-    for _, backup_key in backup_plans:
-        try:
-            delete_object_r2_storage(key=backup_key)
-        except Exception:
-            pass
-
-
-def _restore_backups(backup_plans: list[tuple[str, str]]) -> bool:
-    restored = True
-    for original_key, backup_key in backup_plans:
-        try:
-            copy_object_r2_storage(source_key=backup_key, dest_key=original_key)
-        except Exception:
-            restored = False
-    return restored
-
-
-def _cleanup_uncommitted_copies(copied_keys: list[str], backup_plans: list[tuple[str, str]]) -> None:
-    backup_original_keys = {original_key for original_key, _ in backup_plans}
+def _cleanup_uncommitted_copies(
+    *,
+    tenant: Tenant,
+    copied_keys: list[str],
+    uncertain_keys: set[str] | None = None,
+) -> bool:
+    cleanup_safe = True
+    uncertain = uncertain_keys or set()
     for copied_key in copied_keys:
-        if copied_key in backup_original_keys:
-            continue
         try:
-            delete_object_r2_storage(key=copied_key)
+            compensate_unattached_storage_object(
+                tenant_id=tenant.id,
+                key=copied_key,
+                uncertain_write=copied_key in uncertain,
+            )
         except Exception:
-            pass
+            cleanup_safe = False
+    return cleanup_safe
+
+
+def inventory_move_lock_token(*, scope: str, student_ps: str) -> str:
+    return student_ps if scope == "student" else "__admin_inventory_move__"
+
+
+def _inventory_namespace_snapshot(
+    *,
+    tenant: Tenant,
+    scope: str,
+    student_ps: str,
+) -> tuple[tuple, tuple]:
+    metadata_filters = {"tenant": tenant, "scope": scope}
+    if scope == "student":
+        metadata_filters["student_ps"] = student_ps
+    folders = tuple(
+        InventoryFolder.objects.filter(**metadata_filters)
+        .order_by("id")
+        .values_list("id", "parent_id", "name", "updated_at")
+    )
+    files = tuple(
+        InventoryFile.objects.filter(**metadata_filters)
+        .order_by("id")
+        .values_list("id", "folder_id", "r2_key", "display_name", "updated_at")
+    )
+    return folders, files
+
+
+def _folder_target_is_descendant(
+    *,
+    tenant: Tenant,
+    scope: str,
+    student_ps: str,
+    source_folder_id: int,
+    target_folder_id: int | None,
+) -> bool:
+    current_id = target_folder_id
+    seen: set[int] = set()
+    while current_id is not None:
+        if current_id == source_folder_id or current_id in seen:
+            return True
+        seen.add(current_id)
+        filters = {"tenant": tenant, "scope": scope, "id": current_id}
+        if scope == "student":
+            filters["student_ps"] = student_ps
+        row = InventoryFolder.objects.filter(**filters).values_list(
+            "parent_id",
+            flat=True,
+        ).first()
+        if row is None:
+            return False
+        current_id = row
+    return False
 
 
 def _check_duplicate_file(target_folder_id: int | None, tenant: Tenant, scope: str, student_ps: str, display_name: str):
@@ -90,6 +135,51 @@ def _check_duplicate_file(target_folder_id: int | None, tenant: Tenant, scope: s
 
 def _matchup_delete_protection_result(files: list[InventoryFile]) -> dict | None:
     return matchup_delete_protection_result(files)
+
+
+class _InventoryMoveRejected(Exception):
+    def __init__(self, result: dict):
+        super().__init__(result.get("code") or result.get("detail") or "move rejected")
+        self.result = result
+
+
+def _reported_score_move_rejection(*, overwrite: bool, folder: bool) -> dict:
+    if folder:
+        action = "덮어쓸" if overwrite else "이동할"
+        detail = f"검수 기록과 연결된 성적표 원본이 포함되어 폴더를 {action} 수 없습니다."
+    else:
+        action = "덮어쓸" if overwrite else "이동할"
+        detail = f"검수 기록과 연결된 성적표 원본은 {action} 수 없습니다."
+    return {
+        "ok": False,
+        "detail": detail,
+        "code": "reported_score_evidence_protected",
+        "status": 409,
+    }
+
+
+def _raise_if_locked_files_are_protected(
+    *,
+    tenant: Tenant,
+    file_ids: list[int],
+    overwrite: bool,
+    folder: bool,
+    matchup: bool,
+) -> None:
+    if matchup:
+        protection_result = lock_matchup_delete_protection_result(
+            tenant=tenant,
+            inventory_file_ids=file_ids,
+        )
+        if protection_result:
+            raise _InventoryMoveRejected(protection_result)
+    if inventory_files_have_any_reported_score(
+        tenant=tenant,
+        file_ids=file_ids,
+    ):
+        raise _InventoryMoveRejected(
+            _reported_score_move_rejection(overwrite=overwrite, folder=folder)
+        )
 
 
 def move_file(
@@ -129,7 +219,6 @@ def move_file(
         return {"ok": True, "detail": "Already in target"}
 
     target_path = _get_folder_path_str(target_folder, tenant, scope, student_ps)
-    current_filename = _filename_from_r2_key(source.r2_key)
     display_name = source.display_name
 
     existing = _check_duplicate_file(target_folder_id, tenant, scope, student_ps, display_name)
@@ -145,7 +234,6 @@ def move_file(
             else:
                 base = display_name
             display_name = f"{base}_복사본{ext}" if ext else f"{base}_복사본"
-            current_filename = safe_filename(display_name)
         else:
             return {"ok": False, "status": 409, "code": "duplicate", "existing_name": display_name, "detail": "File with same name exists"}
 
@@ -169,48 +257,142 @@ def move_file(
         scope=scope,
         student_ps=student_ps,
         folder_path=target_path,
-        file_name=current_filename,
+        # A move always writes to a fresh object key. In particular, overwrite
+        # must never CopyObject directly onto the destination's canonical key:
+        # an ambiguous provider timeout could corrupt bytes still owned by the
+        # destination row before the DB ownership change commits.
+        file_name=safe_filename(display_name),
     )
 
     old_key = source.r2_key
-    backup_plans: list[tuple[str, str]] = []
-    if overwrite_existing:
-        existing_key = overwrite_existing.r2_key
-        backup_key = _move_backup_key(tenant, existing_key)
-        try:
-            copy_object_r2_storage(source_key=existing_key, dest_key=backup_key)
-        except Exception as e:
-            return {"ok": False, "detail": f"R2 backup failed: {e}", "status": 502}
-        backup_plans.append((existing_key, backup_key))
-
+    namespace_snapshot = _inventory_namespace_snapshot(
+        tenant=tenant,
+        scope=scope,
+        student_ps=student_ps,
+    )
     try:
         copy_object_r2_storage(source_key=old_key, dest_key=new_key)
-    except Exception as e:
-        _cleanup_backup_keys(backup_plans)
-        return {"ok": False, "detail": f"R2 copy failed: {e}", "status": 502}
+    except Exception:
+        cleanup_safe = _cleanup_uncommitted_copies(
+            tenant=tenant,
+            copied_keys=[new_key],
+            uncertain_keys={new_key},
+        )
+        detail = "파일 이동용 저장소 복사에 실패했습니다. 다시 시도해 주세요."
+        if not cleanup_safe:
+            detail = "파일 이동에 실패했고 임시 저장자료 정리 확인이 필요합니다."
+        return {
+            "ok": False,
+            "code": "inventory_storage_copy_failed",
+            "detail": detail,
+            "status": 502,
+        }
 
     try:
         with transaction.atomic():
+            lock_student_ps_namespaces(
+                tenant_id=tenant.id,
+                ps_numbers=(
+                    inventory_move_lock_token(
+                        scope=scope,
+                        student_ps=student_ps,
+                    ),
+                ),
+            )
+            if scope == "student":
+                if active_student_id_for_storage(
+                    tenant_id=tenant.id,
+                    ps_number=student_ps,
+                ) is None:
+                    raise ValueError("student storage owner changed during move")
+            if _inventory_namespace_snapshot(
+                tenant=tenant,
+                scope=scope,
+                student_ps=student_ps,
+            ) != namespace_snapshot:
+                raise ValueError("inventory namespace changed during move")
+            object_filters = {"tenant": tenant, "scope": scope}
+            if scope == "student":
+                object_filters["student_ps"] = student_ps
+            if InventoryFile.objects.select_for_update().filter(
+                **object_filters,
+                id=source.id,
+                r2_key=old_key,
+            ).first() is None:
+                raise ValueError("inventory file changed during move")
+            if target_folder_id and not InventoryFolder.objects.select_for_update().filter(
+                **object_filters,
+                id=target_folder_id,
+            ).exists():
+                raise ValueError("inventory folder changed during move")
+            if overwrite_existing and InventoryFile.objects.select_for_update().filter(
+                **object_filters,
+                id=overwrite_existing.id,
+                r2_key=overwrite_existing.r2_key,
+            ).first() is None:
+                raise ValueError("inventory overwrite target changed during move")
+            _raise_if_locked_files_are_protected(
+                tenant=tenant,
+                file_ids=[source.id],
+                overwrite=False,
+                folder=False,
+                matchup=False,
+            )
+            if overwrite_existing:
+                _raise_if_locked_files_are_protected(
+                    tenant=tenant,
+                    file_ids=[overwrite_existing.id],
+                    overwrite=True,
+                    folder=False,
+                    matchup=True,
+                )
+            ensure_storage_inventory_key_attachable(
+                tenant_id=tenant.id,
+                key=new_key,
+            )
             if overwrite_existing:
                 overwrite_existing.delete()
             source.folder_id = target_folder_id
             source.r2_key = new_key
             source.display_name = display_name
             source.save(update_fields=["folder_id", "r2_key", "display_name", "updated_at"])
-    except Exception as e:
-        restored = _restore_backups(backup_plans)
-        _cleanup_backup_keys(backup_plans)
-        detail = f"DB update failed: {e}"
-        if not restored:
-            detail = f"{detail}; destination restore failed"
-        return {"ok": False, "detail": detail, "status": 500}
+    except _InventoryMoveRejected as exc:
+        _cleanup_uncommitted_copies(
+            tenant=tenant,
+            copied_keys=[new_key],
+        )
+        return exc.result
+    except Exception as exc:
+        cleanup_safe = _cleanup_uncommitted_copies(
+            tenant=tenant,
+            copied_keys=[new_key],
+        )
+        is_conflict = isinstance(exc, ValueError)
+        detail = (
+            "파일 이동 중 저장정보가 변경되었습니다. 새로고침 후 다시 시도해 주세요."
+            if is_conflict
+            else "파일 이동 정보를 저장하지 못했습니다. 다시 시도해 주세요."
+        )
+        if not cleanup_safe:
+            detail = "파일 이동에 실패했고 임시 저장자료 정리 확인이 필요합니다."
+        return {
+            "ok": False,
+            "code": (
+                "inventory_move_conflict"
+                if is_conflict
+                else "inventory_move_commit_failed"
+            ),
+            "detail": detail,
+            "status": 409 if is_conflict else 500,
+        }
 
-    try:
-        delete_object_r2_storage(key=old_key)
-    except Exception as e:
-        return {"ok": False, "detail": f"R2 delete failed (data updated): {e}", "status": 500}
-
-    _cleanup_backup_keys(backup_plans)
+    cleanup_keys = [old_key]
+    if overwrite_existing:
+        cleanup_keys.append(overwrite_existing.r2_key)
+    _cleanup_uncommitted_copies(
+        tenant=tenant,
+        copied_keys=list(dict.fromkeys(cleanup_keys)),
+    )
     return {"ok": True}
 
 
@@ -386,23 +568,30 @@ def move_folder(
     if source_folder.parent_id == target_folder_id:
         return {"ok": True, "detail": "Already in target"}
 
+    overwrite_folders: list[InventoryFolder] = []
     overwrite_files: list[InventoryFile] = []
     q = inv_repo.inventory_folder_filter_parent_id_name(tenant, target_folder_id, source_folder.name).filter(scope=scope)
     if scope == "student":
         q = q.filter(student_ps=student_ps)
     existing_sibling = q.order_by("id").first()
     overwrite_folder = None
+    source_folder_renamed = False
     if existing_sibling and existing_sibling.id != source_folder_id:
         if on_duplicate == "overwrite":
             overwrite_folder = existing_sibling
         elif on_duplicate == "rename":
             source_folder.name = f"{source_folder.name}_복사본"
-            source_folder.save(update_fields=["name", "updated_at"])
+            source_folder_renamed = True
         else:
             return {"ok": False, "status": 409, "code": "duplicate", "existing_name": source_folder.name, "detail": "Folder with same name exists"}
 
     if overwrite_folder:
-        _, overwrite_files = _collect_folder_tree(overwrite_folder, tenant, scope, student_ps)
+        overwrite_folders, overwrite_files = _collect_folder_tree(
+            overwrite_folder,
+            tenant,
+            scope,
+            student_ps,
+        )
         protection_result = _matchup_delete_protection_result(overwrite_files)
         if protection_result:
             return protection_result
@@ -423,7 +612,6 @@ def move_folder(
     copy_plans = []
     for inv_file in files:
         old_key = inv_file.r2_key
-        file_name = _filename_from_r2_key(old_key)
         current_folder_path = _file_folder_path(inv_file, tenant, scope, student_ps)
         if current_folder_path.startswith(source_folder_path):
             rel = current_folder_path[len(source_folder_path):].lstrip("/")
@@ -438,61 +626,201 @@ def move_folder(
             scope=scope,
             student_ps=student_ps,
             folder_path=new_folder_path,
-            file_name=file_name,
+            # Keep every pre-commit copy detached from canonical destination
+            # objects. The DB commit is the sole ownership hand-off.
+            file_name=safe_filename(inv_file.display_name),
         )
         copy_plans.append((inv_file, old_key, new_key))
 
-    backup_plans: list[tuple[str, str]] = []
-    if overwrite_folder:
-        for existing_file in overwrite_files:
-            existing_key = existing_file.r2_key
-            backup_key = _move_backup_key(tenant, existing_key)
-            try:
-                copy_object_r2_storage(source_key=existing_key, dest_key=backup_key)
-            except Exception as e:
-                _cleanup_backup_keys(backup_plans)
-                return {"ok": False, "detail": f"R2 backup failed: {e}", "status": 502}
-            backup_plans.append((existing_key, backup_key))
-
+    namespace_snapshot = _inventory_namespace_snapshot(
+        tenant=tenant,
+        scope=scope,
+        student_ps=student_ps,
+    )
     copied_keys: list[str] = []
     for inv_file, old_key, new_key in copy_plans:
         try:
             copy_object_r2_storage(source_key=old_key, dest_key=new_key)
             copied_keys.append(new_key)
-        except Exception as e:
-            _restore_backups(backup_plans)
-            _cleanup_uncommitted_copies(copied_keys, backup_plans)
-            _cleanup_backup_keys(backup_plans)
-            return {"ok": False, "detail": f"R2 copy failed: {e}", "status": 502}
+        except Exception:
+            cleanup_safe = _cleanup_uncommitted_copies(
+                tenant=tenant,
+                copied_keys=[*copied_keys, new_key],
+                uncertain_keys={new_key},
+            )
+            detail = "폴더 이동용 저장소 복사에 실패했습니다. 다시 시도해 주세요."
+            if not cleanup_safe:
+                detail = "폴더 이동에 실패했고 임시 저장자료 정리 확인이 필요합니다."
+            return {
+                "ok": False,
+                "code": "inventory_storage_copy_failed",
+                "detail": detail,
+                "status": 502,
+            }
 
     try:
         with transaction.atomic():
+            lock_student_ps_namespaces(
+                tenant_id=tenant.id,
+                ps_numbers=(
+                    inventory_move_lock_token(
+                        scope=scope,
+                        student_ps=student_ps,
+                    ),
+                ),
+            )
+            if scope == "student":
+                if active_student_id_for_storage(
+                    tenant_id=tenant.id,
+                    ps_number=student_ps,
+                ) is None:
+                    raise ValueError("student storage owner changed during move")
+            if _inventory_namespace_snapshot(
+                tenant=tenant,
+                scope=scope,
+                student_ps=student_ps,
+            ) != namespace_snapshot:
+                raise ValueError("inventory namespace changed during move")
+            object_filters = {"tenant": tenant, "scope": scope}
+            if scope == "student":
+                object_filters["student_ps"] = student_ps
+            folder_ids = sorted(item.id for item in folders)
+            file_ids = sorted(item.id for item in files)
+            locked_folder_ids = tuple(
+                InventoryFolder.objects.select_for_update()
+                .filter(**object_filters, id__in=folder_ids)
+                .order_by("id")
+                .values_list("id", flat=True)
+            )
+            if locked_folder_ids != tuple(folder_ids):
+                raise ValueError("inventory folder tree changed during move")
+            locked_file_rows = tuple(
+                InventoryFile.objects.select_for_update()
+                .filter(**object_filters, id__in=file_ids)
+                .order_by("id")
+                .values_list("id", "folder_id", "r2_key")
+            )
+            expected_file_rows = tuple(
+                sorted(
+                    (inv_file.id, inv_file.folder_id, old_key)
+                    for inv_file, old_key, _ in copy_plans
+                )
+            )
+            if locked_file_rows != expected_file_rows:
+                raise ValueError("inventory file tree changed during move")
+            if target_folder_id and not InventoryFolder.objects.select_for_update().filter(
+                **object_filters,
+                id=target_folder_id,
+            ).exists():
+                raise ValueError("inventory target folder changed during move")
+            if _folder_target_is_descendant(
+                tenant=tenant,
+                scope=scope,
+                student_ps=student_ps,
+                source_folder_id=source_folder.id,
+                target_folder_id=target_folder_id,
+            ):
+                raise ValueError("inventory target became a descendant during move")
+            if overwrite_folder:
+                expected_overwrite_folder_ids = tuple(
+                    sorted(folder.id for folder in overwrite_folders)
+                )
+                locked_overwrite_folder_ids = tuple(
+                    InventoryFolder.objects.select_for_update()
+                    .filter(
+                        **object_filters,
+                        id__in=expected_overwrite_folder_ids,
+                    )
+                    .order_by("id")
+                    .values_list("id", flat=True)
+                )
+                if locked_overwrite_folder_ids != expected_overwrite_folder_ids:
+                    raise ValueError("inventory overwrite folder changed during move")
+                expected_overwrite_file_rows = tuple(
+                    sorted(
+                        (inv_file.id, inv_file.folder_id, inv_file.r2_key)
+                        for inv_file in overwrite_files
+                    )
+                )
+                locked_overwrite_file_rows = tuple(
+                    InventoryFile.objects.select_for_update()
+                    .filter(
+                        **object_filters,
+                        id__in=[row[0] for row in expected_overwrite_file_rows],
+                    )
+                    .order_by("id")
+                    .values_list("id", "folder_id", "r2_key")
+                )
+                if locked_overwrite_file_rows != expected_overwrite_file_rows:
+                    raise ValueError("inventory overwrite files changed during move")
+            _raise_if_locked_files_are_protected(
+                tenant=tenant,
+                file_ids=file_ids,
+                overwrite=False,
+                folder=True,
+                matchup=False,
+            )
+            if overwrite_folder:
+                overwrite_file_ids = [
+                    inventory_file.id for inventory_file in overwrite_files
+                ]
+                _raise_if_locked_files_are_protected(
+                    tenant=tenant,
+                    file_ids=overwrite_file_ids,
+                    overwrite=True,
+                    folder=True,
+                    matchup=True,
+                )
+            for _, _, new_key in copy_plans:
+                ensure_storage_inventory_key_attachable(
+                    tenant_id=tenant.id,
+                    key=new_key,
+                )
             if overwrite_folder:
                 overwrite_folder.delete()
             for inv_file, old_key, new_key in copy_plans:
                 inv_file.r2_key = new_key
                 inv_file.save(update_fields=["r2_key", "updated_at"])
             source_folder.parent = target_folder
-            source_folder.save(update_fields=["parent_id", "updated_at"])
-    except Exception as e:
-        _restore_backups(backup_plans)
-        _cleanup_uncommitted_copies(copied_keys, backup_plans)
-        _cleanup_backup_keys(backup_plans)
-        return {"ok": False, "detail": f"DB update failed: {e}", "status": 500}
+            source_folder_fields = ["parent_id", "updated_at"]
+            if source_folder_renamed:
+                source_folder_fields.append("name")
+            source_folder.save(update_fields=source_folder_fields)
+    except _InventoryMoveRejected as exc:
+        _cleanup_uncommitted_copies(
+            tenant=tenant,
+            copied_keys=copied_keys,
+        )
+        return exc.result
+    except Exception as exc:
+        cleanup_safe = _cleanup_uncommitted_copies(
+            tenant=tenant,
+            copied_keys=copied_keys,
+        )
+        is_conflict = isinstance(exc, ValueError)
+        detail = (
+            "폴더 이동 중 저장정보가 변경되었습니다. 새로고침 후 다시 시도해 주세요."
+            if is_conflict
+            else "폴더 이동 정보를 저장하지 못했습니다. 다시 시도해 주세요."
+        )
+        if not cleanup_safe:
+            detail = "폴더 이동에 실패했고 임시 저장자료 정리 확인이 필요합니다."
+        return {
+            "ok": False,
+            "code": (
+                "inventory_move_conflict"
+                if is_conflict
+                else "inventory_move_commit_failed"
+            ),
+            "detail": detail,
+            "status": 409 if is_conflict else 500,
+        }
 
-    for inv_file, old_key, new_key in copy_plans:
-        try:
-            delete_object_r2_storage(key=old_key)
-        except Exception:
-            pass
-    copied_key_set = set(copied_keys)
-    for original_key, _ in backup_plans:
-        if original_key in copied_key_set:
-            continue
-        try:
-            delete_object_r2_storage(key=original_key)
-        except Exception:
-            pass
-    _cleanup_backup_keys(backup_plans)
+    cleanup_keys = [old_key for _, old_key, _ in copy_plans]
+    cleanup_keys.extend(inv_file.r2_key for inv_file in overwrite_files)
+    _cleanup_uncommitted_copies(
+        tenant=tenant,
+        copied_keys=list(dict.fromkeys(cleanup_keys)),
+    )
 
     return {"ok": True}

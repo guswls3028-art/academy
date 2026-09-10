@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import threading
@@ -776,9 +777,16 @@ class SetupYmathRealuseScenarioTests(TestCase):
         def list_objects_v2(**kwargs):
             requests.append(kwargs)
             if kwargs["Prefix"] == exact_prefixes[0] and "ContinuationToken" not in kwargs:
-                return {"Contents": [{"Key": "one"}], "IsTruncated": True, "NextContinuationToken": "next"}
+                return {
+                    "Contents": [{"Key": f"{exact_prefixes[0]}one"}],
+                    "IsTruncated": True,
+                    "NextContinuationToken": "next",
+                }
             if kwargs.get("ContinuationToken") == "next":
-                return {"Contents": [{"Key": "two"}], "IsTruncated": False}
+                return {
+                    "Contents": [{"Key": f"{exact_prefixes[0]}two"}],
+                    "IsTruncated": False,
+                }
             return {"Contents": [], "IsTruncated": False}
 
         client.list_objects_v2.side_effect = list_objects_v2
@@ -830,6 +838,177 @@ class SetupYmathRealuseScenarioTests(TestCase):
         self.assertEqual([request["Prefix"] for request in requests], [exact_prefixes[0], *exact_prefixes])
         self.assertEqual(requests[1]["ContinuationToken"], "next")
         self.assertTrue(all(request["Bucket"] == "test-storage" for request in requests))
+
+    def test_fixed_cleanup_recovers_owned_absent_tenant_id_and_deletes_only_exact_r2_objects(self):
+        tenant_code = "qa-ymath-realuse-fe-34396187118-1-fa323e758321"
+        capability = "a" * 64
+        tenant = Tenant.objects.create(code=tenant_code, name="Disposable QA")
+        tenant_id = tenant.id
+        OpsAuditLog.objects.create(
+            actor_username="frontend-release-runner",
+            action="development.qa.setup",
+            target_tenant=tenant,
+            payload={
+                "schema": "frontend-development-qa/v1",
+                "tenant_code": tenant_code,
+                "tenant_id": tenant_id,
+                "owner_sha256": hashlib.sha256(
+                    f"{tenant_code}:{tenant_id}:{capability}".encode()
+                ).hexdigest(),
+            },
+            result="success",
+        )
+        tenant.delete()
+
+        exact_key = f"tenants/{tenant_id}/students/owned.txt"
+        foreign_key = f"tenants/{tenant_id + 1}/students/foreign.txt"
+        objects = {exact_key, foreign_key}
+        client = Mock()
+
+        def list_objects_v2(**kwargs):
+            matching = [
+                {"Key": key}
+                for key in sorted(objects)
+                if key.startswith(kwargs["Prefix"])
+            ]
+            return {"Contents": matching, "IsTruncated": False}
+
+        def delete_object(**kwargs):
+            objects.remove(kwargs["Key"])
+
+        client.list_objects_v2.side_effect = list_objects_v2
+        client.delete_object.side_effect = delete_object
+
+        class EmptyProcPath:
+            def __init__(self, value):
+                self.value = str(value)
+
+            def iterdir(self):
+                return []
+
+            def read_text(self):
+                return "header"
+
+        with patch("boto3.client", return_value=client), patch(
+            "apps.core.management.commands.setup_ymath_realuse_scenario.Path",
+            EmptyProcPath,
+        ):
+            with patch.dict(
+                os.environ,
+                {"QA_ACTION": "Inspect", "QA_CAPABILITY": capability},
+                clear=False,
+            ):
+                inspected = Command._non_database_residue(
+                    tenant_id=None,
+                    tenant_code=tenant_code,
+                )
+            self.assertEqual(inspected["r2_objects"], 1)
+            client.delete_object.assert_not_called()
+
+            with patch.dict(
+                os.environ,
+                {"QA_ACTION": "Cleanup", "QA_CAPABILITY": capability},
+                clear=False,
+            ):
+                cleaned = Command._non_database_residue(
+                    tenant_id=None,
+                    tenant_code=tenant_code,
+                )
+
+        self.assertEqual(cleaned["r2_objects"], 0)
+        client.delete_object.assert_called_once_with(
+            Bucket="test-storage",
+            Key=exact_key,
+        )
+        self.assertEqual(objects, {foreign_key})
+
+    def test_absent_cleanup_refuses_wrong_capability_before_r2_delete(self):
+        tenant_code = "qa-ymath-realuse-fe-34365127631-1-0ec6bd5d61d8"
+        capability = "a" * 64
+        tenant = Tenant.objects.create(code=tenant_code, name="Disposable QA")
+        tenant_id = tenant.id
+        OpsAuditLog.objects.create(
+            actor_username="frontend-release-runner",
+            action="development.qa.setup",
+            target_tenant=tenant,
+            payload={
+                "schema": "frontend-development-qa/v1",
+                "tenant_code": tenant_code,
+                "tenant_id": tenant_id,
+                "owner_sha256": hashlib.sha256(
+                    f"{tenant_code}:{tenant_id}:{capability}".encode()
+                ).hexdigest(),
+            },
+            result="success",
+        )
+        tenant.delete()
+        client = Mock()
+
+        class EmptyProcPath:
+            def __init__(self, value):
+                self.value = str(value)
+
+            def iterdir(self):
+                return []
+
+            def read_text(self):
+                return "header"
+
+        with patch("boto3.client", return_value=client), patch(
+            "apps.core.management.commands.setup_ymath_realuse_scenario.Path",
+            EmptyProcPath,
+        ), patch.dict(
+            os.environ,
+            {"QA_ACTION": "Cleanup", "QA_CAPABILITY": "b" * 64},
+            clear=False,
+        ), self.assertRaisesMessage(CommandError, "ownership capability"):
+            Command._non_database_residue(
+                tenant_id=None,
+                tenant_code=tenant_code,
+            )
+
+        client.list_objects_v2.assert_not_called()
+        client.delete_object.assert_not_called()
+
+    @override_settings(
+        R2_AI_BUCKET="academy-production-artifacts",
+        R2_STORAGE_BUCKET="academy-production-artifacts",
+        R2_EXCEL_BUCKET="academy-production-artifacts",
+        R2_ADMIN_BUCKET="academy-production-artifacts",
+        R2_VIDEO_BUCKET="academy-production-artifacts",
+    )
+    def test_fixed_cleanup_refuses_non_development_r2_before_client_creation(self):
+        tenant_code = "qa-ymath-realuse-fe-34396187118-1-deadbeef1234"
+        capability = "a" * 64
+        tenant = Tenant.objects.create(code=tenant_code, name="Disposable QA")
+        tenant_id = tenant.id
+        OpsAuditLog.objects.create(
+            actor_username="frontend-release-runner",
+            action="development.qa.setup",
+            target_tenant=tenant,
+            payload={
+                "schema": "frontend-development-qa/v1",
+                "tenant_code": tenant_code,
+                "tenant_id": tenant_id,
+                "owner_sha256": hashlib.sha256(
+                    f"{tenant_code}:{tenant_id}:{capability}".encode()
+                ).hexdigest(),
+            },
+            result="success",
+        )
+        tenant.delete()
+
+        with patch("boto3.client") as client, patch.dict(
+            os.environ,
+            {"QA_ACTION": "Cleanup", "QA_CAPABILITY": capability},
+            clear=False,
+        ), self.assertRaisesMessage(CommandError, "isolated development or test"):
+            Command._non_database_residue(
+                tenant_id=None,
+                tenant_code=tenant_code,
+            )
+
+        client.assert_not_called()
 
     def test_destroy_is_idempotent_when_scenario_is_absent(self):
         out = StringIO()

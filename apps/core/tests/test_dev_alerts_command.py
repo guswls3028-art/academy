@@ -35,19 +35,39 @@ class DevAlertsCommandTests(TestCase):
         self.assertEqual(audit.result, result)
         return audit
 
-    @override_settings(DEV_ALERTS_WEBHOOK_URL="")
-    def test_missing_receiver_is_failure_even_when_no_rule_fires(self):
-        with self.assertRaisesMessage(CommandError, "DEV_ALERTS_WEBHOOK_URL"):
-            self.run_command("--silent")
+    @override_settings(DEV_ALERTS_WEBHOOK_URL="", DEV_ALERTS_WEBHOOK_REQUIRED=False)
+    def test_missing_optional_receiver_is_observable_without_failing_evaluation(self):
+        self.run_command("--silent")
         self.post.assert_not_called()
-        self.assert_audit("failed")
+        audit = self.assert_audit("success")
+        self.assertEqual(audit.payload["delivery_status"], "not_configured")
+        self.assertEqual(audit.payload["triggered_rule_count"], 0)
         self.assertNotIn("All clear", self.output.getvalue())
+        self.assertIn("not configured", self.output.getvalue())
 
-    @override_settings(DEV_ALERTS_WEBHOOK_URL="")
-    def test_missing_receiver_with_findings_is_not_delivery_success(self):
+    @override_settings(DEV_ALERTS_WEBHOOK_URL="", DEV_ALERTS_WEBHOOK_REQUIRED=False)
+    def test_user_incident_without_receiver_fails_even_when_receiver_is_optional(self):
+        self.rules[0] = alerts.Rule("user_incidents", "User incidents", self.evaluate)
         self.evaluate.return_value = {"title": "Finding", "rows": [{"count": 1}]}
         with self.assertRaisesMessage(CommandError, "DEV_ALERTS_WEBHOOK_URL"):
             self.run_command()
+        self.post.assert_not_called()
+        self.assert_audit("failed")
+        self.assertNotIn("Slack 전송 OK", self.output.getvalue())
+
+    @override_settings(DEV_ALERTS_WEBHOOK_URL="", DEV_ALERTS_WEBHOOK_REQUIRED=False)
+    def test_optional_receiver_keeps_non_user_incident_evaluation_observable(self):
+        self.evaluate.return_value = {"title": "Finding", "rows": [{"count": 1}]}
+        self.run_command()
+        self.post.assert_not_called()
+        audit = self.assert_audit("success")
+        self.assertEqual(audit.payload["delivery_status"], "not_configured")
+        self.assertEqual(audit.payload["triggered_rule_count"], 1)
+
+    @override_settings(DEV_ALERTS_WEBHOOK_URL="", DEV_ALERTS_WEBHOOK_REQUIRED=True)
+    def test_missing_required_receiver_remains_a_failure(self):
+        with self.assertRaisesMessage(CommandError, "DEV_ALERTS_WEBHOOK_URL"):
+            self.run_command("--silent")
         self.post.assert_not_called()
         self.assert_audit("failed")
 
@@ -166,6 +186,35 @@ class DevAlertsCommandTests(TestCase):
             list(OpsAuditLog.objects.filter(action="cron.check_dev_alerts")
                  .order_by("id").values_list("result", flat=True)),
             ["failed", "success"],
+        )
+
+    def test_failed_audit_rule_excludes_its_own_cron_failures(self):
+        for index in range(5):
+            OpsAuditLog.objects.create(
+                action="cron.check_dev_alerts",
+                summary=f"self failure {index}",
+                result="failed",
+            )
+        for index in range(4):
+            OpsAuditLog.objects.create(
+                action=f"real.failure.{index}",
+                summary=f"real failure {index}",
+                result="failed",
+            )
+
+        self.assertIsNone(alerts.rule_audit_failed_24h(threshold=5))
+
+        OpsAuditLog.objects.create(
+            action="real.failure.4",
+            summary="real failure 4",
+            result="failed",
+        )
+        result = alerts.rule_audit_failed_24h(threshold=5)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["total"], 5)
+        self.assertNotIn(
+            "cron.check_dev_alerts",
+            {row["action"] for row in result["rows"]},
         )
 
 

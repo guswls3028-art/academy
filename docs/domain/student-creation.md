@@ -1,7 +1,7 @@
 # 학생 생성 SSOT
 
 **상태:** Active  
-**최종 점검:** 2026-08-23
+**최종 점검:** 2026-09-10
 **코드 기준:** `apps/domains/students/services/creation.py`, `apps/domains/students/services/registration_approval.py`, `apps/domains/students/services/import_students.py`, `apps/domains/students/services/import_passwords.py`, `apps/domains/students/services/custom_fields.py`, `apps/domains/students/views/student_views.py`, `apps/domains/students/views/registration_views.py`, `apps/domains/students/services/lecture_enroll.py`, `apps/domains/students/services/bulk_from_excel.py`
 
 ## 1. 책임 경계
@@ -73,6 +73,20 @@ Excel 파서는 active sheet에 고정하지 않고 표지/안내 시트를 건�
 
 - `tenant`는 반드시 caller가 resolve해서 전달한다. tenant fallback은 만들지 않는다.
 - `student_data.ps_number`는 caller 또는 serializer가 확정한다.
+- 신규 `Student` insert는 canonical `create_student_account()`가 Parent와 unique User login을
+  먼저 예약하고, model insert가 Tenant와 referenced User를 PostgreSQL `FOR KEY SHARE`로
+  잡은 뒤 `academy:student-ps-namespace:v1:{tenant_id}:{ps_number}`와 발견된 tombstoned
+  predecessor namespace advisory lock을 정렬해 잡고 snapshot을 다시 읽는다. snapshot이
+  잠금 대기 중 바뀌면 top-level canonical transaction을 최대 3회 다시 시작하며, 같은
+  login/PS를 다른 생성·복원·변경이 먼저 점유하면 stable identity conflict를 반환한다.
+  단건·JSON·Excel·가입 승인 모두 `create_student_account()`가 같은 model insert를
+  사용하므로 영구삭제가 원래 학생번호의 Inventory ownership을 판정하는 동안 해당 번호를
+  새 학생이 중간에 점유할 수 없다. 영구삭제가 먼저 commit하면 새 학생은 그 뒤 생성되고,
+  생성이 먼저 commit하면 영구삭제가 재사용 번호를 관찰해 기존 Inventory를 보존한다.
+  target 번호에 legacy Inventory metadata가 있고 exact tombstoned predecessor가 하나이면
+  metadata를 그 tombstone으로 격리한 뒤 새 owner를 생성한다. predecessor가 복수이거나
+  attribution이 모호하면 다른 학생의 파일을 합치지 않고 stable identity conflict로 해당
+  생성을 실패시킨다. 같은 규칙은 기존 학생의 학생번호 변경 target에도 적용된다.
 - `password`와 `password_hash` 중 정확히 하나만 전달한다.
 - 학생 전화번호가 비어 있어도 학생 `User`와 `TenantMembership(student)`는 생성된다. 학부모 계정과 공유 계정이 되는 것이 아니다.
 - raw 초기 비밀번호를 받는 직접/Excel 생성에서 학부모가 새로 생성되면 학생과 같은 초기 비밀번호를 설정·안내한다.
@@ -115,6 +129,14 @@ Excel 파서는 active sheet에 고정하지 않고 표지/안내 시트를 건�
 - `pnpm typecheck`
 - `pnpm build`
 - `pnpm guard:legacy-api`
+- PostgreSQL에서 영구삭제 transaction과 동일 PS 신규 생성의 양 순서를 실행해 namespace
+  lock 대기와 단일 owner를 확인한다.
+- canonical create와 soft-delete/restore/rename/permanent-delete 양 순서, direct model
+  create의 Tenant/User FK `FOR KEY SHARE`가 unique/FK/namespace 교착 없이 끝나는지 확인한다.
+- soft delete와 동일 PS 신규 생성 경쟁에서 기존 Inventory metadata가 tombstone owner로
+  이동하고 replacement의 새 파일만 학생/학부모에게 보이는지 확인한다. 기존 학생 rename이
+  과거 사용 target을 claim하는 경우에도 single predecessor 격리와 ambiguous rejection을
+  확인한다.
 
 Excel 파서 변경은 표지+명단 다중 시트, 영문/한글 헤더, 한 명짜리 명단,
 학생/보호자 전화 분리, 학생 전화만 있는 파일과 복수 명단 ambiguity의

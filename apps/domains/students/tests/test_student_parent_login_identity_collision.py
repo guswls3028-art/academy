@@ -4,6 +4,7 @@ from academy.adapters.db.django import repositories_core as core_repo
 from apps.core.models import Tenant
 from apps.core.models.user import user_display_username
 from apps.domains.students.services.creation import create_student_account
+from apps.domains.students.services.identity import StudentIdentityError
 from apps.domains.students.services.profile import (
     StudentProfileUpdateError,
     update_student_profile,
@@ -78,3 +79,24 @@ class StudentParentLoginIdentityCollisionTests(TestCase):
         student.user.refresh_from_db()
         self.assertEqual(student.ps_number, "STUDENT-PROFILE")
         self.assertEqual(user_display_username(student.user), "STUDENT-PROFILE")
+
+    def test_canonical_duplicate_create_returns_stable_identity_error(self):
+        first = self._create_identifier_student(
+            suffix="DUPLICATE",
+            parent_phone="01074445555",
+        )
+
+        with self.assertRaises(StudentIdentityError) as ctx:
+            create_student_account(
+                tenant=self.tenant,
+                password="initial-password",
+                student_data={
+                    "name": "중복 학생",
+                    "phone": "01075556666",
+                    "parent_phone": "",
+                    "ps_number": first.ps_number,
+                    "omr_code": "75556666",
+                },
+            )
+
+        self.assertIn("ps_number", ctx.exception.detail)

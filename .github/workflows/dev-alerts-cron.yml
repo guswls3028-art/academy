@@ -2,7 +2,9 @@
 # /dev 콘솔 운영 알림 cron — check_dev_alerts (5분 주기).
 #
 # 룰: 사용자 5xx·화면 오류·문제 신고 / 만료 D-3 / 결제·worker 운영 위험 / 미답변 BUG/FB
-# Slack 전송: settings.DEV_ALERTS_WEBHOOK_URL (env). 미설정 시 평가만 수행.
+# Slack 전송: settings.DEV_ALERTS_WEBHOOK_URL (env). user_incidents가 발생했는데
+# 수신처가 없으면 required 설정과 무관하게 실패하며, 일반 운영 룰만 평가할 때는
+# DEV_ALERTS_WEBHOOK_REQUIRED=true인 경우 누락을 실패 처리.
 # 모든 호출은 OpsAuditLog `cron.check_dev_alerts` 로 기록.
 #
 # 패턴: API 인스턴스 SSM Run Command로 마지막 검증 성공 manifest의
@@ -18,7 +20,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Slack 전송 생략 (평가만)"
+        description: "Slack 전송 생략 (평가만, user incident 발견 시 실패)"
         required: false
         default: "false"
       full_rules:

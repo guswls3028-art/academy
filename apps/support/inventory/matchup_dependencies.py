@@ -83,3 +83,49 @@ def matchup_delete_protection_result(files: list[Any]) -> dict | None:
         "protected_file_ids": protected_file_ids,
         "status": 409,
     }
+
+
+def lock_matchup_delete_protection_result(
+    *,
+    tenant: Any,
+    inventory_file_ids: list[int],
+) -> dict | None:
+    """Re-read and lock the current matchup protection graph before deletion."""
+    if not inventory_file_ids:
+        return None
+
+    from apps.domains.matchup.models import MatchupDocument, MatchupProblem
+
+    documents = list(
+        MatchupDocument.objects.select_for_update()
+        .filter(
+            tenant=tenant,
+            inventory_file_id__in=inventory_file_ids,
+        )
+        .order_by("id")
+    )
+    if documents:
+        list(
+            MatchupProblem.objects.select_for_update()
+            .filter(
+                tenant=tenant,
+                document_id__in=[document.id for document in documents],
+            )
+            .order_by("id")
+        )
+
+    protected_file_ids = [
+        document.inventory_file_id
+        for document in documents
+        if document_has_protected_matchup_problems(document)
+    ]
+    if not protected_file_ids:
+        return None
+
+    return {
+        "ok": False,
+        "detail": protected_matchup_document_delete_detail(),
+        "code": "protected_matchup_document",
+        "protected_file_ids": protected_file_ids,
+        "status": 409,
+    }

@@ -9,7 +9,7 @@ from django.db import connection, transaction
 from django.utils import timezone
 
 from apps.core.models import Tenant, TenantMembership
-from apps.domains.students.models import Student
+from apps.domains.students.models import Student, StudentInventoryNamespaceConflict
 from apps.domains.students.services.school import is_valid_grade, normalize_school_from_name
 from apps.support.students.lifecycle_dependencies import (
     active_wrong_note_pdf_exists_for_students,
@@ -17,11 +17,15 @@ from apps.support.students.lifecycle_dependencies import (
     deactivate_enrollments_for_student,
     delete_submission_storage_for_permanent_delete,
     ensure_parent_for_student,
+    inventory_file_ids_with_cleanup_intents,
+    inventory_student_ps_metadata_exists,
+    lock_student_ps_namespaces,
     restore_enrollments_after_student_restore,
     submission_storage_cleanup_status_counts,
 )
-
-
+from apps.support.students.namespace_lock import (
+    lock_student_creation_tenant_reference,
+)
 PERMANENT_DELETE_STUDENT_RELATIONS = frozenset({
     ("students_studenttag", "student_id"),
     ("student_support_session", "student_id"),
@@ -119,6 +123,23 @@ class StudentPermanentDeleteResult:
     user_ids: tuple[int, ...]
     storage_cleanup_pending_count: int = 0
     storage_cleanup_failed_count: int = 0
+
+
+def _has_unselected_deleted_predecessor(
+    *,
+    tenant,
+    original_ps: str,
+    selected_student_ids: tuple[int, ...],
+) -> bool:
+    candidates = Student.objects.filter(
+        tenant=tenant,
+        deleted_at__isnull=False,
+        ps_number__endswith=f"_{original_ps}",
+    ).exclude(id__in=selected_student_ids)
+    return any(
+        ps_number == f"_del_{student_id}_{original_ps}"
+        for student_id, ps_number in candidates.values_list("id", "ps_number")
+    )
 
 
 def _append_unique(fields: list[str], field: str) -> None:
@@ -266,6 +287,7 @@ def soft_delete_student(
     with transaction.atomic():
         if not tenant or student.tenant_id != tenant.id:
             raise StudentLifecycleError("tenant_mismatch", "학생 테넌트가 일치하지 않습니다.")
+        lock_student_creation_tenant_reference(tenant_id=tenant.id)
 
         original_username = None
         locked_user = None
@@ -290,7 +312,13 @@ def soft_delete_student(
         if student.parent_id is not None:
             student.parent_id = None
             update_fields.append("parent")
-        student.save(update_fields=update_fields)
+        try:
+            student.save(update_fields=update_fields)
+        except StudentInventoryNamespaceConflict as exc:
+            raise StudentLifecycleError(
+                "student_storage_namespace_conflict",
+                "이 학생번호의 이전 저장자료 소유권을 확인한 뒤 다시 시도해 주세요.",
+            ) from exc
 
         user_deactivated = False
         if student.user:
@@ -349,6 +377,9 @@ def restore_student(
     with transaction.atomic():
         if not tenant or student.tenant_id != tenant.id:
             raise StudentLifecycleError("tenant_mismatch", "학생 테넌트가 일치하지 않습니다.")
+        lock_student_creation_tenant_reference(tenant_id=tenant.id)
+        if not Student.objects.filter(pk=student.pk, tenant=tenant).exists():
+            raise StudentLifecycleError("not_found", "삭제된 학생을 찾을 수 없습니다.")
         locked_user = None
         if student.user_id:
             locked_user = get_user_model().objects.select_for_update().get(pk=student.user_id)
@@ -378,7 +409,13 @@ def restore_student(
 
         student.deleted_at = None
         _append_unique(changed, "deleted_at")
-        student.save(update_fields=changed)
+        try:
+            student.save(update_fields=changed)
+        except StudentInventoryNamespaceConflict as exc:
+            raise StudentLifecycleError(
+                "student_storage_namespace_conflict",
+                "이 학생번호의 이전 저장자료 소유권을 확인한 뒤 다시 시도해 주세요.",
+            ) from exc
 
         user_reactivated = False
         if student.user:
@@ -470,6 +507,49 @@ def permanently_delete_students(
 
         selected_student_ids = tuple(s.id for s in to_delete)
         selected_user_ids = tuple(s.user_id for s in to_delete if s.user_id)
+        selected_student_ps_numbers = tuple(
+            dict.fromkeys(
+                ps_number
+                for student in to_delete
+                for ps_number in (
+                    str(student.ps_number or "").strip(),
+                    str(_deleted_ps_original(student.ps_number) or "").strip(),
+                )
+                if ps_number
+            )
+        )
+        selected_original_ps_numbers = tuple(
+            dict.fromkeys(
+                original_ps
+                for student in to_delete
+                if (original_ps := _deleted_ps_original(student.ps_number))
+            )
+        )
+        lock_student_ps_namespaces(
+            tenant_id=tenant.id,
+            ps_numbers=selected_student_ps_numbers,
+        )
+        ambiguous_original_ps = next(
+            (
+                original_ps
+                for original_ps in selected_original_ps_numbers
+                if inventory_student_ps_metadata_exists(
+                    tenant_id=tenant.id,
+                    ps_number=original_ps,
+                )
+                and _has_unselected_deleted_predecessor(
+                    tenant=tenant,
+                    original_ps=original_ps,
+                    selected_student_ids=selected_student_ids,
+                )
+            ),
+            None,
+        )
+        if ambiguous_original_ps is not None:
+            raise StudentLifecycleError(
+                "student_storage_namespace_conflict",
+                "이 학생번호의 이전 저장자료 소유권을 확인한 뒤 다시 시도해 주세요.",
+            )
         if active_wrong_note_pdf_exists_for_students(
             tenant=tenant,
             student_ids=selected_student_ids,
@@ -483,6 +563,7 @@ def permanently_delete_students(
             tenant=tenant,
             student_ids=selected_student_ids,
             user_ids=selected_user_ids,
+            student_ps_numbers=selected_student_ps_numbers,
         )
 
     cleanup_pending, cleanup_failed = submission_storage_cleanup_status_counts(
@@ -573,6 +654,7 @@ def _permanently_delete_selected_students(
     tenant,
     student_ids: tuple[int, ...],
     user_ids: tuple[int, ...],
+    student_ps_numbers: tuple[str, ...],
 ) -> tuple[int, ...]:
     _SAFE_TABLES = frozenset({
         "results_result_item", "results_result", "results_exam_attempt",
@@ -796,19 +878,52 @@ def _permanently_delete_selected_students(
             )
             wrong_note_pdf_ids = [row[0] for row in cursor.fetchall()]
 
+        inventory_file_ids: list[int] = []
+        owned_ps_numbers: tuple[str, ...] = tuple()
+        if student_ps_numbers:
+            reused_ps_numbers = set(
+                Student.objects.filter(
+                    tenant=tenant,
+                    ps_number__in=student_ps_numbers,
+                )
+                .exclude(id__in=student_ids)
+                .values_list("ps_number", flat=True)
+            )
+            owned_ps_numbers = tuple(
+                ps_number
+                for ps_number in student_ps_numbers
+                if ps_number not in reused_ps_numbers
+            )
+            if owned_ps_numbers:
+                inventory_file_model = apps.get_model("inventory", "InventoryFile")
+                inventory_file_ids = list(
+                    inventory_file_model._base_manager.filter(
+                        tenant=tenant,
+                        scope="student",
+                        student_ps__in=owned_ps_numbers,
+                    ).values_list("id", flat=True)
+                )
+
         cleanup_intent_ids: tuple[int, ...] = tuple()
+        deletable_inventory_file_ids: tuple[int, ...] = tuple()
         if submission_ids:
             submission_id_clause, submission_id_params = _in_clause(submission_ids)
             _assert_submission_relation_tenants(
                 submission_id_clause,
                 submission_id_params,
             )
-        if submission_ids or wrong_note_pdf_ids:
+        if submission_ids or wrong_note_pdf_ids or inventory_file_ids:
             try:
                 cleanup_intent_ids = delete_submission_storage_for_permanent_delete(
                     tenant_id=tenant.id,
                     submission_ids=submission_ids,
                     wrong_note_pdf_ids=wrong_note_pdf_ids,
+                    inventory_file_ids=inventory_file_ids,
+                )
+                deletable_inventory_file_ids = inventory_file_ids_with_cleanup_intents(
+                    tenant_id=tenant.id,
+                    inventory_file_ids=inventory_file_ids,
+                    intent_ids=cleanup_intent_ids,
                 )
             except ValueError as exc:
                 raise StudentLifecycleError(
@@ -870,6 +985,33 @@ def _permanently_delete_selected_students(
                     f"WHERE student_id IN {student_id_clause} AND tenant_id = %s",
                     [*student_id_params, tenant.id],
                 )
+
+        if deletable_inventory_file_ids:
+            inventory_file_model = apps.get_model("inventory", "InventoryFile")
+            inventory_file_model._base_manager.filter(
+                tenant=tenant,
+                id__in=deletable_inventory_file_ids,
+            ).delete()
+        if owned_ps_numbers:
+            inventory_folder_model = apps.get_model("inventory", "InventoryFolder")
+            while True:
+                empty_leaf_ids = tuple(
+                    inventory_folder_model._base_manager.filter(
+                        tenant=tenant,
+                        scope="student",
+                        student_ps__in=owned_ps_numbers,
+                        children__isnull=True,
+                        files__isnull=True,
+                    )
+                    .order_by("id")
+                    .values_list("id", flat=True)[:1000]
+                )
+                if not empty_leaf_ids:
+                    break
+                inventory_folder_model._base_manager.filter(
+                    tenant=tenant,
+                    id__in=empty_leaf_ids,
+                ).delete()
 
         if enrollment_ids:
             enrollment_id_clause, enrollment_id_params = _in_clause(enrollment_ids)

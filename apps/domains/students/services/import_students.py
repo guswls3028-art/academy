@@ -38,6 +38,9 @@ from .identity import (
 from .import_passwords import StudentImportPasswordError, build_student_import_password_policy
 from .lifecycle import permanently_delete_students, restore_student
 from .school import get_valid_school_types, is_valid_grade, normalize_school_from_name
+from apps.support.students.namespace_lock import (
+    lock_student_creation_tenant_reference,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -362,6 +365,7 @@ def resolve_student_import_row(
     }
 
     with transaction.atomic():
+        lock_student_creation_tenant_reference(tenant_id=tenant.id)
         if normalized.phone:
             conflict_deleted = _unique_import_candidate(
                 tenant_students.filter(

@@ -1,7 +1,7 @@
 # 학생 생명주기 SSOT
 
 **상태:** Active
-**최종 점검:** 2026-08-27
+**최종 점검:** 2026-09-10
 **코드 기준:** `apps/domains/students/services/lifecycle.py`, `apps/domains/enrollment/services/lifecycle.py`, `apps/domains/students/views/student_views.py`
 
 ## 1. 상태
@@ -30,6 +30,12 @@ HTTP와 운영 명령은 생명주기 서비스를 호출하는 compatibility fa
 SSOT: `soft_delete_student(student, tenant=...)`
 
 - `deleted_at`을 기록하고 `ps_number`를 `_del_{student.id}_{old}`로 보존한다.
+- 같은 transaction과 student-PS namespace lock에서 학생 scope
+  `InventoryFolder`/`InventoryFile.student_ps`도 같은 tombstone 번호로 옮긴다. R2 key의
+  historical PS segment는 locator이므로 이때 object copy/rename은 하지 않는다. 새 학생이
+  원래 번호를 재사용해도 이전 학생·학부모 metadata를 조회할 수 없다.
+- tombstone namespace가 이미 모호하게 점유되어 안전하게 이동할 수 없으면 raw 예외 대신
+  `student_storage_namespace_conflict`로 전체 soft delete transaction을 되돌린다.
 - `Parent` 직접 연결을 끊는다.
 - 순수 학생 계정이면 해당 테넌트의 `student` 멤버십을 비활성화하고, 남은 활성 멤버십이 없을 때만 `User.is_active=False`로 둔다.
 - 같은 사용자에게 다른 테넌트 멤버십이나 같은 테넌트의 staff/teacher/admin/owner/parent 역할이 남아 있으면 전역 계정을 잠그지 않는다.
@@ -49,6 +55,9 @@ SSOT: `restore_student(student, tenant=..., profile_data=None)`
 
 - `_del_` 접두사에서 원래 `ps_number`를 복원한다.
 - 같은 테넌트 활성 학생과 아이디 충돌이 있으면 실패한다.
+- 복원하는 학생의 tombstone Inventory metadata도 원래 번호로 함께 되돌린다. 원래 번호에
+  다른 owner 또는 모호한 legacy metadata가 있으면 합치거나 추측하지 않고 복원을 실패
+  폐쇄하며 `student_storage_namespace_conflict`를 반환한다.
 - `User.is_active`, 학생 전화번호, 테넌트 멤버십, Parent 연결을 복원한다.
 - `status_before_student_deletion`이 있는 enrollment만 삭제 전 상태로 복원하고 marker를
   비운다. 원래 `INACTIVE`였던 수강은 계속 `INACTIVE`, 원래 `PENDING`은 계속
@@ -112,12 +121,48 @@ SSOT: `permanently_delete_students(tenant=..., student_ids=[...])`
     submission 참조만 `NULL`로 바꾼다.
   - `WrongNotePDF.file_path`도 같은 durable intent에 Storage 버킷 대상으로 기록한다.
     제출 object는 AI 버킷 대상이므로 같은 문자열 key여도 버킷을 혼동하지 않는다.
+  - 학생 scope `InventoryFile`은 삭제 대상 학생의 현재 `ps_number`와 `_del_`에서
+    복구한 원래 `ps_number` 중 다른 학생이 재사용하지 않은 값으로만 exact ID를
+    조회한다. 잠긴 exact `InventoryFile` 행이 canonical owner이고 R2 key는 locator다.
+    따라서 학생번호 변경 뒤 metadata의 `student_ps`와 key의 과거 PS segment가 달라도
+    key가 `tenants/{tenant_id}/students/...`에 속하면 정리할 수 있다. 다른 tenant
+    prefix는 `409`로 중단하고, 같은 key를 다른 canonical owner가 참조하면 보존한다.
+    Storage cleanup intent를 먼저 기록하고, `StudentReportedScore`를 지운
+    다음 intent가 생성된 InventoryFile metadata만 같은 transaction에서 삭제한다.
+    commit 뒤 R2 삭제가 성공하면 intent는 `cleaned`, provider 실패면 재시도 가능한
+    `failed`로 남는다. 같은 Storage key를 Matchup 등 다른 canonical owner가 참조하면
+    intent와 metadata를 모두 만들거나 지우지 않고 보존한다.
+  - 위 exact student scope에서 파일 삭제 뒤 비어 있는 `InventoryFolder`는 leaf부터
+    정리한다. 다른 owner 때문에 파일이 보존된 folder tree와 다른 학생이 재사용한
+    `ps_number`의 파일·폴더는 삭제하지 않는다.
 - 삭제 대상 테넌트의 student 멤버십과 pending password reset
 - 다른 활성 멤버십·Parent·Staff·staff-role 멤버십이 없는 orphan `User`
 
 안전 규칙:
 
 - 삭제 대상 학생은 반드시 같은 tenant의 soft-deleted 학생이어야 한다.
+- PostgreSQL에서는 `academy:student-ps-namespace:v1:{tenant_id}:{ps_number}` transaction
+  advisory lock이 학생번호 namespace의 생성·변경·Inventory attach·영구삭제 ownership
+  판정을 직렬화한다. 신규 생성·soft delete·restore·가입 승인·관리자/학생 profile
+  수정·운영보조·학부모 계정 복구는 가장 바깥 transaction에서 Tenant를 PostgreSQL
+  `FOR KEY SHARE`로 먼저 잡는다. 기존 학생 identity 경로는 교착을 피하려고 항상
+  `Tenant KEY SHARE -> User row -> Student row -> target User.username reservation -> sorted old/new namespace`
+  순서이고, 영구삭제도 `Tenant -> User -> Student -> sorted current/original namespace`
+  순서다. canonical 신규 생성은 transaction 진입 즉시 Tenant gate를 잡고 Parent/User
+  login을 예약하며, Student insert 직전 referenced User를 `FOR KEY SHARE`로 잡은 뒤 target과 발견된
+  tombstone predecessor namespace를 정렬해 잠근다. 따라서 create/restore/rename/
+  soft-delete/permanent-delete가 unique index, FK와 namespace를 역순으로 기다리지 않는다.
+  중첩된 domain helper가 같은 Tenant gate를 다시 요청하는 것은 PostgreSQL에서 같은
+  transaction의 idempotent 재획득이며, 바깥 transaction보다 늦은 User/Student/Parent
+  잠금으로 순서를 되돌리지 않는다.
+  predecessor snapshot 변화는 top-level 생성 transaction을 최대 3회 다시 시작한다. 기존
+  rename도 target claim이므로 같은 snapshot/re-read를 사용한다. exact predecessor가
+  하나이면 legacy Inventory metadata를 predecessor tombstone으로 격리하고, 복수/모호한
+  attribution이면 그 identity mutation만 실패한다. active replacement보다 오래된 legacy
+  metadata가 source namespace에 있으면 soft-delete/rename도 오귀속 이동 없이 같은 stable
+  conflict로 rollback한다. upload attach와 student-scope
+  folder/file create·move·수정·삭제는 Student row를 잠그지 않고 namespace 뒤 활성 owner와
+  최신 metadata scope를 다시 읽는다.
 - 같은 사용자가 다른 테넌트나 같은 테넌트의 비학생 역할로 남아 있으면 User와 해당 멤버십을 보존한다.
 - 보존되는 사용자가 과거 soft delete 때문에 비활성화되어 있고 활성 멤버십이 남아 있으면 재활성화한다.
 - Student, Enrollment, Submission reverse graph의 tenant-bearing 직접 FK와 소유
@@ -134,6 +179,9 @@ SSOT: `permanently_delete_students(tenant=..., student_ids=[...])`
 - 영구삭제 API 성공 응답은 `deleted`와
   `storage_cleanup: {pending, failed}`를 반환한다. 저장 namespace 불일치 또는 진행 중
   media upload는 `409 storage_cleanup_scope_mismatch`로 전체 mutation을 중단한다.
+- 원래 학생번호에 legacy Inventory가 남고 그 번호의 tombstoned predecessor가 여러 명이면,
+  같은 bulk delete에 모든 predecessor가 포함된 경우만 union cleanup할 수 있다. 하나라도
+  선택 밖에 남으면 `409 student_storage_namespace_conflict`로 DB/R2 mutation 전에 중단한다.
 - `SubmissionMedia.UPLOADING`은 1시간 upload lease 동안 같은 `409`로 보호한다.
   lease가 지난 row는 중단된 업로드로 회수해 durable AI cleanup intent에 넣고 DB
   삭제를 진행한다. 늦게 끝난 PUT의 finalize는 row와 cleanup intent를 다시 잠가
@@ -171,6 +219,19 @@ python manage.py purge_deleted_students
   - same-tenant parent/staff/teacher 계정 보존
   - fee/section/video-comment dependency cleanup
   - reported score/support session/video entitlement cleanup
+  - reported-score 증빙 InventoryFile의 Storage intent, post-commit R2 삭제, 빈 folder
+    zero-readback, shared owner 및 재사용 `ps_number` 보존, PS 변경 전 historical key 정리
+  - PostgreSQL create/rename과 permanent delete 경쟁에서 namespace 판정 직렬화 및
+    신규 owner Inventory/R2 보존
+  - canonical create와 soft-delete/restore/rename/permanent-delete 양 순서, direct create의
+    Tenant/User FK `FOR KEY SHARE` 순서에서 deadlock 없이 단일 identity owner 또는 stable 4xx
+  - 복수 tombstoned predecessor의 legacy original namespace를 선택 일부만 영구삭제할 때
+    `student_storage_namespace_conflict`와 DB/R2 무변경
+  - soft delete/restore의 Inventory metadata tombstone 왕복, 재사용 학생과 sibling
+    parent/student list·download 격리, 안전한 replacement 신규 파일의 정상 사용
+  - 학생 Inventory PUT/attach와 soft/permanent delete 양 순서에서 attach 실패 exact
+    보상 또는 committed metadata 기반 cleanup zero-readback
+  - soft delete와 stale student-scope file/folder delete 경쟁에서 tombstone metadata/R2 보존
   - detached submission media R2/row cleanup과 공유 object 보존
   - AI/Storage bucket 분리, DB rollback 전 object 미삭제, 부분 실패 재시도
   - 오답노트 PDF의 동일한 post-commit cleanup과 scheduled retry

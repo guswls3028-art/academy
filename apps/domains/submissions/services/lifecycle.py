@@ -63,6 +63,8 @@ STUCK_RECOVERABLE_STATUSES: tuple[str, ...] = (
 )
 
 SUBMISSION_MEDIA_UPLOAD_LEASE = timedelta(hours=1)
+UNCERTAIN_STORAGE_WRITE_SETTLE_DELAY = timedelta(minutes=5)
+UNCERTAIN_STORAGE_WRITE_ERROR_PREFIX = "uncertain_storage_write"
 
 
 @dataclass(frozen=True)
@@ -122,6 +124,15 @@ def _submission_owned_object_key(
 
 def _wrong_note_owned_object_key(*, tenant_id: int, key: str) -> bool:
     prefix = f"tenants/{tenant_id}/results/wrong-notes/"
+    return key.startswith(prefix) and len(key) > len(prefix)
+
+
+def _student_inventory_owned_object_key(
+    *,
+    tenant_id: int,
+    key: str,
+) -> bool:
+    prefix = f"tenants/{tenant_id}/students/"
     return key.startswith(prefix) and len(key) > len(prefix)
 
 
@@ -187,6 +198,7 @@ def _other_storage_owner_references(
     excluded_submission_ids: tuple[int, ...] = tuple(),
     excluded_submission_media_ids: tuple[int, ...] = tuple(),
     excluded_wrong_note_pdf_ids: tuple[int, ...] = tuple(),
+    excluded_inventory_file_ids: tuple[int, ...] = tuple(),
 ) -> bool:
     for field_bucket, app_label, model_name, field_name in STORAGE_OBJECT_REFERENCE_FIELDS:
         if field_bucket != bucket:
@@ -200,9 +212,106 @@ def _other_storage_owner_references(
             references = references.exclude(id__in=excluded_submission_media_ids)
         elif owner == ("results", "WrongNotePDF"):
             references = references.exclude(id__in=excluded_wrong_note_pdf_ids)
+        elif owner == ("inventory", "InventoryFile"):
+            references = references.exclude(id__in=excluded_inventory_file_ids)
         if references.exists():
             return True
     return False
+
+
+def ensure_storage_inventory_key_attachable(*, tenant_id: int, key: str) -> None:
+    """Serialize a Storage PUT against cleanup and every canonical key owner."""
+    prefix = f"tenants/{int(tenant_id)}/"
+    if not key.startswith(prefix) or len(key) <= len(prefix):
+        raise ValueError("inventory object key is outside its tenant namespace")
+    _lock_object_key(bucket=SubmissionStorageCleanupIntent.Bucket.STORAGE, key=key)
+    if SubmissionStorageCleanupIntent.objects.filter(
+        tenant_id=tenant_id,
+        bucket=SubmissionStorageCleanupIntent.Bucket.STORAGE,
+        object_key=key,
+    ).exists():
+        raise ValueError("inventory object key is already scheduled for cleanup")
+    if _other_storage_owner_references(
+        bucket=SubmissionStorageCleanupIntent.Bucket.STORAGE,
+        key=key,
+    ):
+        raise ValueError("inventory object key already has a canonical owner")
+
+
+def compensate_unattached_storage_object(
+    *,
+    tenant_id: int,
+    key: str,
+    uncertain_write: bool = False,
+) -> str:
+    """Delete an unattached upload under its key lock and persist retry state."""
+    prefix = f"tenants/{int(tenant_id)}/"
+    if not key.startswith(prefix) or len(key) <= len(prefix):
+        raise ValueError("inventory object key is outside its tenant namespace")
+    with transaction.atomic():
+        _lock_object_key(bucket=SubmissionStorageCleanupIntent.Bucket.STORAGE, key=key)
+        if _other_storage_owner_references(
+            bucket=SubmissionStorageCleanupIntent.Bucket.STORAGE,
+            key=key,
+        ):
+            return "referenced"
+
+        intent = None
+        if uncertain_write:
+            intent, _ = SubmissionStorageCleanupIntent.objects.get_or_create(
+                tenant_id=tenant_id,
+                bucket=SubmissionStorageCleanupIntent.Bucket.STORAGE,
+                object_key=key,
+            )
+            intent.status = SubmissionStorageCleanupIntent.Status.PENDING
+            intent.claim_token = None
+            intent.cleaned_at = None
+            intent.last_error = UNCERTAIN_STORAGE_WRITE_ERROR_PREFIX
+            intent.save(
+                update_fields=[
+                    "status",
+                    "claim_token",
+                    "cleaned_at",
+                    "last_error",
+                    "updated_at",
+                ]
+            )
+        try:
+            from apps.infrastructure.storage.r2 import delete_object_r2_storage
+
+            delete_object_r2_storage(key=key)
+        except Exception:
+            if intent is None:
+                intent, _ = SubmissionStorageCleanupIntent.objects.get_or_create(
+                    tenant_id=tenant_id,
+                    bucket=SubmissionStorageCleanupIntent.Bucket.STORAGE,
+                    object_key=key,
+                )
+            intent.status = SubmissionStorageCleanupIntent.Status.PENDING
+            intent.claim_token = None
+            intent.cleaned_at = None
+            intent.last_error = (
+                f"{UNCERTAIN_STORAGE_WRITE_ERROR_PREFIX}_delete_failed"
+                if uncertain_write
+                else "storage_delete_failed"
+            )
+            intent.save(
+                update_fields=[
+                    "status",
+                    "claim_token",
+                    "cleaned_at",
+                    "last_error",
+                    "updated_at",
+                ]
+            )
+            if not uncertain_write:
+                transaction.on_commit(
+                    lambda intent_ids=(intent.id,): _process_submission_storage_cleanup_safely(
+                        intent_ids
+                    )
+                )
+            return "pending"
+        return "pending" if uncertain_write else "deleted"
 
 
 def _finish_claimed_storage_cleanup(
@@ -275,6 +384,7 @@ def process_submission_storage_cleanup_intents(
     limit: int = 100,
 ) -> SubmissionStorageCleanupResult:
     """Retry pending/failed committed cleanup intents one key at a time."""
+    attempted_before = timezone.now()
     queryset = SubmissionStorageCleanupIntent.objects.filter(
         Q(
             status__in=[
@@ -290,6 +400,10 @@ def process_submission_storage_cleanup_intents(
             status=SubmissionStorageCleanupIntent.Status.PROCESSING,
             last_attempt_at__isnull=True,
         )
+    ).exclude(
+        status=SubmissionStorageCleanupIntent.Status.PENDING,
+        last_error__startswith=UNCERTAIN_STORAGE_WRITE_ERROR_PREFIX,
+        updated_at__gt=attempted_before - UNCERTAIN_STORAGE_WRITE_SETTLE_DELAY,
     ).order_by("id")
     if intent_ids is not None:
         ids = tuple(dict.fromkeys(int(value) for value in intent_ids))
@@ -357,6 +471,7 @@ def delete_submission_storage_for_permanent_delete(
     tenant_id: int,
     submission_ids: Iterable[int],
     wrong_note_pdf_ids: Iterable[int] = tuple(),
+    inventory_file_ids: Iterable[int] = tuple(),
 ) -> tuple[int, ...]:
     """Persist cleanup intents and delete media rows before raw parent deletion.
 
@@ -367,7 +482,10 @@ def delete_submission_storage_for_permanent_delete(
     wrong_note_ids = tuple(
         dict.fromkeys(int(value) for value in wrong_note_pdf_ids if int(value) > 0)
     )
-    if not ids and not wrong_note_ids:
+    inventory_ids = tuple(
+        dict.fromkeys(int(value) for value in inventory_file_ids if int(value) > 0)
+    )
+    if not ids and not wrong_note_ids and not inventory_ids:
         return tuple()
 
     submissions = list(
@@ -442,6 +560,26 @@ def delete_submission_storage_for_permanent_delete(
         if not _wrong_note_owned_object_key(tenant_id=tenant_id, key=key):
             raise ValueError("wrong-note PDF key is outside its canonical namespace")
         candidate_keys_by_bucket[SubmissionStorageCleanupIntent.Bucket.STORAGE].add(key)
+
+    inventory_file_model = django_apps.get_model("inventory", "InventoryFile")
+    inventory_files = list(
+        inventory_file_model._base_manager.select_for_update()
+        .filter(id__in=inventory_ids, tenant_id=tenant_id, scope="student")
+        .only("id", "student_ps", "r2_key")
+        .order_by("id")
+    )
+    exact_inventory_ids = tuple(item.id for item in inventory_files)
+    if len(exact_inventory_ids) != len(inventory_ids):
+        raise ValueError("inventory file tenant does not match permanent-delete scope")
+    for item in inventory_files:
+        key = str(item.r2_key or "").strip()
+        if not _student_inventory_owned_object_key(
+            tenant_id=tenant_id,
+            key=key,
+        ):
+            raise ValueError("inventory file key is outside its canonical namespace")
+        candidate_keys_by_bucket[SubmissionStorageCleanupIntent.Bucket.STORAGE].add(key)
+
     intent_ids: list[int] = []
     for bucket, candidate_keys in candidate_keys_by_bucket.items():
         if not candidate_keys:
@@ -457,6 +595,7 @@ def delete_submission_storage_for_permanent_delete(
                 excluded_submission_ids=exact_submission_ids,
                 excluded_submission_media_ids=media_ids,
                 excluded_wrong_note_pdf_ids=exact_wrong_note_ids,
+                excluded_inventory_file_ids=exact_inventory_ids,
             )
         }
 
@@ -484,6 +623,34 @@ def delete_submission_storage_for_permanent_delete(
             id__in=media_ids,
         ).delete()
     return tuple(intent_ids)
+
+
+def inventory_file_ids_with_cleanup_intents(
+    *,
+    tenant_id: int,
+    inventory_file_ids: Iterable[int],
+    intent_ids: Iterable[int],
+) -> tuple[int, ...]:
+    """Return exact InventoryFile rows whose Storage cleanup intent was persisted."""
+    ids = tuple(dict.fromkeys(int(value) for value in inventory_file_ids if int(value) > 0))
+    cleanup_ids = tuple(dict.fromkeys(int(value) for value in intent_ids if int(value) > 0))
+    if not ids or not cleanup_ids:
+        return tuple()
+    object_keys = SubmissionStorageCleanupIntent.objects.filter(
+        id__in=cleanup_ids,
+        tenant_id=tenant_id,
+        bucket=SubmissionStorageCleanupIntent.Bucket.STORAGE,
+    ).values_list("object_key", flat=True)
+    inventory_file_model = django_apps.get_model("inventory", "InventoryFile")
+    return tuple(
+        inventory_file_model._base_manager.filter(
+            id__in=ids,
+            tenant_id=tenant_id,
+            r2_key__in=object_keys,
+        )
+        .order_by("id")
+        .values_list("id", flat=True)
+    )
 
 
 def mark_dispatched(

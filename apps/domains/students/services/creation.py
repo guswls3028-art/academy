@@ -4,18 +4,27 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 
 from academy.adapters.db.django import repositories_students as student_repo
 from apps.core.models import TenantMembership
 from apps.support.students.lifecycle_dependencies import ensure_parent_account_for_student
+from apps.support.students.namespace_lock import (
+    lock_student_creation_tenant_reference,
+)
+from apps.domains.students.models import (
+    StudentInventoryNamespaceChanged,
+    StudentInventoryNamespaceConflict,
+)
 
 from .account_notice import stage_pending_account_notice
 from .identity import (
+    StudentIdentityError,
     canonical_student_phone,
     derive_student_omr_code,
     phone_digits,
     resolve_student_login_id,
+    student_login_id_taken,
 )
 
 
@@ -91,65 +100,92 @@ def create_student_account(
         data["ps_number"] = ps_number
         data["uses_identifier"] = True
 
-    with transaction.atomic():
-        parent = None
-        parent_password_for_notice = ""
-        parent_user_created = False
-        if parent_phone:
-            parent_result = ensure_parent_account_for_student(
+    for attempt in range(3):
+        try:
+            with transaction.atomic():
+                lock_student_creation_tenant_reference(tenant_id=tenant.id)
+                parent = None
+                parent_password_for_notice = ""
+                parent_user_created = False
+                if parent_phone:
+                    parent_result = ensure_parent_account_for_student(
+                        tenant=tenant,
+                        parent_phone=parent_phone,
+                        student_name=name,
+                        initial_password=password,
+                    )
+                    parent = parent_result.parent
+                    parent_password_for_notice = parent_result.password_for_notice
+                    parent_user_created = parent_result.user_created
+
+                # Reserving the unique login before Student.save's namespace lock
+                # matches rename/restore. Soft-delete can therefore release the
+                # same login without a unique-index <-> namespace deadlock cycle.
+                user = student_repo.user_create_user(
+                    username=ps_number,
+                    tenant=tenant,
+                    phone=student_phone or "",
+                    name=name,
+                )
+                if password_hash is not None:
+                    user.password = password_hash
+                else:
+                    user.set_password(password)
+                user.must_change_password = must_change_password
+                user.save()
+
+                student = student_repo.student_create(
+                    tenant=tenant,
+                    user=user,
+                    parent=parent,
+                    **data,
+                )
+
+                TenantMembership.ensure_active(
+                    tenant=tenant,
+                    user=user,
+                    role="student",
+                )
+
+                notice_student_password = account_notice_student_password or password
+                if not notice_student_password:
+                    raise ValueError(
+                        "account_notice_student_password is required with password_hash"
+                    )
+                stage_pending_account_notice(
+                    student=student,
+                    student_password=notice_student_password,
+                    parent_password=parent_password_for_notice or "변경되지 않음",
+                    origin_type=account_notice_origin_type,
+                    origin_id=account_notice_origin_id,
+                )
+        except StudentInventoryNamespaceChanged as exc:
+            if attempt < 2:
+                continue
+            raise StudentIdentityError(
+                {"ps_number": "학생 아이디 변경이 진행 중입니다. 다시 시도해 주세요."}
+            ) from exc
+        except StudentInventoryNamespaceConflict as exc:
+            raise StudentIdentityError(
+                {"ps_number": "이전 저장자료 소유권을 확인한 뒤 다시 시도해 주세요."}
+            ) from exc
+        except IntegrityError as exc:
+            if student_login_id_taken(
                 tenant=tenant,
-                parent_phone=parent_phone,
-                student_name=name,
-                initial_password=password,
-            )
-            parent = parent_result.parent
-            parent_password_for_notice = parent_result.password_for_notice
-            parent_user_created = parent_result.user_created
+                display_username=ps_number,
+            ):
+                raise StudentIdentityError(
+                    {"ps_number": "이미 사용 중인 학생 아이디입니다."}
+                ) from exc
+            raise
 
-        user = student_repo.user_create_user(
-            username=ps_number,
-            tenant=tenant,
-            phone=student_phone or "",
-            name=name,
-        )
-        if password_hash is not None:
-            user.password = password_hash
-        else:
-            user.set_password(password)
-        user.must_change_password = must_change_password
-        user.save()
-
-        student = student_repo.student_create(
-            tenant=tenant,
+        return StudentAccountCreationResult(
+            student=student,
             user=user,
             parent=parent,
-            **data,
+            parent_phone=parent_phone,
+            parent_password_for_notice=parent_password_for_notice,
+            parent_user_created=parent_user_created,
         )
 
-        TenantMembership.ensure_active(
-            tenant=tenant,
-            user=user,
-            role="student",
-        )
-
-        notice_student_password = account_notice_student_password or password
-        if not notice_student_password:
-            raise ValueError(
-                "account_notice_student_password is required with password_hash"
-            )
-        stage_pending_account_notice(
-            student=student,
-            student_password=notice_student_password,
-            parent_password=parent_password_for_notice or "변경되지 않음",
-            origin_type=account_notice_origin_type,
-            origin_id=account_notice_origin_id,
-        )
-
-    return StudentAccountCreationResult(
-        student=student,
-        user=user,
-        parent=parent,
-        parent_phone=parent_phone,
-        parent_password_for_notice=parent_password_for_notice,
-        parent_user_created=parent_user_created,
-    )
+    raise AssertionError("unreachable student account creation retry state")

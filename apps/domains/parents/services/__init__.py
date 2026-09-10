@@ -11,6 +11,9 @@ from django.db import IntegrityError, transaction
 from django.contrib.auth import get_user_model
 
 from apps.core.models import TenantMembership
+from apps.support.students.namespace_lock import (
+    lock_student_creation_tenant_reference,
+)
 from ..models import Parent
 
 
@@ -67,6 +70,11 @@ def ensure_parent_account_for_student(
     for attempt in range(2):
         try:
             with transaction.atomic():
+                # Permanent student deletion owns Tenant -> User ordering. An
+                # existing parent may share the same User with the deleted
+                # student, so take the FK-compatible tenant gate before either
+                # Parent or User row locks.
+                lock_student_creation_tenant_reference(tenant_id=tenant.id)
                 parent = (
                     Parent.objects.select_for_update()
                     .filter(tenant=tenant, phone=parent_phone)

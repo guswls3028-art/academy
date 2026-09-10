@@ -192,9 +192,11 @@ PostgreSQL tenant PK sequence를 전진시킨다. 그 ID나 code가 다른 tenan
 
 Cleanup은 같은 advisory lock/transaction 아래 exact tenant에 연결된 성공 소유권 행이
 정확히 1개이고 요청 capability digest가 일치할 때만 같은 명령의 destroy를 호출한다.
-누락·중복·다른 run capability·다른 tenant ID는 거부한다. 이미 부재하면 numeric
-tenant/user0 확인만 하고 destroy는 호출하지 않는다. 생성/정리가 겹쳐도 소유권 검사와
-destroy 사이에 lock을 풀지 않는다. destroy는 user 삭제 전에 exact scenario user의
+누락·중복·다른 run capability·다른 tenant ID는 거부한다. 이미 부재하면 destroy를
+다시 호출하지 않되, 유일하고 유효한 `development.qa.setup` seal에서 원래 tenant ID를
+복원하고 같은 capability를 다시 검증한다. 이 복구는 새 소유권을 발급하거나 타 run을
+채택하는 동작이 아니다. 생성/정리가 겹쳐도 소유권 검사와 destroy 사이에 lock을 풀지
+않는다. destroy는 user 삭제 전에 exact scenario user의
 SimpleJWT outstanding token만 삭제한다. 학생 activity 감사 행은
 `student_activity.login/screen_view/target_open`, exact target tenant, scenario
 actor/target user, 현재 시각 이하, 그리고 최초 성공 `development.qa.setup` seal 시각
@@ -211,8 +213,12 @@ Inspect/Setup/Cleanup 출력은 tenant/user 수와 별도로 `outstanding_tokens
 `listeners`를 모두 numeric residue로 반환한다. Setup/Cleanup에서 하나라도 0이 아니면
 고정 문서가 실패한다. R2는 `tenants/<id>/`, `excel/<id>/`,
 `tenant-logos/<id>/`, `landing-public/reviews/<id>/`,
-`matchup-showcase-snapshots/tenant_<id>/`만 열거하며 여기서 broad object 삭제를 하지
-않는다. process/listener 수는 원격 development API container 경계다. runner 로컬
+`matchup-showcase-snapshots/tenant_<id>/`만 열거한다. Inspect는 tenant 행이 이미 없어도
+유일한 setup seal의 원래 ID로 이 prefix들을 읽기 전용 검사하므로 숨은 R2 residue를
+0으로 오판하지 않는다. Cleanup만 capability를 재검증한 뒤 이 exact prefix에서 실제로
+열거된 객체를 개발 버킷에서 삭제하고 같은 prefix를 다시 읽어 0을 요구한다. 다른 prefix,
+다른 tenant ID, 운영 버킷, 누락·중복·무효 seal에는 삭제를 실행하지 않는다.
+process/listener 수는 원격 development API container 경계다. runner 로컬
 tunnel/process와 AWS Session tuple은 frontend 계약이 별도로 종료·증명한다. 이 변경은
 스키마나 기존 데이터 migration을 만들지 않는다.
 기존 QA tenant를 Inspect할 때도 tenant-scoped 감사·토큰 residue 조회는 하나의

@@ -12,9 +12,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from django.db import transaction
+
 from apps.core.models import Program
 from apps.core.models.user import user_display_username
-from apps.domains.students.models import Student
+from apps.domains.students.models import Student, StudentInventoryNamespaceConflict
 from apps.domains.students.services.identity import (
     StudentIdentityError,
     canonical_student_phone,
@@ -29,6 +31,9 @@ from apps.domains.students.services.school import (
     is_valid_grade,
 )
 from apps.support.students.lifecycle_dependencies import ensure_parent_account_for_student
+from apps.support.students.namespace_lock import (
+    lock_student_creation_tenant_reference,
+)
 
 
 class StudentProfileUpdateError(ValueError):
@@ -171,7 +176,7 @@ def _append_unique(fields: list[str], items: Iterable[str]) -> None:
             fields.append(item)
 
 
-def update_student_profile(
+def _update_student_profile_after_tenant_gate(
     *,
     student: Student,
     tenant,
@@ -286,7 +291,12 @@ def update_student_profile(
             changed.append("omr_code")
 
     if changed:
-        student.save(update_fields=changed)
+        try:
+            student.save(update_fields=changed)
+        except StudentInventoryNamespaceConflict as exc:
+            raise StudentProfileUpdateError(
+                {"detail": "학생 아이디의 이전 저장자료 소유권을 확인한 뒤 다시 시도해 주세요."}
+            ) from exc
 
     if "phone" in data and student.user_id and student.user.phone != student.phone:
         student.user.phone = student.phone
@@ -318,3 +328,32 @@ def update_student_profile(
         parent_password_for_notice=parent_password_for_notice,
         parent_user_created=parent_user_created,
     )
+
+
+def update_student_profile(
+    *,
+    student: Student,
+    tenant,
+    data: dict[str, Any],
+    identity_field: str | None = None,
+    strict_school_validation: bool = True,
+    ignore_blank_name: bool = False,
+) -> StudentProfileUpdateResult:
+    """Update one profile under the tenant-first lifecycle lock order."""
+    if tenant is None:
+        raise StudentProfileUpdateError({"detail": "Tenant가 resolve되지 않았습니다."})
+    if student.tenant_id != tenant.id:
+        raise StudentProfileUpdateError({"detail": "학생이 현재 테넌트에 속하지 않습니다."})
+
+    with transaction.atomic():
+        lock_student_creation_tenant_reference(tenant_id=tenant.id)
+        if not Student.objects.filter(pk=student.pk, tenant=tenant).exists():
+            raise StudentProfileUpdateError({"detail": "학생을 찾을 수 없습니다."})
+        return _update_student_profile_after_tenant_gate(
+            student=student,
+            tenant=tenant,
+            data=data,
+            identity_field=identity_field,
+            strict_school_validation=strict_school_validation,
+            ignore_blank_name=ignore_blank_name,
+        )

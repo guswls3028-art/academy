@@ -36,6 +36,9 @@ from apps.support.teacher_app.ops_assistant_dependencies import (
     resolve_student_import_row,
     update_student_profile,
 )
+from apps.support.students.namespace_lock import (
+    lock_student_creation_tenant_reference,
+)
 
 
 PROPOSAL_SALT = "teacher-ops-assistant-v2"
@@ -463,6 +466,36 @@ class ExecutionResult:
     video_ids: tuple[int, ...]
 
 
+def _lock_existing_students_for_execution(*, tenant, student_ids: set[int]) -> dict[int, Student]:
+    """Lock assistant identity rows in the global User -> Student order."""
+    if not student_ids:
+        return {}
+    expected_user_by_student = dict(
+        Student.objects.filter(tenant=tenant, id__in=student_ids).values_list(
+            "id",
+            "user_id",
+        )
+    )
+    if set(expected_user_by_student) != set(student_ids):
+        raise ValidationError("검토한 학생 정보를 다시 확인해 주세요.")
+    list(
+        get_user_model().objects.select_for_update()
+        .filter(id__in=expected_user_by_student.values())
+        .order_by("id")
+    )
+    locked_students = list(
+        Student.objects.select_for_update()
+        .filter(tenant=tenant, id__in=student_ids)
+        .select_related("user")
+        .order_by("id")
+    )
+    if {
+        student.id: student.user_id for student in locked_students
+    } != expected_user_by_student:
+        raise ValidationError("학생 계정 연결이 변경되었습니다. 다시 확인해 주세요.")
+    return {student.id: student for student in locked_students}
+
+
 def execute_proposal(*, tenant, actor, payload: dict, overrides: list[dict]) -> ExecutionResult:
     del actor
     source_by_id = {str(row["row_id"]): row for row in payload["rows"]}
@@ -482,6 +515,7 @@ def execute_proposal(*, tenant, actor, payload: dict, overrides: list[dict]) -> 
     lecture_ids: list[int] = []
     video_ids: list[int] = []
     with transaction.atomic():
+        lock_student_creation_tenant_reference(tenant_id=tenant.id)
         student_lock_ids = {
             int(row["preview"]["student_match"]["id"])
             for row in confirmed_rows
@@ -503,7 +537,10 @@ def execute_proposal(*, tenant, actor, payload: dict, overrides: list[dict]) -> 
         correction_lock_ids = {
             int(row["remove_enrollment_id"]) for row in confirmed_rows if row.get("remove_enrollment_id")
         }
-        list(Student.objects.select_for_update().filter(tenant=tenant, id__in=student_lock_ids))
+        locked_students_by_id = _lock_existing_students_for_execution(
+            tenant=tenant,
+            student_ids=student_lock_ids,
+        )
         list(
             Enrollment.objects.select_for_update()
             .filter(tenant=tenant)
@@ -528,12 +565,9 @@ def execute_proposal(*, tenant, actor, payload: dict, overrides: list[dict]) -> 
             restored = False
             profile_changed: list[str] = []
             if match["status"] == "existing":
-                student = (
-                    Student.objects.select_for_update()
-                    .select_related("user")
-                    .get(tenant=tenant, deleted_at__isnull=True, id=match["id"])
-                )
-                get_user_model().objects.select_for_update().get(pk=student.user_id)
+                student = locked_students_by_id.get(int(match["id"]))
+                if student is None or student.deleted_at is not None:
+                    raise ValidationError("검토한 학생 정보가 변경되었습니다. 다시 확인해 주세요.")
                 update_data: dict[str, Any] = {}
                 if not student.phone and row.get("student_phone"):
                     update_data["phone"] = row["student_phone"]
