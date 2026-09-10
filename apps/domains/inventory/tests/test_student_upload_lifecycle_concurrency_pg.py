@@ -76,6 +76,33 @@ class TestStudentUploadLifecycleConcurrencyPostgres(TransactionTestCase):
             role="student",
         )
 
+    def test_reported_score_evidence_fk_is_immediate(self):
+        table_name = StudentReportedScore._meta.db_table
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT constraint_name
+                FROM information_schema.key_column_usage
+                WHERE table_schema = current_schema()
+                  AND table_name = %s
+                  AND column_name = 'evidence_file_id'
+                  AND position_in_unique_constraint IS NOT NULL
+                """,
+                [table_name],
+            )
+            constraint_names = [row[0] for row in cursor.fetchall()]
+            self.assertEqual(len(constraint_names), 1)
+            cursor.execute(
+                """
+                SELECT condeferrable, condeferred
+                FROM pg_constraint
+                WHERE conrelid = %s::regclass
+                  AND conname = %s
+                """,
+                [table_name, constraint_names[0]],
+            )
+            self.assertEqual(cursor.fetchone(), (False, False))
+
     def _upload_request(self):
         upload = SimpleUploadedFile(
             "race.pdf",

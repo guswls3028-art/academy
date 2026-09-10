@@ -68,7 +68,12 @@ row scope를 다시 읽는다. admin scope도 folder/file create·upload·rename
 scope 모두 동일 scope의 mutation을 직렬화하고 전체 folder parent·file folder/key snapshot 및 현재 target ancestry를 다시
 검사해 stale copy commit과 parent cycle을 거부한다. overwrite 직전에는 locked current
 file set의 성적표 evidence와 owner-pinned Matchup graph도 다시 잠그고 조회하므로 preflight
-후 새 보호 연결이 생기면 이동 전체를 `409`로 되돌린다. 모든 이동은 논리 경로가 같아도
+후 새 보호 연결이 생기면 이동 전체를 `409`로 되돌린다.
+PostgreSQL의 `StudentReportedScore.evidence_file` FK는 즉시 검사되는 참조 계약이다. 따라서
+성적표 evidence를 추가하는 transaction은 해당 `InventoryFile`에 즉시 참조 잠금을 잡고,
+동시에 시작된 overwrite/delete는 그 transaction의 commit 또는 rollback까지 기다린 뒤
+최신 보호 graph를 판정한다. deferred FK에 의존해 미확정 evidence를 건너뛰지 않는다.
+모든 이동은 논리 경로가 같아도
 128-bit fresh destination key에 복사하므로 기존 canonical destination이나 source key를
 pre-commit에 덮어쓰지 않는다. 최종 transaction은 exact object-key attachability를 확인한
 뒤 DB ownership만 넘긴다. PUT/Copy가 timeout 등으로 성공 여부가 불명확하면 exact key
