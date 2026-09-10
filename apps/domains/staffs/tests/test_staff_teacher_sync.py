@@ -417,6 +417,87 @@ class TestStaffManagementPermissions(TestCase):
         )
         self.assertEqual(denied_summary.status_code, 403, denied_summary.data)
 
+    def test_assistant_membership_reads_only_own_monthly_work_history_and_summary(self):
+        assistant_user = User.objects.create_user(
+            username=f"t{self.tenant.id}_records_assistant",
+            password="test1234",
+            name="기록조교",
+            tenant=self.tenant,
+        )
+        assistant = Staff.objects.create(
+            tenant=self.tenant,
+            user=assistant_user,
+            name="기록조교",
+            phone="01067676767",
+            is_manager=False,
+        )
+        TenantMembership.objects.create(
+            tenant=self.tenant,
+            user=assistant_user,
+            role="staff",
+            is_active=True,
+        )
+        august_record = WorkRecord.objects.create(
+            tenant=self.tenant,
+            staff=assistant,
+            work_type=self.work_type,
+            date=date(2026, 8, 18),
+            start_time=time(13, 0),
+            end_time=time(17, 0),
+        )
+        september_record = WorkRecord.objects.create(
+            tenant=self.tenant,
+            staff=assistant,
+            work_type=self.work_type,
+            date=date(2026, 9, 6),
+            start_time=time(10, 0),
+            end_time=time(12, 30),
+        )
+        other_staff = _create_staff_teacher(
+            self.tenant,
+            name="조회불가강사",
+            phone="01068686868",
+        )
+
+        def get(action, staff, date_from, date_to):
+            request = self.factory.get(
+                f"/staffs/{staff.id}/{action}/",
+                {"date_from": date_from, "date_to": date_to},
+            )
+            force_authenticate(request, user=assistant_user)
+            request.tenant = self.tenant
+            return StaffViewSet.as_view({"get": action})(request, pk=staff.id)
+
+        august = get("work_records", assistant, "2026-08-01", "2026-08-31")
+        self.assertEqual(august.status_code, 200, august.data)
+        self.assertEqual(august.data["count"], 1)
+        self.assertEqual(august.data["results"][0]["id"], august_record.id)
+        self.assertEqual(august.data["results"][0]["work_hours"], "4.00")
+        self.assertEqual(august.data["results"][0]["amount"], 40_000)
+        self.assertEqual(august.data["results"][0]["resolved_hourly_wage"], 10_000)
+
+        august_summary = get("summary", assistant, "2026-08-01", "2026-08-31")
+        self.assertEqual(august_summary.status_code, 200, august_summary.data)
+        self.assertEqual(august_summary.data["work_hours"], 4.0)
+        self.assertEqual(august_summary.data["work_amount"], 40_000)
+
+        september = get("work_records", assistant, "2026-09-01", "2026-09-30")
+        self.assertEqual(september.status_code, 200, september.data)
+        self.assertEqual(september.data["count"], 1)
+        self.assertEqual(september.data["results"][0]["id"], september_record.id)
+        self.assertEqual(september.data["results"][0]["work_hours"], "2.50")
+        self.assertEqual(september.data["results"][0]["amount"], 25_000)
+
+        september_summary = get("summary", assistant, "2026-09-01", "2026-09-30")
+        self.assertEqual(september_summary.status_code, 200, september_summary.data)
+        self.assertEqual(september_summary.data["work_hours"], 2.5)
+        self.assertEqual(september_summary.data["work_amount"], 25_000)
+
+        denied_records = get("work_records", other_staff, "2026-08-01", "2026-08-31")
+        self.assertEqual(denied_records.status_code, 403, denied_records.data)
+        denied_summary = get("summary", other_staff, "2026-08-01", "2026-08-31")
+        self.assertEqual(denied_summary.status_code, 403, denied_summary.data)
+
     def test_current_work_exposes_selected_type_and_clock_in_wage(self):
         record = WorkRecord.objects.create(
             tenant=self.tenant,
