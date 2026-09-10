@@ -66,6 +66,9 @@
 FK-compatible `KEY SHARE` gate를 잡는다. 한 User가 삭제 예정 학생과 학부모 profile을
 함께 가진 경우에도 permanent delete의 Tenant→User 순서와 역전되지 않으며, 학생 생성과
 영구 삭제가 경합해도 한쪽이 commit된 뒤 다른 쪽이 계속된다.
+학생 restore·가입 승인·profile 수정·운영보조·복구 명령처럼 이미 transaction을 여는
+호출자는 그 가장 바깥 경계에서도 같은 Tenant gate를 User/Student/Parent 잠금보다 먼저
+잡는다. 내부 ensure의 재획득만으로 이미 역전된 상위 transaction을 교정하지 않는다.
 
 학생 생성 경로의 Parent/User/Student/Membership 계정 그래프는
 [student-creation.md](student-creation.md)가 정본이다.

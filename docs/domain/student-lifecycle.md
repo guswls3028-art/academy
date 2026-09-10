@@ -143,13 +143,18 @@ SSOT: `permanently_delete_students(tenant=..., student_ids=[...])`
 - 삭제 대상 학생은 반드시 같은 tenant의 soft-deleted 학생이어야 한다.
 - PostgreSQL에서는 `academy:student-ps-namespace:v1:{tenant_id}:{ps_number}` transaction
   advisory lock이 학생번호 namespace의 생성·변경·Inventory attach·영구삭제 ownership
-  판정을 직렬화한다. 기존 학생 identity 경로는 교착을 피하려고 항상
-  `User row -> Student row -> target User.username reservation -> sorted old/new namespace`
+  판정을 직렬화한다. 신규 생성·soft delete·restore·가입 승인·관리자/학생 profile
+  수정·운영보조·학부모 계정 복구는 가장 바깥 transaction에서 Tenant를 PostgreSQL
+  `FOR KEY SHARE`로 먼저 잡는다. 기존 학생 identity 경로는 교착을 피하려고 항상
+  `Tenant KEY SHARE -> User row -> Student row -> target User.username reservation -> sorted old/new namespace`
   순서이고, 영구삭제도 `Tenant -> User -> Student -> sorted current/original namespace`
-  순서다. canonical 신규 생성은 Parent/User login을 먼저 예약하고, Student insert 직전
-  Tenant와 referenced User를 PostgreSQL `FOR KEY SHARE`로 잡은 뒤 target과 발견된
+  순서다. canonical 신규 생성은 transaction 진입 즉시 Tenant gate를 잡고 Parent/User
+  login을 예약하며, Student insert 직전 referenced User를 `FOR KEY SHARE`로 잡은 뒤 target과 발견된
   tombstone predecessor namespace를 정렬해 잠근다. 따라서 create/restore/rename/
   soft-delete/permanent-delete가 unique index, FK와 namespace를 역순으로 기다리지 않는다.
+  중첩된 domain helper가 같은 Tenant gate를 다시 요청하는 것은 PostgreSQL에서 같은
+  transaction의 idempotent 재획득이며, 바깥 transaction보다 늦은 User/Student/Parent
+  잠금으로 순서를 되돌리지 않는다.
   predecessor snapshot 변화는 top-level 생성 transaction을 최대 3회 다시 시작한다. 기존
   rename도 target claim이므로 같은 snapshot/re-read를 사용한다. exact predecessor가
   하나이면 legacy Inventory metadata를 predecessor tombstone으로 격리하고, 복수/모호한

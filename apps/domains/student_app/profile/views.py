@@ -17,6 +17,9 @@ from apps.support.student_app.profile_dependencies import (
     send_user_password_changed_notice,
     update_student_profile,
 )
+from apps.support.students.namespace_lock import (
+    lock_student_creation_tenant_reference,
+)
 logger = logging.getLogger(__name__)
 
 
@@ -134,6 +137,7 @@ class StudentProfileView(APIView):
         old_parent_phone = student.parent_phone or ""
         try:
             with transaction.atomic():
+                lock_student_creation_tenant_reference(tenant_id=request.tenant.id)
                 result = update_student_profile(
                     student=student,
                     tenant=request.tenant,

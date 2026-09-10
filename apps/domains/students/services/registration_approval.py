@@ -13,6 +13,9 @@ from apps.support.students.lifecycle_dependencies import (
     locked_parent_account_by_phone_for_registration,
     locked_parent_account_for_registration,
 )
+from apps.support.students.namespace_lock import (
+    lock_student_creation_tenant_reference,
+)
 
 from ..models import Student, StudentRegistrationRequest
 from .creation import create_student_account
@@ -572,6 +575,7 @@ def approve_registration_request(
     shape and message delivery remain caller concerns.
     """
     with transaction.atomic():
+        lock_student_creation_tenant_reference(tenant_id=tenant.id)
         if not is_student_self_registration_enabled(tenant):
             raise RegistrationApprovalError(
                 "이 학원은 운영정책상 학생 회원가입을 사용하지 않습니다.",
@@ -658,6 +662,7 @@ def resolve_deleted_registration_request(
     conflict response; no automatic winner is inferred when duplicates exist.
     """
     with transaction.atomic():
+        lock_student_creation_tenant_reference(tenant_id=tenant.id)
         if not is_student_self_registration_enabled(tenant):
             raise RegistrationApprovalError(
                 "이 학원은 운영정책상 학생 회원가입을 사용하지 않습니다.",

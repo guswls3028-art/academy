@@ -36,6 +36,9 @@ from apps.support.teacher_app.ops_assistant_dependencies import (
     resolve_student_import_row,
     update_student_profile,
 )
+from apps.support.students.namespace_lock import (
+    lock_student_creation_tenant_reference,
+)
 
 
 PROPOSAL_SALT = "teacher-ops-assistant-v2"
@@ -512,6 +515,7 @@ def execute_proposal(*, tenant, actor, payload: dict, overrides: list[dict]) -> 
     lecture_ids: list[int] = []
     video_ids: list[int] = []
     with transaction.atomic():
+        lock_student_creation_tenant_reference(tenant_id=tenant.id)
         student_lock_ids = {
             int(row["preview"]["student_match"]["id"])
             for row in confirmed_rows

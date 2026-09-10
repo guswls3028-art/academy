@@ -173,8 +173,8 @@ class TestPsNumberUsernameSyncOnSave(TestCase):
         self.assertEqual(folder.student_ps, "C77777")
         self.assertEqual(ifile.student_ps, "C77777")
 
-    def test_ps_number_change_locks_user_student_then_namespace(self):
-        """Existing identity paths keep one deadlock-safe row/namespace lock order."""
+    def test_ps_number_change_locks_tenant_user_student_then_namespace(self):
+        """Existing identity paths keep one deadlock-safe tenant/row/namespace order."""
         lock_order = []
         original_select_for_update = QuerySet.select_for_update
 
@@ -187,15 +187,18 @@ class TestPsNumberUsernameSyncOnSave(TestCase):
             return original_select_for_update(queryset, *args, **kwargs)
 
         with patch(
+            "apps.domains.students.models.lock_student_creation_tenant_reference",
+            side_effect=lambda **kwargs: lock_order.append(("tenant", kwargs)),
+        ), patch(
             "apps.domains.students.models.lock_student_ps_namespaces",
             side_effect=record_namespace_lock,
         ), patch.object(QuerySet, "select_for_update", record_lock):
             self.student.ps_number = "LOCK002"
             self.student.save(update_fields=["ps_number"])
 
-        self.assertEqual(lock_order[:2], [User, Student])
-        self.assertEqual(lock_order[2][0], "namespace")
-        self.assertEqual(set(lock_order[2][2]), {"A12345", "LOCK002"})
+        self.assertEqual(lock_order[:3], [("tenant", {"tenant_id": self.tenant.id}), User, Student])
+        self.assertEqual(lock_order[3][0], "namespace")
+        self.assertEqual(set(lock_order[3][2]), {"A12345", "LOCK002"})
 
     def test_new_student_locks_tenant_reference_then_ps_namespace_before_insert(self):
         user = User.objects.create_user(

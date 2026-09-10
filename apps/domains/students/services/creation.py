@@ -9,6 +9,9 @@ from django.db import IntegrityError, transaction
 from academy.adapters.db.django import repositories_students as student_repo
 from apps.core.models import TenantMembership
 from apps.support.students.lifecycle_dependencies import ensure_parent_account_for_student
+from apps.support.students.namespace_lock import (
+    lock_student_creation_tenant_reference,
+)
 from apps.domains.students.models import (
     StudentInventoryNamespaceChanged,
     StudentInventoryNamespaceConflict,
@@ -100,6 +103,7 @@ def create_student_account(
     for attempt in range(3):
         try:
             with transaction.atomic():
+                lock_student_creation_tenant_reference(tenant_id=tenant.id)
                 parent = None
                 parent_password_for_notice = ""
                 parent_user_created = False

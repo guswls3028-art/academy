@@ -314,22 +314,22 @@ def move_file(
             object_filters = {"tenant": tenant, "scope": scope}
             if scope == "student":
                 object_filters["student_ps"] = student_ps
-            if not InventoryFile.objects.select_for_update().filter(
+            if InventoryFile.objects.select_for_update().filter(
                 **object_filters,
                 id=source.id,
                 r2_key=old_key,
-            ).exists():
+            ).first() is None:
                 raise ValueError("inventory file changed during move")
             if target_folder_id and not InventoryFolder.objects.select_for_update().filter(
                 **object_filters,
                 id=target_folder_id,
             ).exists():
                 raise ValueError("inventory folder changed during move")
-            if overwrite_existing and not InventoryFile.objects.select_for_update().filter(
+            if overwrite_existing and InventoryFile.objects.select_for_update().filter(
                 **object_filters,
                 id=overwrite_existing.id,
                 r2_key=overwrite_existing.r2_key,
-            ).exists():
+            ).first() is None:
                 raise ValueError("inventory overwrite target changed during move")
             _raise_if_locked_files_are_protected(
                 tenant=tenant,

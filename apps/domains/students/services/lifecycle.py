@@ -23,6 +23,9 @@ from apps.support.students.lifecycle_dependencies import (
     restore_enrollments_after_student_restore,
     submission_storage_cleanup_status_counts,
 )
+from apps.support.students.namespace_lock import (
+    lock_student_creation_tenant_reference,
+)
 PERMANENT_DELETE_STUDENT_RELATIONS = frozenset({
     ("students_studenttag", "student_id"),
     ("student_support_session", "student_id"),
@@ -284,6 +287,7 @@ def soft_delete_student(
     with transaction.atomic():
         if not tenant or student.tenant_id != tenant.id:
             raise StudentLifecycleError("tenant_mismatch", "학생 테넌트가 일치하지 않습니다.")
+        lock_student_creation_tenant_reference(tenant_id=tenant.id)
 
         original_username = None
         locked_user = None
@@ -373,6 +377,9 @@ def restore_student(
     with transaction.atomic():
         if not tenant or student.tenant_id != tenant.id:
             raise StudentLifecycleError("tenant_mismatch", "학생 테넌트가 일치하지 않습니다.")
+        lock_student_creation_tenant_reference(tenant_id=tenant.id)
+        if not Student.objects.filter(pk=student.pk, tenant=tenant).exists():
+            raise StudentLifecycleError("not_found", "삭제된 학생을 찾을 수 없습니다.")
         locked_user = None
         if student.user_id:
             locked_user = get_user_model().objects.select_for_update().get(pk=student.user_id)

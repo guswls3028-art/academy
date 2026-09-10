@@ -360,6 +360,9 @@ class Student(TimestampModel):
             raise ValueError("Student.tenant cannot be changed through Student.save().")
 
         with transaction.atomic():
+            lock_student_creation_tenant_reference(
+                tenant_id=persisted_tenant_id
+            )
             user_model = self._meta.get_field("user").remote_field.model
             locked_user = user_model.objects.select_for_update().get(
                 pk=persisted_user_id

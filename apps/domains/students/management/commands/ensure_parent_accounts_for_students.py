@@ -14,6 +14,9 @@ from apps.domains.students.models import Student
 from apps.support.students.lifecycle_dependencies import (
     ensure_parent_account_for_student,
 )
+from apps.support.students.namespace_lock import (
+    lock_student_creation_tenant_reference,
+)
 
 
 def _normalize_phone(raw: str) -> str:
@@ -81,6 +84,7 @@ class Command(BaseCommand):
 
         try:
             with transaction.atomic():
+                lock_student_creation_tenant_reference(tenant_id=tenant.id)
                 locked_students = list(students_qs.select_for_update())
                 locked_candidates, locked_invalid, locked_linked = self._candidate_rows(
                     tenant=tenant,

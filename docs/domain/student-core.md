@@ -94,14 +94,17 @@ Required invariants:
   same 50-character storage boundary; a valid student identity must not fail
   when it is mirrored into inventory metadata.
 - internal username mirrors `ps_number` through `user_internal_username(tenant, ps_number)`.
-- Persisting a `ps_number` change locks the account and student rows and updates
+- Persisting a `ps_number` change takes the Tenant FK-compatible gate, then locks the account and student rows and updates
   the internal username, inventory copies, and student row in one transaction.
   A save whose `update_fields` excludes `ps_number` must not mutate either
   identity mirror. The persisted `Student.user_id` selects the account lock
   before the student row lock; an in-memory attempt to relink the account or
   tenant fails closed. Username collisions roll back every identity copy.
-- A new canonical account takes the Tenant FK-compatible gate before reusing an
-  existing parent identity, then follows User -> Student namespace ordering.
+- A new canonical account takes the Tenant FK-compatible gate at its outer
+  transaction entry before reusing an existing parent identity, then follows
+  Tenant -> User -> Student namespace ordering. Restore, signup approval,
+  profile update, operations-assistant execution, and parent-account repair
+  take the same gate before any User, Student, or Parent row lock.
   This includes a parent User that is also attached to a student selected for
   permanent deletion; create and delete serialize instead of holding Tenant and
   User locks in opposite order.
