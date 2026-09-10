@@ -86,9 +86,12 @@
 - 관리자 수기 CRUD는 기존 `WorkRecordViewSet`에 남지만 실시간 출퇴근 액션과
   같은 `WorkRecord`·월마감·단가 고정 규칙을 사용한다. 별도 조교 타이머 테이블이나
   로그인 기반 비용 기록은 만들지 않는다.
-- 급여 관리자가 수기로 근무기록을 만들거나 삭제하면 같은 트랜잭션에서
-  `staff.work_record_created` 또는 `staff.work_record_deleted` 감사 로그를 반드시
-  남긴다. 감사 저장이 실패하면 원 근무기록 변경도 롤백한다. 로그에는 actor와 tenant,
+- 급여 관리자가 수기로 근무기록을 만들거나 수정·삭제하면 같은 트랜잭션에서
+  `staff.work_record_created`, `staff.work_record_updated` 또는
+  `staff.work_record_deleted` 감사 로그를 반드시 남긴다. 감사 저장이 실패하면 원
+  근무기록 변경도 롤백한다. 수정 로그는 변경 필드와 함께 날짜·직원 ID의 정확한
+  before/after 값을 항상 남겨 날짜나 직원을 옮긴 이력을 재구성할 수 있게 한다.
+  로그에는 actor와 tenant,
   record/staff/work-type ID, 날짜·시간·계산 입력·금액, `source=payroll_manager_manual`,
   생성 당시 로컬 날짜를 기록하고 이름·전화·메모는 기록하지 않는다. 삭제 로그는
   행 삭제 뒤에도 급여 사실을 재구성할 수 있는 before snapshot이다. 본인 실시간

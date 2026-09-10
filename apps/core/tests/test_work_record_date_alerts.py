@@ -3,6 +3,7 @@ from io import StringIO
 from unittest.mock import patch
 
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
@@ -58,6 +59,49 @@ class WorkRecordDateAlertTests(TestCase):
         )
         return record
 
+    def _updated_candidate(
+        self,
+        *,
+        staff_index,
+        old_date="2026-08-09",
+        selected_date="2026-08-01",
+        old_staff_index=None,
+    ):
+        staff = self.staffs[staff_index]
+        old_staff = self.staffs[
+            staff_index if old_staff_index is None else old_staff_index
+        ]
+        record = WorkRecord.objects.create(
+            tenant=self.tenant,
+            staff=staff,
+            work_type=self.work_type,
+            date=date.fromisoformat(selected_date),
+            start_time=time(14, 0),
+            end_time=time(18, 0),
+        )
+        fields = ["date"]
+        if old_staff.id != staff.id:
+            fields.append("staff")
+        OpsAuditLog.objects.create(
+            action="staff.work_record_updated",
+            target_tenant=self.tenant,
+            summary=f"work_record_id={record.id}",
+            payload={
+                "source": "payroll_manager_manual",
+                "work_record_id": record.id,
+                "fields": sorted(fields),
+                "old": {
+                    "date": old_date,
+                    "staff": str(old_staff.id),
+                },
+                "new": {
+                    "date": selected_date,
+                    "staff": str(staff.id),
+                },
+            },
+        )
+        return record
+
     def test_two_distinct_staff_with_same_stale_month_first_date_trigger_review(self):
         first = self._candidate(staff_index=0)
         second = self._candidate(staff_index=1)
@@ -75,12 +119,81 @@ class WorkRecordDateAlertTests(TestCase):
                 "distinct_staff": 2,
                 "record_count": 2,
                 "work_record_ids": [first.id, second.id],
+                "evidence": [
+                    {
+                        "action": "created",
+                        "work_record_id": first.id,
+                        "old_date": None,
+                        "new_date": "2026-08-01",
+                        "old_staff_id": None,
+                        "new_staff_id": self.staffs[0].id,
+                    },
+                    {
+                        "action": "created",
+                        "work_record_id": second.id,
+                        "old_date": None,
+                        "new_date": "2026-08-01",
+                        "old_staff_id": None,
+                        "new_staff_id": self.staffs[1].id,
+                    },
+                ],
             },
         )
         rendered = str(result)
         self.assertNotIn(self.tenant.name, rendered)
         for staff in self.staffs:
             self.assertNotIn(staff.name, rendered)
+
+    def test_updates_to_same_month_first_date_trigger_with_exact_old_new_evidence(self):
+        first = self._updated_candidate(staff_index=0, old_date="2026-08-09")
+        second = self._updated_candidate(
+            staff_index=1,
+            old_date="2026-08-08",
+            old_staff_index=2,
+        )
+
+        result = alerts.rule_work_record_date_anomalies()
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["total"], 2)
+        row = result["rows"][0]
+        self.assertEqual(row["work_record_ids"], [first.id, second.id])
+        self.assertEqual(
+            row["evidence"],
+            [
+                {
+                    "action": "updated",
+                    "work_record_id": first.id,
+                    "old_date": "2026-08-09",
+                    "new_date": "2026-08-01",
+                    "old_staff_id": self.staffs[0].id,
+                    "new_staff_id": self.staffs[0].id,
+                },
+                {
+                    "action": "updated",
+                    "work_record_id": second.id,
+                    "old_date": "2026-08-08",
+                    "new_date": "2026-08-01",
+                    "old_staff_id": self.staffs[2].id,
+                    "new_staff_id": self.staffs[1].id,
+                },
+            ],
+        )
+
+    def test_staff_only_update_into_existing_month_first_concentration_is_detected(self):
+        first = self._candidate(staff_index=0)
+        second = self._updated_candidate(
+            staff_index=1,
+            old_date="2026-08-01",
+            selected_date="2026-08-01",
+            old_staff_index=0,
+        )
+
+        result = alerts.rule_work_record_date_anomalies()
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["rows"][0]["work_record_ids"], [first.id, second.id])
+        self.assertEqual(result["rows"][0]["distinct_staff"], 2)
 
     def test_single_legitimate_backfill_is_not_treated_as_anomaly(self):
         self._candidate(staff_index=0)
@@ -234,6 +347,35 @@ class WorkRecordDateAlertTests(TestCase):
             ).exists()
         )
         self.assertIsNone(alerts.rule_work_record_date_anomalies())
+
+    @override_settings(
+        DEV_ALERTS_WEBHOOK_URL="",
+        DEV_ALERTS_WEBHOOK_REQUIRED=False,
+    )
+    def test_command_fails_closed_when_work_record_alert_has_no_recipient(self):
+        self._candidate(staff_index=0)
+        self._candidate(staff_index=1)
+
+        with self.assertRaisesMessage(
+            CommandError,
+            "work_record_date_anomalies",
+        ):
+            call_command(
+                "check_dev_alerts",
+                "--rule",
+                "work_record_date_anomalies",
+                stdout=StringIO(),
+            )
+
+        self.assertFalse(
+            OpsAuditLog.objects.filter(
+                action=alerts.WORK_RECORD_DATE_SLACK_DELIVERY_ACTION,
+            ).exists()
+        )
+        self.assertEqual(
+            OpsAuditLog.objects.get(action="cron.check_dev_alerts").result,
+            "failed",
+        )
 
     def test_events_outside_bounded_window_are_ignored(self):
         record = self._candidate(staff_index=0)

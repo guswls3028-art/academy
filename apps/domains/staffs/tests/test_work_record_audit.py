@@ -1,4 +1,5 @@
 from datetime import date, time
+from decimal import Decimal
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
@@ -36,6 +37,11 @@ class WorkRecordAuditTests(TestCase):
         self.staff = Staff.objects.create(
             tenant=self.tenant,
             name="감사 대상",
+            phone="",
+        )
+        self.other_staff = Staff.objects.create(
+            tenant=self.tenant,
+            name="이동 대상",
             phone="",
         )
         self.work_type = WorkType.objects.create(
@@ -193,3 +199,95 @@ class WorkRecordAuditTests(TestCase):
 
         self.assertEqual(response.status_code, 503, response.data)
         self.assertTrue(WorkRecord.objects.filter(pk=record.id).exists())
+
+    def test_manual_patch_records_exact_old_and_new_payroll_identity(self):
+        record = WorkRecord.objects.create(
+            tenant=self.tenant,
+            staff=self.staff,
+            work_type=self.work_type,
+            date=date(2026, 8, 9),
+            start_time=time(14, 0),
+            end_time=time(18, 30),
+            work_hours=Decimal("4.50"),
+            amount=67_500,
+            is_manually_edited=True,
+        )
+        request = self._request(
+            "patch",
+            f"/api/v1/staffs/work-records/{record.id}/",
+            {
+                "staff": self.other_staff.id,
+                "date": "2026-08-01",
+                "work_hours": "4.50",
+                "amount": 70_000,
+            },
+        )
+
+        response = WorkRecordViewSet.as_view({"patch": "partial_update"})(
+            request,
+            pk=record.id,
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        audit = OpsAuditLog.objects.get(action="staff.work_record_updated")
+        self.assertEqual(audit.payload["source"], "payroll_manager_manual")
+        self.assertEqual(audit.payload["work_record_id"], record.id)
+        self.assertEqual(
+            audit.payload["fields"],
+            ["amount", "date", "staff", "work_hours"],
+        )
+        self.assertEqual(
+            audit.payload["old"],
+            {
+                "amount": "67500",
+                "date": "2026-08-09",
+                "staff": str(self.staff.id),
+                "work_hours": "4.50",
+            },
+        )
+        self.assertEqual(
+            audit.payload["new"],
+            {
+                "amount": "70000",
+                "date": "2026-08-01",
+                "staff": str(self.other_staff.id),
+                "work_hours": "4.50",
+            },
+        )
+
+    def test_manual_patch_rolls_back_when_required_audit_cannot_be_written(self):
+        record = WorkRecord.objects.create(
+            tenant=self.tenant,
+            staff=self.staff,
+            work_type=self.work_type,
+            date=date(2026, 8, 9),
+            start_time=time(14, 0),
+            end_time=time(18, 30),
+            work_hours=Decimal("4.50"),
+            amount=67_500,
+            is_manually_edited=True,
+        )
+        with patch(
+            "apps.core.models.OpsAuditLog.objects.create",
+            side_effect=RuntimeError("audit unavailable"),
+        ):
+            request = self._request(
+                "patch",
+                f"/api/v1/staffs/work-records/{record.id}/",
+                {
+                    "staff": self.other_staff.id,
+                    "date": "2026-08-01",
+                    "work_hours": "4.50",
+                    "amount": 70_000,
+                },
+            )
+            response = WorkRecordViewSet.as_view({"patch": "partial_update"})(
+                request,
+                pk=record.id,
+            )
+
+        self.assertEqual(response.status_code, 503, response.data)
+        record.refresh_from_db()
+        self.assertEqual(record.staff_id, self.staff.id)
+        self.assertEqual(record.date, date(2026, 8, 9))
+        self.assertEqual(record.amount, 67_500)
