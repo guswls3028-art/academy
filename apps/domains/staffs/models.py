@@ -1,6 +1,6 @@
 # PATH: apps/domains/staffs/models.py
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 from django.conf import settings
 from django.db import models
@@ -23,16 +23,30 @@ class WorkHourCalculationPolicy:
     """
 
     @staticmethod
-    def calculate(date, start_time, end_time, break_minutes, meal_minutes=0) -> Decimal:
+    def paid_minutes(date, start_time, end_time, break_minutes, meal_minutes=0) -> Decimal:
         start_dt = datetime.combine(date, start_time)
         end_dt = datetime.combine(date, end_time)
         if end_dt < start_dt:
             end_dt += timedelta(days=1)
 
-        total_minutes = (end_dt - start_dt).total_seconds() / 60
-        total_minutes = max(0, total_minutes - break_minutes - meal_minutes)
+        elapsed_seconds = Decimal(str((end_dt - start_dt).total_seconds()))
+        total_minutes = elapsed_seconds / Decimal(60)
+        return max(
+            Decimal(0),
+            total_minutes - Decimal(break_minutes) - Decimal(meal_minutes),
+        )
 
-        return Decimal(total_minutes / 60).quantize(Decimal("0.01"))
+    @classmethod
+    def calculate(cls, date, start_time, end_time, break_minutes, meal_minutes=0) -> Decimal:
+        total_minutes = cls.paid_minutes(
+            date,
+            start_time,
+            end_time,
+            break_minutes,
+            meal_minutes,
+        )
+
+        return (total_minutes / Decimal(60)).quantize(Decimal("0.01"))
 
 
 class WageResolutionPolicy:
@@ -60,6 +74,47 @@ class PayrollAmountPolicy:
     def calculate(hours: Decimal, hourly_wage: int, adjustment_amount: int = 0) -> int:
         base = int(hours * Decimal(hourly_wage))
         return max(0, base + adjustment_amount)
+
+    @staticmethod
+    def calculate_from_paid_minutes(
+        paid_minutes: Decimal,
+        hourly_wage: int,
+        adjustment_amount: int = 0,
+    ) -> int:
+        base = int(
+            (paid_minutes * Decimal(hourly_wage) / Decimal(60)).quantize(
+                Decimal("1"),
+                rounding=ROUND_HALF_UP,
+            )
+        )
+        return max(0, base + adjustment_amount)
+
+
+class PayrollReferenceDeductionPolicy:
+    """저장하지 않는 3.3% 비교 참고값.
+
+    기존 정산표와 동일하게 총 공제 참고액을 3.3%에서 원 단위
+    반올림한다. 3% 항목도 원 단위 반올림하고 0.3% 항목은 총액과의
+    차이로 맞춰 워터폴 합계가 1원도 어긋나지 않게 한다.
+    """
+
+    @staticmethod
+    def _round_won(value: Decimal) -> int:
+        return int(value.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+    @classmethod
+    def calculate(cls, gross_work_amount: int) -> dict[str, int]:
+        gross = max(0, int(gross_work_amount or 0))
+        gross_decimal = Decimal(gross)
+        business_income_tax = cls._round_won(gross_decimal * Decimal("0.03"))
+        deduction_total = cls._round_won(gross_decimal * Decimal("0.033"))
+        local_income_tax = deduction_total - business_income_tax
+        return {
+            "business_income_tax": business_income_tax,
+            "local_income_tax": local_income_tax,
+            "deduction_total": deduction_total,
+            "net_work_amount": gross - deduction_total,
+        }
 
 
 # ======================================================
@@ -301,13 +356,14 @@ class WorkRecord(TimestampModel):
         ]
 
     def calculate_payroll(self):
-        hours = WorkHourCalculationPolicy.calculate(
+        paid_minutes = WorkHourCalculationPolicy.paid_minutes(
             self.date,
             self.start_time,
             self.end_time,
             self.break_minutes,
             self.meal_minutes,
         )
+        hours = (paid_minutes / Decimal(60)).quantize(Decimal("0.01"))
 
         wage = self.resolved_hourly_wage
         if wage is None:
@@ -317,7 +373,11 @@ class WorkRecord(TimestampModel):
                 work_type=self.work_type,
             )
 
-        amount = PayrollAmountPolicy.calculate(hours, wage, self.adjustment_amount)
+        amount = PayrollAmountPolicy.calculate_from_paid_minutes(
+            paid_minutes,
+            wage,
+            self.adjustment_amount,
+        )
         return hours, amount, wage
 
     def save(self, *args, **kwargs):

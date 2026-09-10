@@ -30,6 +30,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from ..models import (
     ExpenseRecord,
+    PayrollReferenceDeductionPolicy,
     PayrollSnapshot,
     Staff,
     StaffWorkType,
@@ -218,6 +219,89 @@ class StaffViewSet(viewsets.ModelViewSet):
                 )
             )
         }
+        work_type_by_staff: dict[int, list[dict]] = {}
+        work_type_totals: dict[int, dict] = {}
+        for item in (
+            WorkRecord.objects.filter(
+                tenant=tenant,
+                staff_id__in=staff_ids,
+                date__range=(date_from, date_to),
+            )
+            .values(
+                "staff_id",
+                "work_type_id",
+                "work_type__name",
+                "work_type__color",
+            )
+            .annotate(
+                record_count=Count("id"),
+                work_hours=Sum("work_hours"),
+                work_amount=Sum("amount"),
+            )
+            .order_by("work_type__name", "work_type_id")
+        ):
+            breakdown = {
+                "work_type_id": item["work_type_id"],
+                "work_type_name": item["work_type__name"],
+                "color": item["work_type__color"],
+                "record_count": int(item["record_count"] or 0),
+                "work_hours": float(item["work_hours"] or 0),
+                "work_amount": int(item["work_amount"] or 0),
+            }
+            work_type_by_staff.setdefault(item["staff_id"], []).append(breakdown)
+            total = work_type_totals.setdefault(
+                item["work_type_id"],
+                {
+                    "work_type_id": item["work_type_id"],
+                    "work_type_name": item["work_type__name"],
+                    "color": item["work_type__color"],
+                    "record_count": 0,
+                    "work_hours": 0.0,
+                    "work_amount": 0,
+                },
+            )
+            total["record_count"] += breakdown["record_count"]
+            total["work_hours"] += breakdown["work_hours"]
+            total["work_amount"] += breakdown["work_amount"]
+
+        duplicate_by_staff: dict[int, int] = {}
+        for item in (
+            WorkRecord.objects.filter(
+                tenant=tenant,
+                staff_id__in=staff_ids,
+                date__range=(date_from, date_to),
+            )
+            .values("staff_id", "date", "start_time", "end_time", "work_type_id")
+            .annotate(row_count=Count("id"))
+            .filter(row_count__gt=1)
+        ):
+            duplicate_by_staff[item["staff_id"]] = (
+                duplicate_by_staff.get(item["staff_id"], 0)
+                + int(item["row_count"])
+            )
+        abnormal_long_by_staff = dict(
+            WorkRecord.objects.filter(
+                tenant=tenant,
+                staff_id__in=staff_ids,
+                date__range=(date_from, date_to),
+                end_time__isnull=False,
+                work_hours__gte=12,
+            )
+            .values("staff_id")
+            .annotate(row_count=Count("id"))
+            .values_list("staff_id", "row_count")
+        )
+        manually_edited_by_staff = dict(
+            WorkRecord.objects.filter(
+                tenant=tenant,
+                staff_id__in=staff_ids,
+                date__range=(date_from, date_to),
+                is_manually_edited=True,
+            )
+            .values("staff_id")
+            .annotate(row_count=Count("id"))
+            .values_list("staff_id", "row_count")
+        )
         expense_by_staff = {
             row["staff_id"]: row
             for row in (
@@ -285,6 +369,12 @@ class StaffViewSet(viewsets.ModelViewSet):
             "approved_expense_amount": 0,
             "pending_expense_amount": 0,
             "total_amount": 0,
+            "reference_business_income_tax": 0,
+            "reference_local_income_tax": 0,
+            "reference_deduction_total": 0,
+            "reference_net_work_amount": 0,
+            "reference_transfer_amount": 0,
+            "advisory_issue_count": 0,
             "needs_review_count": 0,
             "closed_count": 0,
         }
@@ -336,6 +426,26 @@ class StaffViewSet(viewsets.ModelViewSet):
             membership_role = membership_roles.get(staff.user_id)
             account_role = account_role_codes.get(membership_role, "NONE")
             total_amount = work_amount + approved_expense_amount
+            reference = PayrollReferenceDeductionPolicy.calculate(work_amount)
+            reference_transfer_amount = (
+                reference["net_work_amount"] + approved_expense_amount
+            )
+            duplicate_work_record_count = int(
+                duplicate_by_staff.get(staff.id, 0)
+            )
+            abnormal_long_work_record_count = int(
+                abnormal_long_by_staff.get(staff.id, 0)
+            )
+            manually_edited_work_record_count = int(
+                manually_edited_by_staff.get(staff.id, 0)
+            )
+            advisory_issue_count = (
+                duplicate_work_record_count
+                + abnormal_long_work_record_count
+                + open_work_record_count
+                + incomplete_work_record_count
+                + manually_edited_work_record_count
+            )
             row = {
                 "staff_id": staff.id,
                 "name": staff.name,
@@ -358,8 +468,18 @@ class StaffViewSet(viewsets.ModelViewSet):
                 "pending_expense_amount": pending_expense_amount,
                 "pending_expense_count": pending_expense_count,
                 "total_amount": total_amount,
+                "reference_business_income_tax": reference["business_income_tax"],
+                "reference_local_income_tax": reference["local_income_tax"],
+                "reference_deduction_total": reference["deduction_total"],
+                "reference_net_work_amount": reference["net_work_amount"],
+                "reference_transfer_amount": reference_transfer_amount,
+                "work_type_breakdown": work_type_by_staff.get(staff.id, []),
                 "open_work_record_count": open_work_record_count,
                 "incomplete_work_record_count": incomplete_work_record_count,
+                "duplicate_work_record_count": duplicate_work_record_count,
+                "abnormal_long_work_record_count": abnormal_long_work_record_count,
+                "manually_edited_work_record_count": manually_edited_work_record_count,
+                "advisory_issue_count": advisory_issue_count,
                 "assigned_work_type_count": assigned_work_type_count,
                 "settlement_status": settlement_status,
                 "can_close": not needs_review and not locked,
@@ -370,6 +490,12 @@ class StaffViewSet(viewsets.ModelViewSet):
             totals["approved_expense_amount"] += approved_expense_amount
             totals["pending_expense_amount"] += pending_expense_amount
             totals["total_amount"] += total_amount
+            totals["reference_business_income_tax"] += reference["business_income_tax"]
+            totals["reference_local_income_tax"] += reference["local_income_tax"]
+            totals["reference_deduction_total"] += reference["deduction_total"]
+            totals["reference_net_work_amount"] += reference["net_work_amount"]
+            totals["reference_transfer_amount"] += reference_transfer_amount
+            totals["advisory_issue_count"] += advisory_issue_count
             totals["needs_review_count"] += int(needs_review)
             totals["closed_count"] += int(locked and snapshot_exists)
 
@@ -386,6 +512,12 @@ class StaffViewSet(viewsets.ModelViewSet):
             )
         )
         totals["work_hours"] = round(totals["work_hours"], 2)
+        totals["work_type_breakdown"] = sorted(
+            work_type_totals.values(),
+            key=lambda item: (item["work_type_name"], item["work_type_id"]),
+        )
+        for item in totals["work_type_breakdown"]:
+            item["work_hours"] = round(item["work_hours"], 2)
 
         return Response(
             {
@@ -853,6 +985,7 @@ class StaffViewSet(viewsets.ModelViewSet):
         work_amount = int(work_agg["total_amount"] or 0)
         expense_amount = int(expense_agg["total"] or 0)
         total_amount = work_amount + expense_amount
+        reference = PayrollReferenceDeductionPolicy.calculate(work_amount)
 
         return Response({
             "staff_id": staff.id,
@@ -860,4 +993,9 @@ class StaffViewSet(viewsets.ModelViewSet):
             "work_amount": work_amount,
             "expense_amount": expense_amount,
             "total_amount": total_amount,
+            "reference_business_income_tax": reference["business_income_tax"],
+            "reference_local_income_tax": reference["local_income_tax"],
+            "reference_deduction_total": reference["deduction_total"],
+            "reference_net_work_amount": reference["net_work_amount"],
+            "reference_transfer_amount": reference["net_work_amount"] + expense_amount,
         })

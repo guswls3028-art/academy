@@ -13685,6 +13685,21 @@
           "expense_amount": {
             "type": "integer"
           },
+          "reference_business_income_tax": {
+            "type": "integer"
+          },
+          "reference_deduction_total": {
+            "type": "integer"
+          },
+          "reference_local_income_tax": {
+            "type": "integer"
+          },
+          "reference_net_work_amount": {
+            "type": "integer"
+          },
+          "reference_transfer_amount": {
+            "type": "integer"
+          },
           "staff_id": {
             "type": "integer"
           },
@@ -13701,6 +13716,11 @@
         },
         "required": [
           "expense_amount",
+          "reference_business_income_tax",
+          "reference_deduction_total",
+          "reference_local_income_tax",
+          "reference_net_work_amount",
+          "reference_transfer_amount",
           "staff_id",
           "total_amount",
           "work_amount",

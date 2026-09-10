@@ -70,6 +70,11 @@ class StaffWorkSummarySerializer(serializers.Serializer):
     work_amount = serializers.IntegerField()
     expense_amount = serializers.IntegerField()
     total_amount = serializers.IntegerField()
+    reference_business_income_tax = serializers.IntegerField()
+    reference_local_income_tax = serializers.IntegerField()
+    reference_deduction_total = serializers.IntegerField()
+    reference_net_work_amount = serializers.IntegerField()
+    reference_transfer_amount = serializers.IntegerField()
 
 
 class StaffPayrollOverviewQuerySerializer(serializers.Serializer):
