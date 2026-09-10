@@ -3,7 +3,7 @@
 # AI/ML packages (torch, transformers, etc.) are NOT constrained here.
 
 # Django ecosystem
-Django==5.2.16
+Django==6.1
 djangorestframework==3.16.1
 drf-spectacular==0.30.0
 django-filter==25.2
