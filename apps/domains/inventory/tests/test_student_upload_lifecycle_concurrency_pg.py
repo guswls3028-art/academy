@@ -8,13 +8,14 @@ from unittest.mock import patch
 from django.apps import apps as django_apps
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import close_old_connections, connection
+from django.db import close_old_connections, connection, transaction
 from django.test import TransactionTestCase
 from rest_framework.test import APIRequestFactory
 
 from academy.adapters.db.django import repositories_inventory as inv_repo
 from apps.core.models import Tenant, TenantMembership
-from apps.domains.inventory.models import InventoryFile
+from apps.domains.inventory.models import InventoryFile, InventoryFolder
+from apps.domains.inventory.services import move_file, move_folder
 from apps.domains.inventory.views import FileDeleteView, FileUploadView
 from apps.support.students.lifecycle import (
     permanently_delete_students,
@@ -28,6 +29,7 @@ SubmissionStorageCleanupIntent = django_apps.get_model(
     "submissions",
     "SubmissionStorageCleanupIntent",
 )
+StudentReportedScore = django_apps.get_model("results", "StudentReportedScore")
 
 
 class TestStudentUploadLifecycleConcurrencyPostgres(TransactionTestCase):
@@ -85,6 +87,24 @@ class TestStudentUploadLifecycleConcurrencyPostgres(TransactionTestCase):
             data={
                 "scope": "student",
                 "student_ps": self.student.ps_number,
+                "file": upload,
+            },
+            format="multipart",
+        )
+        request.tenant = self.tenant
+        return request
+
+    def _admin_upload_request(self, *, folder_id: int):
+        upload = SimpleUploadedFile(
+            "admin-race.pdf",
+            b"%PDF-1.4\n% admin upload race\n%%EOF",
+            content_type="application/pdf",
+        )
+        request = self.factory.post(
+            "/storage/inventory/upload/",
+            data={
+                "scope": "admin",
+                "folder_id": str(folder_id),
                 "file": upload,
             },
             format="multipart",
@@ -349,3 +369,288 @@ class TestStudentUploadLifecycleConcurrencyPostgres(TransactionTestCase):
         self.assertTrue(self.student.ps_number.startswith(f"_del_{self.student.id}_"))
         self.assertEqual(inv_file.student_ps, self.student.ps_number)
         storage_delete.assert_not_called()
+
+    def test_admin_upload_waits_for_overwrite_move_then_fails_before_attach(self):
+        source_folder = InventoryFolder.objects.create(
+            tenant=self.tenant,
+            scope="admin",
+            name="shared",
+        )
+        target_folder = InventoryFolder.objects.create(
+            tenant=self.tenant,
+            scope="admin",
+            name="target",
+        )
+        overwrite_folder = InventoryFolder.objects.create(
+            tenant=self.tenant,
+            scope="admin",
+            parent=target_folder,
+            name="shared",
+        )
+        source_file = InventoryFile.objects.create(
+            tenant=self.tenant,
+            scope="admin",
+            folder=source_folder,
+            display_name="source.pdf",
+            original_name="source.pdf",
+            r2_key=(
+                f"tenants/{self.tenant.id}/admin/inventory/"
+                "shared/source-token.pdf"
+            ),
+            content_type="application/pdf",
+        )
+        move_locked = threading.Event()
+        release_move = threading.Event()
+        put_finished = threading.Event()
+        upload_finished = threading.Event()
+        move_errors: list[BaseException] = []
+        upload_errors: list[BaseException] = []
+        move_results: list[dict] = []
+        upload_responses = []
+        storage_objects = {source_file.r2_key}
+        from apps.domains.inventory.services import (
+            lock_student_ps_namespaces as real_lock_student_ps_namespaces,
+        )
+
+        def blocking_move_lock(*args, **kwargs):
+            result = real_lock_student_ps_namespaces(*args, **kwargs)
+            if threading.current_thread().name == "admin-overwrite-move":
+                move_locked.set()
+                if not release_move.wait(timeout=10):
+                    raise TimeoutError("test did not release admin overwrite move")
+            return result
+
+        def fake_copy(*, source_key, dest_key):
+            if source_key not in storage_objects:
+                raise FileNotFoundError(source_key)
+            storage_objects.add(dest_key)
+
+        def fake_put(*, key, **kwargs):
+            storage_objects.add(key)
+            put_finished.set()
+
+        def fake_delete(*, key):
+            storage_objects.discard(key)
+
+        def move_worker():
+            close_old_connections()
+            try:
+                move_results.append(
+                    move_folder(
+                        tenant=self.tenant,
+                        scope="admin",
+                        student_ps="",
+                        source_folder_id=source_folder.id,
+                        target_folder_id=target_folder.id,
+                        on_duplicate="overwrite",
+                    )
+                )
+            except BaseException as exc:  # pragma: no cover - asserted below
+                move_errors.append(exc)
+            finally:
+                close_old_connections()
+
+        def upload_worker():
+            close_old_connections()
+            try:
+                upload_responses.append(
+                    FileUploadView.as_view()(
+                        self._admin_upload_request(folder_id=overwrite_folder.id)
+                    )
+                )
+            except BaseException as exc:  # pragma: no cover - asserted below
+                upload_errors.append(exc)
+            finally:
+                upload_finished.set()
+                close_old_connections()
+
+        with patch(
+            "apps.domains.inventory.services.lock_student_ps_namespaces",
+            side_effect=blocking_move_lock,
+        ), patch(
+            "apps.domains.inventory.services.copy_object_r2_storage",
+            side_effect=fake_copy,
+        ), patch(
+            "apps.domains.inventory.views.JWTAuthentication.authenticate",
+            return_value=(self.staff, None),
+        ), patch(
+            "apps.domains.inventory.views.upload_fileobj_to_r2_storage",
+            side_effect=fake_put,
+        ), patch(
+            "apps.infrastructure.storage.r2.delete_object_r2_storage",
+            side_effect=fake_delete,
+        ):
+            move_thread = threading.Thread(
+                target=move_worker,
+                name="admin-overwrite-move",
+            )
+            move_thread.start()
+            self.assertTrue(move_locked.wait(timeout=5))
+            upload_thread = threading.Thread(target=upload_worker)
+            upload_thread.start()
+            self.assertTrue(put_finished.wait(timeout=5))
+            self.assertFalse(
+                upload_finished.wait(timeout=1),
+                "Admin upload crossed the in-flight overwrite move lock.",
+            )
+            release_move.set()
+            move_thread.join(timeout=15)
+            upload_thread.join(timeout=15)
+
+        self.assertFalse(move_thread.is_alive())
+        self.assertFalse(upload_thread.is_alive())
+        self.assertEqual(move_errors, [])
+        self.assertEqual(upload_errors, [])
+        self.assertEqual(move_results, [{"ok": True}])
+        self.assertEqual(len(upload_responses), 1)
+        self.assertEqual(upload_responses[0].status_code, 409)
+        self.assertEqual(
+            json.loads(upload_responses[0].content)["code"],
+            "inventory_storage_folder_changed",
+        )
+        source_file.refresh_from_db()
+        source_folder.refresh_from_db()
+        self.assertEqual(source_file.folder_id, source_folder.id)
+        self.assertEqual(source_folder.parent_id, target_folder.id)
+        self.assertFalse(InventoryFolder.objects.filter(pk=overwrite_folder.pk).exists())
+        self.assertEqual(
+            set(InventoryFile.objects.filter(tenant=self.tenant).values_list("id", flat=True)),
+            {source_file.id},
+        )
+        self.assertEqual(storage_objects, {source_file.r2_key})
+
+    def test_overwrite_move_waits_for_new_reported_score_and_preserves_evidence(self):
+        source_folder = InventoryFolder.objects.create(
+            tenant=self.tenant,
+            scope="admin",
+            name="source-evidence",
+        )
+        target_folder = InventoryFolder.objects.create(
+            tenant=self.tenant,
+            scope="admin",
+            name="target-evidence",
+        )
+        source_file = InventoryFile.objects.create(
+            tenant=self.tenant,
+            scope="admin",
+            folder=source_folder,
+            display_name="evidence.pdf",
+            original_name="evidence.pdf",
+            r2_key=(
+                f"tenants/{self.tenant.id}/admin/inventory/"
+                "source-evidence/source.pdf"
+            ),
+            content_type="application/pdf",
+        )
+        existing_file = InventoryFile.objects.create(
+            tenant=self.tenant,
+            scope="admin",
+            folder=target_folder,
+            display_name="evidence.pdf",
+            original_name="evidence.pdf",
+            r2_key=(
+                f"tenants/{self.tenant.id}/admin/inventory/"
+                "target-evidence/existing.pdf"
+            ),
+            content_type="application/pdf",
+        )
+        score_inserted = threading.Event()
+        release_score = threading.Event()
+        move_finished = threading.Event()
+        errors: list[BaseException] = []
+        move_results: list[dict] = []
+        score_ids: list[int] = []
+        storage_objects = {source_file.r2_key, existing_file.r2_key}
+
+        def fake_copy(*, source_key, dest_key):
+            if source_key not in storage_objects:
+                raise FileNotFoundError(source_key)
+            storage_objects.add(dest_key)
+
+        def fake_delete(*, key):
+            storage_objects.discard(key)
+
+        def score_worker():
+            close_old_connections()
+            try:
+                with transaction.atomic():
+                    score = StudentReportedScore.objects.create(
+                        tenant=self.tenant,
+                        student_id=self.student.id,
+                        evidence_file_id=existing_file.id,
+                        source="school_exam",
+                        academic_year=2026,
+                        semester=1,
+                        exam_round="first",
+                        subject="수학",
+                        score="95.00",
+                        max_score="100.00",
+                    )
+                    score_ids.append(score.id)
+                    score_inserted.set()
+                    if not release_score.wait(timeout=10):
+                        raise TimeoutError("reported score release timed out")
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        def move_worker():
+            close_old_connections()
+            try:
+                move_results.append(
+                    move_file(
+                        tenant=self.tenant,
+                        scope="admin",
+                        student_ps="",
+                        source_file_id=source_file.id,
+                        target_folder_id=target_folder.id,
+                        on_duplicate="overwrite",
+                    )
+                )
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                move_finished.set()
+                close_old_connections()
+
+        with patch(
+            "apps.domains.inventory.services.copy_object_r2_storage",
+            side_effect=fake_copy,
+        ), patch(
+            "apps.infrastructure.storage.r2.delete_object_r2_storage",
+            side_effect=fake_delete,
+        ):
+            score_thread = threading.Thread(target=score_worker)
+            score_thread.start()
+            self.assertTrue(score_inserted.wait(timeout=5))
+            move_thread = threading.Thread(target=move_worker)
+            move_thread.start()
+            self.assertFalse(
+                move_finished.wait(timeout=1),
+                "Overwrite crossed the uncommitted evidence FK insertion.",
+            )
+            release_score.set()
+            score_thread.join(timeout=15)
+            move_thread.join(timeout=15)
+
+        self.assertFalse(score_thread.is_alive())
+        self.assertFalse(move_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(move_results), 1)
+        self.assertEqual(
+            move_results[0]["code"],
+            "reported_score_evidence_protected",
+        )
+        self.assertTrue(InventoryFile.objects.filter(pk=source_file.pk).exists())
+        self.assertTrue(InventoryFile.objects.filter(pk=existing_file.pk).exists())
+        self.assertTrue(
+            StudentReportedScore.objects.filter(
+                pk__in=score_ids,
+                evidence_file_id=existing_file.id,
+            ).exists()
+        )
+        self.assertEqual(
+            storage_objects,
+            {source_file.r2_key, existing_file.r2_key},
+        )

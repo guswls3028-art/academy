@@ -63,6 +63,8 @@ STUCK_RECOVERABLE_STATUSES: tuple[str, ...] = (
 )
 
 SUBMISSION_MEDIA_UPLOAD_LEASE = timedelta(hours=1)
+UNCERTAIN_STORAGE_WRITE_SETTLE_DELAY = timedelta(minutes=5)
+UNCERTAIN_STORAGE_WRITE_ERROR_PREFIX = "uncertain_storage_write"
 
 
 @dataclass(frozen=True)
@@ -264,7 +266,7 @@ def compensate_unattached_storage_object(
             intent.status = SubmissionStorageCleanupIntent.Status.PENDING
             intent.claim_token = None
             intent.cleaned_at = None
-            intent.last_error = "uncertain_upload_write"
+            intent.last_error = UNCERTAIN_STORAGE_WRITE_ERROR_PREFIX
             intent.save(
                 update_fields=[
                     "status",
@@ -288,7 +290,11 @@ def compensate_unattached_storage_object(
             intent.status = SubmissionStorageCleanupIntent.Status.PENDING
             intent.claim_token = None
             intent.cleaned_at = None
-            intent.last_error = "storage_delete_failed"
+            intent.last_error = (
+                f"{UNCERTAIN_STORAGE_WRITE_ERROR_PREFIX}_delete_failed"
+                if uncertain_write
+                else "storage_delete_failed"
+            )
             intent.save(
                 update_fields=[
                     "status",
@@ -378,6 +384,7 @@ def process_submission_storage_cleanup_intents(
     limit: int = 100,
 ) -> SubmissionStorageCleanupResult:
     """Retry pending/failed committed cleanup intents one key at a time."""
+    attempted_before = timezone.now()
     queryset = SubmissionStorageCleanupIntent.objects.filter(
         Q(
             status__in=[
@@ -393,6 +400,10 @@ def process_submission_storage_cleanup_intents(
             status=SubmissionStorageCleanupIntent.Status.PROCESSING,
             last_attempt_at__isnull=True,
         )
+    ).exclude(
+        status=SubmissionStorageCleanupIntent.Status.PENDING,
+        last_error__startswith=UNCERTAIN_STORAGE_WRITE_ERROR_PREFIX,
+        updated_at__gt=attempted_before - UNCERTAIN_STORAGE_WRITE_SETTLE_DELAY,
     ).order_by("id")
     if intent_ids is not None:
         ids = tuple(dict.fromkeys(int(value) for value in intent_ids))

@@ -26,6 +26,7 @@ from apps.support.students.namespace_lock import lock_student_ps_namespaces
 from .r2_path import build_r2_key, safe_filename, folder_path_string
 from academy.adapters.db.django import repositories_inventory as inv_repo
 from .services import (
+    inventory_move_lock_token,
     move_file as do_move_file,
     move_folder as do_move_folder,
     delete_folder_recursive as do_delete_folder_recursive,
@@ -100,8 +101,8 @@ def _jwt_required(view_func):
     return wrapped
 
 
-def _student_namespace_mutation(view_func):
-    """Serialize student metadata mutations with identity ownership changes."""
+def _inventory_namespace_mutation(view_func):
+    """Serialize every scoped metadata mutation with moves and ownership changes."""
     @wraps(view_func)
     def wrapped(request, *args, **kwargs):
         scope = (
@@ -109,17 +110,20 @@ def _student_namespace_mutation(view_func):
             or request.POST.get("scope")
             or "admin"
         ).lower()
-        if scope != "student":
-            return view_func(request, *args, **kwargs)
         student_ps = _requested_student_ps(request)
-        if not student_ps:
+        if scope == "student" and not student_ps:
             return view_func(request, *args, **kwargs)
         with transaction.atomic():
             lock_student_ps_namespaces(
                 tenant_id=request.tenant.id,
-                ps_numbers=(student_ps,),
+                ps_numbers=(
+                    inventory_move_lock_token(
+                        scope=scope,
+                        student_ps=student_ps,
+                    ),
+                ),
             )
-            if active_student_id_for_storage(
+            if scope == "student" and active_student_id_for_storage(
                 tenant_id=request.tenant.id,
                 ps_number=student_ps,
             ) is None:
@@ -311,11 +315,16 @@ def _attach_inventory_upload(
     validated_scores,
 ):
     with transaction.atomic():
+        lock_student_ps_namespaces(
+            tenant_id=tenant.id,
+            ps_numbers=(
+                inventory_move_lock_token(
+                    scope=scope,
+                    student_ps=student_ps,
+                ),
+            ),
+        )
         if scope == "student":
-            lock_student_ps_namespaces(
-                tenant_id=tenant.id,
-                ps_numbers=(student_ps,),
-            )
             owner_id = active_student_id_for_storage(
                 tenant_id=tenant.id,
                 ps_number=student_ps,
@@ -665,11 +674,16 @@ class FolderCreateView(View):
 
         try:
             with transaction.atomic():
+                lock_student_ps_namespaces(
+                    tenant_id=tenant.id,
+                    ps_numbers=(
+                        inventory_move_lock_token(
+                            scope=scope,
+                            student_ps=student_ps,
+                        ),
+                    ),
+                )
                 if scope == "student":
-                    lock_student_ps_namespaces(
-                        tenant_id=tenant.id,
-                        ps_numbers=(student_ps,),
-                    )
                     if active_student_id_for_storage(
                         tenant_id=tenant.id,
                         ps_number=student_ps,
@@ -944,7 +958,7 @@ class FolderDeleteView(View):
 
     @method_decorator(_tenant_required)
     @method_decorator(_jwt_required)
-    @method_decorator(_student_namespace_mutation)
+    @method_decorator(_inventory_namespace_mutation)
     def delete(self, request, folder_id):
         tenant = request.tenant
         scope = (request.GET.get("scope") or "admin").lower()
@@ -982,7 +996,7 @@ class FolderDeleteView(View):
 
     @method_decorator(_tenant_required)
     @method_decorator(_jwt_required)
-    @method_decorator(_student_namespace_mutation)
+    @method_decorator(_inventory_namespace_mutation)
     def patch(self, request, folder_id):
         import json
         tenant = request.tenant
@@ -1023,7 +1037,7 @@ class FileDeleteView(View):
 
     @method_decorator(_tenant_required)
     @method_decorator(_jwt_required)
-    @method_decorator(_student_namespace_mutation)
+    @method_decorator(_inventory_namespace_mutation)
     def delete(self, request, file_id):
         tenant = request.tenant
         scope = (request.GET.get("scope") or "admin").lower()
@@ -1115,7 +1129,7 @@ class FileDeleteView(View):
 
     @method_decorator(_tenant_required)
     @method_decorator(_jwt_required)
-    @method_decorator(_student_namespace_mutation)
+    @method_decorator(_inventory_namespace_mutation)
     def patch(self, request, file_id):
         import json
         tenant = request.tenant

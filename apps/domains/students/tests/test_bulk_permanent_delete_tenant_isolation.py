@@ -279,6 +279,111 @@ class TestPermanentDeleteInventoryNamespaceConcurrencyPostgres(TransactionTestCa
             ).exists()
         )
 
+    def test_existing_parent_user_create_finishes_before_permanent_delete(self):
+        tenant = Tenant.objects.create(
+            name="Parent User Delete Race",
+            code="parent-user-delete-race",
+            is_active=True,
+        )
+        parent_phone = "01095000001"
+        shared_user = User.objects.create_user(
+            username=f"p_{tenant.id}_{parent_phone}",
+            password="test1234",
+            tenant=tenant,
+        )
+        parent = Parent.objects.create(
+            tenant=tenant,
+            user=shared_user,
+            name="공유 학부모",
+            phone=parent_phone,
+        )
+        TenantMembership.ensure_active(
+            tenant=tenant,
+            user=shared_user,
+            role="parent",
+        )
+        target = Student.objects.create(
+            tenant=tenant,
+            user=shared_user,
+            parent=parent,
+            ps_number="PARENT-DELETE",
+            name="삭제 대상",
+            omr_code="95000001",
+        )
+        Student.objects.filter(pk=target.pk).update(
+            deleted_at=timezone.now(),
+            ps_number=f"_del_{target.id}_PARENT-DELETE",
+        )
+        create_reserved = threading.Event()
+        release_create = threading.Event()
+        delete_started = threading.Event()
+        delete_finished = threading.Event()
+        errors: list[BaseException] = []
+        created_ids: list[int] = []
+        from academy.adapters.db.django import repositories_students
+
+        real_user_create = repositories_students.user_create_user
+
+        def blocking_user_create(*args, **kwargs):
+            create_reserved.set()
+            if not release_create.wait(timeout=10):
+                raise TimeoutError("parent-backed create release timed out")
+            return real_user_create(*args, **kwargs)
+
+        def create_worker():
+            close_old_connections()
+            try:
+                created = create_student_account(
+                    tenant=tenant,
+                    student_data={
+                        "ps_number": "PARENT-CREATE",
+                        "name": "신규 학생",
+                        "phone": "01095000002",
+                        "parent_phone": parent_phone,
+                        "omr_code": "95000002",
+                    },
+                    password="test1234",
+                ).student
+                created_ids.append(created.id)
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        def delete_worker():
+            close_old_connections()
+            try:
+                delete_started.set()
+                permanently_delete_students(tenant=tenant, student_ids=[target.id])
+                delete_finished.set()
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        with patch(
+            "apps.domains.students.services.creation.student_repo.user_create_user",
+            side_effect=blocking_user_create,
+        ):
+            create_thread = threading.Thread(target=create_worker)
+            create_thread.start()
+            self.assertTrue(create_reserved.wait(timeout=5))
+            delete_thread = threading.Thread(target=delete_worker)
+            delete_thread.start()
+            self.assertTrue(delete_started.wait(timeout=5))
+            self.assertFalse(delete_finished.wait(timeout=1))
+            release_create.set()
+            create_thread.join(timeout=15)
+            delete_thread.join(timeout=15)
+
+        self.assertFalse(create_thread.is_alive())
+        self.assertFalse(delete_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(created_ids), 1)
+        self.assertFalse(Student.objects.filter(pk=target.pk).exists())
+        self.assertTrue(Student.objects.filter(pk=created_ids[0]).exists())
+        self.assertTrue(Parent.objects.filter(pk=parent.pk, user=shared_user).exists())
+
     @patch("apps.infrastructure.storage.r2.delete_object_r2_storage")
     def test_delete_waits_for_inflight_rename_claim_and_preserves_new_owner_storage(
         self,

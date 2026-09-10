@@ -28,6 +28,8 @@ from apps.domains.inventory.views import (
 from apps.domains.students.models import Student
 from apps.support.inventory.storage_cleanup_dependencies import (
     compensate_unattached_storage_object,
+    process_pending_storage_cleanup_intents,
+    uncertain_storage_write_settle_delay,
 )
 from apps.support.inventory.student_dependencies import (
     student_storage_namespace_has_legacy_conflict,
@@ -39,6 +41,7 @@ SubmissionStorageCleanupIntent = django_apps.get_model(
     "submissions",
     "SubmissionStorageCleanupIntent",
 )
+StudentReportedScore = django_apps.get_model("results", "StudentReportedScore")
 Parent = apps.get_model("parents", "Parent")
 
 
@@ -225,6 +228,34 @@ class InventoryHardeningViewTests(TestCase):
         self.assertEqual(response.status_code, 403, response.content)
         upload_r2.assert_not_called()
         self.assertFalse(InventoryFile.objects.filter(original_name="wrong-child.pdf").exists())
+
+    def test_admin_upload_attach_uses_shared_admin_mutation_lock(self):
+        request = self.factory.post(
+            "/storage/inventory/upload/",
+            data={
+                "scope": "admin",
+                "file": SimpleUploadedFile(
+                    "admin-lock.pdf",
+                    b"%PDF-admin-lock",
+                    content_type="application/pdf",
+                ),
+            },
+            format="multipart",
+        )
+        request.tenant = self.tenant
+
+        with self._auth(self.staff), patch(
+            "apps.domains.inventory.views.upload_fileobj_to_r2_storage"
+        ), patch(
+            "apps.domains.inventory.views.lock_student_ps_namespaces"
+        ) as lock_namespace:
+            response = FileUploadView.as_view()(request)
+
+        self.assertEqual(response.status_code, 200, response.content)
+        lock_namespace.assert_called_once_with(
+            tenant_id=self.tenant.id,
+            ps_numbers=("__admin_inventory_move__",),
+        )
 
     def test_parent_inventory_rejects_unowned_and_cross_tenant_selected_children(self):
         foreign_tenant = Tenant.objects.create(
@@ -560,6 +591,54 @@ class InventoryHardeningViewTests(TestCase):
         intent = SubmissionStorageCleanupIntent.objects.get(tenant=self.tenant)
         self.assertEqual(intent.status, SubmissionStorageCleanupIntent.Status.PENDING)
         self.assertFalse(InventoryFile.objects.filter(tenant=self.tenant).exists())
+
+    def test_uncertain_write_cleanup_waits_for_late_provider_completion(self):
+        key = f"tenants/{self.tenant.id}/admin/inventory/late-write.pdf"
+        stored_keys: set[str] = set()
+
+        def exact_delete(*, key):
+            stored_keys.discard(key)
+
+        with patch(
+            "apps.infrastructure.storage.r2.delete_object_r2_storage",
+            side_effect=exact_delete,
+        ) as delete_r2:
+            outcome = compensate_unattached_storage_object(
+                tenant_id=self.tenant.id,
+                key=key,
+                uncertain_write=True,
+            )
+            self.assertEqual(outcome, "pending")
+            self.assertEqual(delete_r2.call_count, 1)
+
+            early = process_pending_storage_cleanup_intents()
+            self.assertEqual(early.cleaned, 0)
+            self.assertEqual(early.failed, 0)
+            self.assertEqual(delete_r2.call_count, 1)
+
+            # The provider finishes after the caller timed out and after the
+            # first exact delete saw no object.
+            stored_keys.add(key)
+            intent = SubmissionStorageCleanupIntent.objects.get(
+                tenant=self.tenant,
+                object_key=key,
+            )
+            self.assertEqual(intent.status, SubmissionStorageCleanupIntent.Status.PENDING)
+            SubmissionStorageCleanupIntent.objects.filter(pk=intent.pk).update(
+                updated_at=(
+                    timezone.now()
+                    - uncertain_storage_write_settle_delay()
+                    - timedelta(seconds=1)
+                )
+            )
+
+            settled = process_pending_storage_cleanup_intents()
+
+        self.assertEqual(settled.cleaned, 1)
+        self.assertEqual(settled.failed, 0)
+        self.assertEqual(stored_keys, set())
+        intent.refresh_from_db()
+        self.assertEqual(intent.status, SubmissionStorageCleanupIntent.Status.CLEANED)
 
     def test_unexpected_attach_failure_still_compensates_uploaded_object(self):
         upload = SimpleUploadedFile("attach-failure.pdf", b"%PDF-1.4", content_type="application/pdf")
@@ -1273,6 +1352,99 @@ class InventoryHardeningMoveTests(TestCase):
         self.assertTrue(InventoryFile.objects.filter(id=source.id).exists())
         self.assertTrue(InventoryFile.objects.filter(id=existing.id).exists())
 
+    def test_file_overwrite_rechecks_matchup_protection_after_copy(self):
+        source = InventoryFile.objects.create(
+            tenant=self.tenant,
+            scope="admin",
+            folder=self.source_folder,
+            display_name="late-protected.pdf",
+            original_name="late-protected.pdf",
+            r2_key=f"tenants/{self.tenant.id}/admin/inventory/source/late-protected.pdf",
+            content_type="application/pdf",
+        )
+        existing = InventoryFile.objects.create(
+            tenant=self.tenant,
+            scope="admin",
+            folder=self.target_folder,
+            display_name="late-protected.pdf",
+            original_name="late-protected.pdf",
+            r2_key=f"tenants/{self.tenant.id}/admin/inventory/target/late-protected.pdf",
+            content_type="application/pdf",
+        )
+
+        def copy_then_protect(*, source_key, dest_key):
+            del source_key, dest_key
+            self._attach_owner_pinned_matchup_document(existing)
+
+        with patch(
+            "apps.domains.inventory.services.copy_object_r2_storage",
+            side_effect=copy_then_protect,
+        ) as copy_r2, patch(
+            "apps.infrastructure.storage.r2.delete_object_r2_storage"
+        ) as delete_r2:
+            result = move_file(
+                tenant=self.tenant,
+                scope="admin",
+                student_ps="",
+                source_file_id=source.id,
+                target_folder_id=self.target_folder.id,
+                on_duplicate="overwrite",
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "protected_matchup_document")
+        source.refresh_from_db()
+        existing.refresh_from_db()
+        self.assertEqual(source.folder_id, self.source_folder.id)
+        self.assertEqual(existing.folder_id, self.target_folder.id)
+        copied_key = copy_r2.call_args.kwargs["dest_key"]
+        delete_r2.assert_called_once_with(key=copied_key)
+
+    def test_file_move_rechecks_source_reported_score_after_copy(self):
+        source_folder, target_folder, source_file = self._student_move_fixture(
+            ps_number="LATE-SOURCE"
+        )
+        student = Student.objects.get(
+            tenant=self.tenant,
+            ps_number="LATE-SOURCE",
+        )
+
+        def copy_then_protect(*, source_key, dest_key):
+            del source_key, dest_key
+            StudentReportedScore.objects.create(
+                tenant=self.tenant,
+                student=student,
+                evidence_file=source_file,
+                source="school_exam",
+                academic_year=2026,
+                semester=1,
+                exam_round="first",
+                subject="수학",
+                score="92.00",
+                max_score="100.00",
+            )
+
+        with patch(
+            "apps.domains.inventory.services.copy_object_r2_storage",
+            side_effect=copy_then_protect,
+        ) as copy_r2, patch(
+            "apps.infrastructure.storage.r2.delete_object_r2_storage"
+        ) as delete_r2:
+            result = move_file(
+                tenant=self.tenant,
+                scope="student",
+                student_ps="LATE-SOURCE",
+                source_file_id=source_file.id,
+                target_folder_id=target_folder.id,
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "reported_score_evidence_protected")
+        source_file.refresh_from_db()
+        self.assertEqual(source_file.folder_id, source_folder.id)
+        copied_key = copy_r2.call_args.kwargs["dest_key"]
+        delete_r2.assert_called_once_with(key=copied_key)
+
     def test_file_overwrite_uses_fresh_key_then_cleans_replaced_objects(self):
         source = InventoryFile.objects.create(
             tenant=self.tenant,
@@ -1423,6 +1595,76 @@ class InventoryHardeningMoveTests(TestCase):
         self.assertTrue(InventoryFolder.objects.filter(id=self.source_folder.id).exists())
         self.assertTrue(InventoryFolder.objects.filter(id=overwrite_folder.id).exists())
         self.assertTrue(InventoryFile.objects.filter(id=existing_child.id).exists())
+
+    def test_folder_overwrite_rechecks_reported_score_after_copy(self):
+        source_folder, target_folder, source_file = self._student_move_fixture(
+            ps_number="LATE-SCORE"
+        )
+        overwrite_folder = InventoryFolder.objects.create(
+            tenant=self.tenant,
+            scope="student",
+            student_ps="LATE-SCORE",
+            parent=target_folder,
+            name=source_folder.name,
+        )
+        existing_child = InventoryFile.objects.create(
+            tenant=self.tenant,
+            scope="student",
+            student_ps="LATE-SCORE",
+            folder=overwrite_folder,
+            display_name="existing.pdf",
+            original_name="existing.pdf",
+            r2_key=(
+                f"tenants/{self.tenant.id}/students/LATE-SCORE/"
+                "inventory/target/source/existing.pdf"
+            ),
+            content_type="application/pdf",
+        )
+        student = Student.objects.get(
+            tenant=self.tenant,
+            ps_number="LATE-SCORE",
+        )
+
+        def copy_then_protect(*, source_key, dest_key):
+            del source_key, dest_key
+            StudentReportedScore.objects.create(
+                tenant=self.tenant,
+                student=student,
+                evidence_file=existing_child,
+                source="school_exam",
+                academic_year=2026,
+                semester=1,
+                exam_round="first",
+                subject="수학",
+                score="90.00",
+                max_score="100.00",
+            )
+
+        with patch(
+            "apps.domains.inventory.services.copy_object_r2_storage",
+            side_effect=copy_then_protect,
+        ) as copy_r2, patch(
+            "apps.infrastructure.storage.r2.delete_object_r2_storage"
+        ) as delete_r2:
+            result = move_folder(
+                tenant=self.tenant,
+                scope="student",
+                student_ps="LATE-SCORE",
+                source_folder_id=source_folder.id,
+                target_folder_id=target_folder.id,
+                on_duplicate="overwrite",
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "reported_score_evidence_protected")
+        source_folder.refresh_from_db()
+        source_file.refresh_from_db()
+        self.assertIsNone(source_folder.parent_id)
+        self.assertEqual(source_file.folder_id, source_folder.id)
+        self.assertTrue(InventoryFolder.objects.filter(pk=overwrite_folder.pk).exists())
+        self.assertTrue(InventoryFile.objects.filter(pk=existing_child.pk).exists())
+        copied_key = copy_r2.call_args.kwargs["dest_key"]
+        delete_r2.assert_called_once_with(key=copied_key)
 
     def test_folder_overwrite_uncertain_copy_preserves_canonical_destination(self):
         source_child = InventoryFile.objects.create(

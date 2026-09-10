@@ -63,12 +63,19 @@ soft delete나 일반 학생번호 변경도 그 metadata를 자기 tombstone/�
 
 student scope의 folder create/rename/delete, file rename/delete, upload attach와 file/folder
 move 최종 metadata write는 같은 student-PS namespace lock 아래에서 활성 owner와 최신
-row scope를 다시 읽는다. file/folder move는 student/admin scope 모두 동일 scope의 move를
-직렬화하고 전체 folder parent·file folder/key snapshot 및 현재 target ancestry를 다시
-검사해 stale copy commit과 parent cycle을 거부한다. 모든 이동은 논리 경로가 같아도
+row scope를 다시 읽는다. admin scope도 folder/file create·upload·rename·delete·move가
+같은 tenant admin-inventory mutation lock을 사용한다. file/folder move는 student/admin
+scope 모두 동일 scope의 mutation을 직렬화하고 전체 folder parent·file folder/key snapshot 및 현재 target ancestry를 다시
+검사해 stale copy commit과 parent cycle을 거부한다. overwrite 직전에는 locked current
+file set의 성적표 evidence와 owner-pinned Matchup graph도 다시 잠그고 조회하므로 preflight
+후 새 보호 연결이 생기면 이동 전체를 `409`로 되돌린다. 모든 이동은 논리 경로가 같아도
 128-bit fresh destination key에 복사하므로 기존 canonical destination이나 source key를
 pre-commit에 덮어쓰지 않는다. 최종 transaction은 exact object-key attachability를 확인한
-뒤 DB ownership만 넘긴다. R2 copy/PUT 같은 긴 network 작업은 transaction 밖에서 실행하고,
+뒤 DB ownership만 넘긴다. PUT/Copy가 timeout 등으로 성공 여부가 불명확하면 exact key
+cleanup intent는 최소
+5분의 provider settle window 동안 `PENDING`을 유지한다. 이 기간의 이른 absent-delete가
+terminal `CLEANED`로 오판되는 것을 막고, 이후 재처리가 늦게 나타난 객체까지 삭제한다.
+R2 copy/PUT 같은 긴 network 작업은 transaction 밖에서 실행하고,
 최종 attach/move가 소유권 변경에 져서 실패하면 새 exact object만 owner scan 후 보상
 정리한다. 성공 commit 뒤 old/replaced key 삭제 실패는 이미 성공한 이동을 500으로 바꾸지
 않고 durable cleanup intent로 재시도한다. 따라서 soft delete/reuse와 겹친 오래된 삭제

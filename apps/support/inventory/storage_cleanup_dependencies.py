@@ -26,3 +26,19 @@ def compensate_unattached_storage_object(
         key=key,
         uncertain_write=uncertain_write,
     )
+
+
+def uncertain_storage_write_settle_delay():
+    from apps.domains.submissions.services.lifecycle import (
+        UNCERTAIN_STORAGE_WRITE_SETTLE_DELAY,
+    )
+
+    return UNCERTAIN_STORAGE_WRITE_SETTLE_DELAY
+
+
+def process_pending_storage_cleanup_intents():
+    from apps.domains.submissions.services.lifecycle import (
+        process_submission_storage_cleanup_intents,
+    )
+
+    return process_submission_storage_cleanup_intents()

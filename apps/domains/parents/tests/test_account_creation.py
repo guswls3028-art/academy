@@ -1,4 +1,5 @@
 from django.test import TestCase
+from unittest.mock import patch
 
 from apps.core.models import Tenant, TenantMembership
 from apps.domains.parents.models import Parent
@@ -75,3 +76,22 @@ class ParentAccountCreationTests(TestCase):
             ).count(),
             1,
         )
+
+    def test_parent_ensure_takes_tenant_gate_before_identity_rows(self):
+        lock_order: list[str] = []
+
+        with patch(
+            "apps.domains.parents.services.lock_student_creation_tenant_reference",
+            side_effect=lambda **kwargs: lock_order.append("tenant"),
+        ), patch(
+            "apps.domains.parents.services.Parent.objects.select_for_update",
+            side_effect=lambda *args, **kwargs: lock_order.append("parent")
+            or Parent.objects.all(),
+        ):
+            ensure_parent_account_for_student(
+                tenant=self.tenant,
+                parent_phone="01012345678",
+                student_name="학생",
+            )
+
+        self.assertEqual(lock_order[:2], ["tenant", "parent"])

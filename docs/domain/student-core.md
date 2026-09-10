@@ -100,6 +100,11 @@ Required invariants:
   identity mirror. The persisted `Student.user_id` selects the account lock
   before the student row lock; an in-memory attempt to relink the account or
   tenant fails closed. Username collisions roll back every identity copy.
+- A new canonical account takes the Tenant FK-compatible gate before reusing an
+  existing parent identity, then follows User -> Student namespace ordering.
+  This includes a parent User that is also attached to a student selected for
+  permanent deletion; create and delete serialize instead of holding Tenant and
+  User locks in opposite order.
 - student phone is optional; parent phone is required on creation/import/signup.
 - phone fields are normalized to numeric `010XXXXXXXX` 11-digit strings.
 - Public JWT login NFKC-normalizes and trims the submitted identifier. It removes

@@ -62,6 +62,10 @@
 같은 Parent/User/Membership을 반환하며 초기 비밀번호를 실제로 만든 요청만
 `user_created=True`와 안내용 초기 비밀번호를 갖는다. 기존 User/Parent의
 비밀번호는 idempotent ensure 중 다시 설정하지 않는다.
+`ensure_parent_account_for_student()`는 existing Parent/User row를 잠그기 전에 Tenant
+FK-compatible `KEY SHARE` gate를 잡는다. 한 User가 삭제 예정 학생과 학부모 profile을
+함께 가진 경우에도 permanent delete의 Tenant→User 순서와 역전되지 않으며, 학생 생성과
+영구 삭제가 경합해도 한쪽이 commit된 뒤 다른 쪽이 계속된다.
 
 학생 생성 경로의 Parent/User/Student/Membership 계정 그래프는
 [student-creation.md](student-creation.md)가 정본이다.

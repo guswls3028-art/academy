@@ -13,6 +13,7 @@ from academy.adapters.db.django import repositories_inventory as inv_repo
 from apps.support.inventory.matchup_dependencies import (
     cleanup_matchup_problem_images,
     get_matchup_document_for_inventory_file,
+    lock_matchup_delete_protection_result,
     matchup_delete_protection_result,
 )
 from apps.support.inventory.storage_cleanup_dependencies import (
@@ -72,7 +73,7 @@ def _cleanup_uncommitted_copies(
     return cleanup_safe
 
 
-def _inventory_move_lock_token(*, scope: str, student_ps: str) -> str:
+def inventory_move_lock_token(*, scope: str, student_ps: str) -> str:
     return student_ps if scope == "student" else "__admin_inventory_move__"
 
 
@@ -134,6 +135,51 @@ def _check_duplicate_file(target_folder_id: int | None, tenant: Tenant, scope: s
 
 def _matchup_delete_protection_result(files: list[InventoryFile]) -> dict | None:
     return matchup_delete_protection_result(files)
+
+
+class _InventoryMoveRejected(Exception):
+    def __init__(self, result: dict):
+        super().__init__(result.get("code") or result.get("detail") or "move rejected")
+        self.result = result
+
+
+def _reported_score_move_rejection(*, overwrite: bool, folder: bool) -> dict:
+    if folder:
+        action = "덮어쓸" if overwrite else "이동할"
+        detail = f"검수 기록과 연결된 성적표 원본이 포함되어 폴더를 {action} 수 없습니다."
+    else:
+        action = "덮어쓸" if overwrite else "이동할"
+        detail = f"검수 기록과 연결된 성적표 원본은 {action} 수 없습니다."
+    return {
+        "ok": False,
+        "detail": detail,
+        "code": "reported_score_evidence_protected",
+        "status": 409,
+    }
+
+
+def _raise_if_locked_files_are_protected(
+    *,
+    tenant: Tenant,
+    file_ids: list[int],
+    overwrite: bool,
+    folder: bool,
+    matchup: bool,
+) -> None:
+    if matchup:
+        protection_result = lock_matchup_delete_protection_result(
+            tenant=tenant,
+            inventory_file_ids=file_ids,
+        )
+        if protection_result:
+            raise _InventoryMoveRejected(protection_result)
+    if inventory_files_have_any_reported_score(
+        tenant=tenant,
+        file_ids=file_ids,
+    ):
+        raise _InventoryMoveRejected(
+            _reported_score_move_rejection(overwrite=overwrite, folder=folder)
+        )
 
 
 def move_file(
@@ -247,7 +293,7 @@ def move_file(
             lock_student_ps_namespaces(
                 tenant_id=tenant.id,
                 ps_numbers=(
-                    _inventory_move_lock_token(
+                    inventory_move_lock_token(
                         scope=scope,
                         student_ps=student_ps,
                     ),
@@ -285,6 +331,21 @@ def move_file(
                 r2_key=overwrite_existing.r2_key,
             ).exists():
                 raise ValueError("inventory overwrite target changed during move")
+            _raise_if_locked_files_are_protected(
+                tenant=tenant,
+                file_ids=[source.id],
+                overwrite=False,
+                folder=False,
+                matchup=False,
+            )
+            if overwrite_existing:
+                _raise_if_locked_files_are_protected(
+                    tenant=tenant,
+                    file_ids=[overwrite_existing.id],
+                    overwrite=True,
+                    folder=False,
+                    matchup=True,
+                )
             ensure_storage_inventory_key_attachable(
                 tenant_id=tenant.id,
                 key=new_key,
@@ -295,6 +356,12 @@ def move_file(
             source.r2_key = new_key
             source.display_name = display_name
             source.save(update_fields=["folder_id", "r2_key", "display_name", "updated_at"])
+    except _InventoryMoveRejected as exc:
+        _cleanup_uncommitted_copies(
+            tenant=tenant,
+            copied_keys=[new_key],
+        )
+        return exc.result
     except Exception as exc:
         cleanup_safe = _cleanup_uncommitted_copies(
             tenant=tenant,
@@ -596,7 +663,7 @@ def move_folder(
             lock_student_ps_namespaces(
                 tenant_id=tenant.id,
                 ps_numbers=(
-                    _inventory_move_lock_token(
+                    inventory_move_lock_token(
                         scope=scope,
                         student_ps=student_ps,
                     ),
@@ -686,6 +753,24 @@ def move_folder(
                 )
                 if locked_overwrite_file_rows != expected_overwrite_file_rows:
                     raise ValueError("inventory overwrite files changed during move")
+            _raise_if_locked_files_are_protected(
+                tenant=tenant,
+                file_ids=file_ids,
+                overwrite=False,
+                folder=True,
+                matchup=False,
+            )
+            if overwrite_folder:
+                overwrite_file_ids = [
+                    inventory_file.id for inventory_file in overwrite_files
+                ]
+                _raise_if_locked_files_are_protected(
+                    tenant=tenant,
+                    file_ids=overwrite_file_ids,
+                    overwrite=True,
+                    folder=True,
+                    matchup=True,
+                )
             for _, _, new_key in copy_plans:
                 ensure_storage_inventory_key_attachable(
                     tenant_id=tenant.id,
@@ -701,6 +786,12 @@ def move_folder(
             if source_folder_renamed:
                 source_folder_fields.append("name")
             source_folder.save(update_fields=source_folder_fields)
+    except _InventoryMoveRejected as exc:
+        _cleanup_uncommitted_copies(
+            tenant=tenant,
+            copied_keys=copied_keys,
+        )
+        return exc.result
     except Exception as exc:
         cleanup_safe = _cleanup_uncommitted_copies(
             tenant=tenant,
