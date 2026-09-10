@@ -39,6 +39,7 @@ CRON_AUDIT_ACTION = "cron.check_dev_alerts"
 INCIDENT_RETENTION_DAYS = 2
 WORK_RECORD_DATE_ALERT_WINDOW_DAYS = 35
 WORK_RECORD_DATE_SLACK_DELIVERY_ACTION = "alerts.work_record_date_slack"
+SLACK_RULE_ROW_LIMIT = 5
 
 
 class Rule:
@@ -593,10 +594,10 @@ def rule_messaging_delivery_health(window_minutes: int = 30):
     }
 
 
-def _delivered_work_record_date_fingerprints() -> set[str]:
+def _delivered_work_record_date_fingerprints(*, window_days: int) -> set[str]:
     from apps.core.models import OpsAuditLog
 
-    since = timezone.now() - timedelta(days=WORK_RECORD_DATE_ALERT_WINDOW_DAYS)
+    since = timezone.now() - timedelta(days=window_days)
     delivered: set[str] = set()
     payloads = OpsAuditLog.objects.filter(
         action=WORK_RECORD_DATE_SLACK_DELIVERY_ACTION,
@@ -649,7 +650,7 @@ def rule_work_record_date_anomalies(
             set(),
         ).add(record_id)
 
-    delivered = _delivered_work_record_date_fingerprints()
+    delivered = _delivered_work_record_date_fingerprints(window_days=window_days)
     rows: list[dict] = []
     fingerprints: list[str] = []
     for (tenant_id, selected_date), candidate_ids in sorted(groups.items()):
@@ -770,7 +771,7 @@ def _build_slack_blocks(triggered: list[tuple[Rule, dict]]) -> dict:
     for rule, data in triggered:
         title = data.get("title") or rule.label
         rows: list[dict] = data.get("rows") or []
-        sample = rows[:5]
+        sample = rows[:SLACK_RULE_ROW_LIMIT]
         body_lines = []
         for r in sample:
             body_lines.append("• " + " · ".join(f"{k}={v}" for k, v in r.items() if v is not None and v != ""))
@@ -802,12 +803,18 @@ def _record_work_record_date_slack_delivery(data: dict) -> None:
     """Persist accepted Slack fingerprints; dry-runs never consume them."""
     from apps.core.models import OpsAuditLog
 
+    displayed_fingerprints = list(data.get("fingerprints") or [])[
+        :SLACK_RULE_ROW_LIMIT
+    ]
     OpsAuditLog.objects.create(
         action=WORK_RECORD_DATE_SLACK_DELIVERY_ACTION,
-        summary=f"Work record date Slack delivery ({data.get('total', 0)} records)",
+        summary=(
+            "Work record date Slack delivery "
+            f"({len(displayed_fingerprints)} displayed groups)"
+        ),
         payload={
-            "fingerprints": list(data.get("fingerprints") or []),
-            "record_count": max(0, int(data.get("total") or 0)),
+            "fingerprints": displayed_fingerprints,
+            "displayed_group_count": len(displayed_fingerprints),
         },
         result="success",
     )
