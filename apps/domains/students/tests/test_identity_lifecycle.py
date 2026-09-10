@@ -741,19 +741,32 @@ class StudentIdentityConcurrencyPostgresTests(TransactionTestCase):
         soft_delete_student(deleted, tenant=tenant)
         create_reserved = threading.Event()
         release_create = threading.Event()
-        restore_started = threading.Event()
+        restore_ready_to_save = threading.Event()
+        release_restore_save = threading.Event()
         errors: list[BaseException] = []
         restore_codes: list[str] = []
         created_ids: list[int] = []
         from academy.adapters.db.django import repositories_students
 
         real_student_create = repositories_students.student_create
+        real_student_save = Student.save
 
         def blocking_student_create(*args, **kwargs):
             create_reserved.set()
             if not release_create.wait(timeout=10):
                 raise TimeoutError("canonical create release timed out")
             return real_student_create(*args, **kwargs)
+
+        def blocking_student_save(thread_student, *args, **kwargs):
+            if (
+                threading.current_thread().name == "restore-loser"
+                and thread_student.pk == deleted.pk
+                and thread_student.ps_number == "CANONICAL-RESTORE"
+            ):
+                restore_ready_to_save.set()
+                if not release_restore_save.wait(timeout=10):
+                    raise TimeoutError("restore save release timed out")
+            return real_student_save(thread_student, *args, **kwargs)
 
         def create_worker():
             close_old_connections()
@@ -772,7 +785,6 @@ class StudentIdentityConcurrencyPostgresTests(TransactionTestCase):
         def restore_worker():
             close_old_connections()
             try:
-                restore_started.set()
                 restore_student(Student.objects.get(pk=deleted.pk), tenant=tenant)
             except StudentLifecycleError as exc:
                 restore_codes.append(exc.code)
@@ -784,22 +796,29 @@ class StudentIdentityConcurrencyPostgresTests(TransactionTestCase):
         with patch(
             "apps.domains.students.services.creation.student_repo.student_create",
             side_effect=blocking_student_create,
+        ), patch(
+            "apps.domains.students.models.Student.save",
+            new=blocking_student_save,
         ):
             create_thread = threading.Thread(target=create_worker)
             create_thread.start()
             self.assertTrue(create_reserved.wait(timeout=5))
-            restore_thread = threading.Thread(target=restore_worker)
+            restore_thread = threading.Thread(
+                target=restore_worker,
+                name="restore-loser",
+            )
             restore_thread.start()
-            self.assertTrue(restore_started.wait(timeout=5))
+            self.assertTrue(restore_ready_to_save.wait(timeout=5))
             release_create.set()
             create_thread.join(timeout=15)
+            release_restore_save.set()
             restore_thread.join(timeout=15)
 
         self.assertFalse(create_thread.is_alive())
         self.assertFalse(restore_thread.is_alive())
         self.assertEqual(errors, [])
         self.assertEqual(len(created_ids), 1)
-        self.assertEqual(restore_codes, ["student_storage_namespace_conflict"])
+        self.assertEqual(restore_codes, ["ps_number_conflict"])
         deleted.refresh_from_db()
         self.assertIsNotNone(deleted.deleted_at)
 
