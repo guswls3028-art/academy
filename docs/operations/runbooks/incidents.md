@@ -23,8 +23,11 @@
 
 운영 알림 채널은 Slack webhook 하나다. 채널을 사용하지 않는 상태에서는
 `DEV_ALERTS_WEBHOOK_URL`과 `DEV_ALERTS_WEBHOOK_REQUIRED=false`를 함께 유지한다.
-이 경우 외부 발송 없이 룰을 평가하고, 감사 로그 payload에
-`delivery_status=not_configured`를 남긴다. 채널을 활성화할 때는
+무경고 실행과 일반 운영 룰만 발생한 실행은 외부 발송 없이 평가하고, 감사 로그
+payload에 `delivery_status=not_configured`를 남긴다. 그러나 `user_incidents`가
+한 건이라도 발생하면 `required` 값과 무관하게 종료 코드 1과
+`cron.check_dev_alerts.result=failed`를 남긴다. 수신처가 실제로 성공 응답하기 전에는
+사용자 민원을 성공 처리하지 않는다. 채널을 활성화할 때는
 `scripts/v1/set-dev-alerts-webhook.ps1`로 URL과 required 상태를 함께 바꾼다.
 `DEV_ALERTS_WEBHOOK_REQUIRED=true`인데 URL이 없으면 명령은 실패 종료한다.
 수신처 없이 평가만 하는 명시적 `--dry-run`은 허용하지만 외부 알림 정상 동작의

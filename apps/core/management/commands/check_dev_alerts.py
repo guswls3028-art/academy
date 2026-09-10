@@ -789,8 +789,18 @@ class Command(BaseCommand):
             )
             if not webhook_url:
                 delivery_status = "not_configured"
-                if webhook_required:
-                    failures.append("DEV_ALERTS_WEBHOOK_URL is not configured")
+                user_incidents_triggered = any(
+                    rule.key == "user_incidents" for rule, _data in triggered
+                )
+                if webhook_required or user_incidents_triggered:
+                    failures.append(
+                        "DEV_ALERTS_WEBHOOK_URL is not configured"
+                        + (
+                            " for actionable user incidents"
+                            if user_incidents_triggered
+                            else ""
+                        )
+                    )
                 else:
                     self.stdout.write(self.style.NOTICE(
                         "\nDEV_ALERTS_WEBHOOK_URL is not configured; "
