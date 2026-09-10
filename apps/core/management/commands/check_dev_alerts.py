@@ -18,7 +18,7 @@ import hashlib
 import logging
 import urllib.error
 import urllib.request
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
@@ -37,6 +37,8 @@ LEGACY_SMS_DELIVERY_ACTION = "alerts.user_incident_sms"
 SLACK_DELIVERY_ACTION = "alerts.user_incident_slack"
 CRON_AUDIT_ACTION = "cron.check_dev_alerts"
 INCIDENT_RETENTION_DAYS = 2
+WORK_RECORD_DATE_ALERT_WINDOW_DAYS = 35
+WORK_RECORD_DATE_SLACK_DELIVERY_ACTION = "alerts.work_record_date_slack"
 
 
 class Rule:
@@ -591,8 +593,116 @@ def rule_messaging_delivery_health(window_minutes: int = 30):
     }
 
 
+def _delivered_work_record_date_fingerprints() -> set[str]:
+    from apps.core.models import OpsAuditLog
+
+    since = timezone.now() - timedelta(days=WORK_RECORD_DATE_ALERT_WINDOW_DAYS)
+    delivered: set[str] = set()
+    payloads = OpsAuditLog.objects.filter(
+        action=WORK_RECORD_DATE_SLACK_DELIVERY_ACTION,
+        result="success",
+        created_at__gte=since,
+    ).values_list("payload", flat=True)
+    for payload in payloads:
+        for fingerprint in (payload or {}).get("fingerprints", []):
+            if isinstance(fingerprint, str):
+                delivered.add(fingerprint)
+    return delivered
+
+
+def rule_work_record_date_anomalies(
+    *,
+    window_days: int = WORK_RECORD_DATE_ALERT_WINDOW_DAYS,
+    distinct_staff_threshold: int = 2,
+):
+    """Flag reviewable date concentration without changing payroll facts."""
+    from apps.core.models import OpsAuditLog
+    from apps.domains.staffs.models import WorkRecord
+
+    since = timezone.now() - timedelta(days=window_days)
+    groups: dict[tuple[int, date], set[int]] = {}
+    audits = (
+        OpsAuditLog.objects.filter(
+            action="staff.work_record_created",
+            target_tenant_id__isnull=False,
+            created_at__gte=since,
+        )
+        .order_by("created_at", "id")
+        .values("target_tenant_id", "payload")
+    )
+    for audit in audits.iterator(chunk_size=500):
+        payload = audit["payload"] or {}
+        if payload.get("source") != "payroll_manager_manual":
+            continue
+        try:
+            selected_date = date.fromisoformat(str(payload["date"]))
+            created_local_date = date.fromisoformat(
+                str(payload["created_local_date"])
+            )
+            record_id = int(payload["work_record_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if selected_date.day != 1 or selected_date == created_local_date:
+            continue
+        groups.setdefault(
+            (int(audit["target_tenant_id"]), selected_date),
+            set(),
+        ).add(record_id)
+
+    delivered = _delivered_work_record_date_fingerprints()
+    rows: list[dict] = []
+    fingerprints: list[str] = []
+    for (tenant_id, selected_date), candidate_ids in sorted(groups.items()):
+        current_records = list(
+            WorkRecord.objects.filter(
+                tenant_id=tenant_id,
+                id__in=candidate_ids,
+                date=selected_date,
+            )
+            .order_by("id")
+            .values("id", "staff_id")
+        )
+        distinct_staff = len({row["staff_id"] for row in current_records})
+        if distinct_staff < distinct_staff_threshold:
+            continue
+        record_ids = [row["id"] for row in current_records]
+        fingerprint = _incident_fingerprint(
+            "work_record_date_anomalies",
+            tenant_id,
+            selected_date,
+            record_ids,
+        )
+        if fingerprint in delivered:
+            continue
+        rows.append(
+            {
+                "tenant_id": tenant_id,
+                "selected_date": str(selected_date),
+                "distinct_staff": distinct_staff,
+                "record_count": len(record_ids),
+                "work_record_ids": record_ids,
+            }
+        )
+        fingerprints.append(fingerprint)
+
+    if not rows:
+        return None
+    return {
+        "title": "🚨 근무기록 날짜 검토 필요 — 월초 날짜 집중",
+        "rows": rows,
+        "fingerprints": fingerprints,
+        "total": sum(row["record_count"] for row in rows),
+    }
+
+
 RULES: list[Rule] = [
     Rule("user_incidents", "사용자 오류/문제 신고", rule_user_incidents, "danger"),
+    Rule(
+        "work_record_date_anomalies",
+        "근무기록 날짜 검토 필요",
+        rule_work_record_date_anomalies,
+        "danger",
+    ),
     Rule(
         "messaging_delivery_health",
         "알림톡 공급자 잔액/재시도",
@@ -683,6 +793,21 @@ def _record_user_incident_slack_delivery(data: dict) -> None:
         payload={
             "fingerprints": list(data.get("fingerprints") or []),
             "event_count": max(0, int(data.get("total") or 0)),
+        },
+        result="success",
+    )
+
+
+def _record_work_record_date_slack_delivery(data: dict) -> None:
+    """Persist accepted Slack fingerprints; dry-runs never consume them."""
+    from apps.core.models import OpsAuditLog
+
+    OpsAuditLog.objects.create(
+        action=WORK_RECORD_DATE_SLACK_DELIVERY_ACTION,
+        summary=f"Work record date Slack delivery ({data.get('total', 0)} records)",
+        payload={
+            "fingerprints": list(data.get("fingerprints") or []),
+            "record_count": max(0, int(data.get("total") or 0)),
         },
         result="success",
     )
@@ -820,6 +945,8 @@ class Command(BaseCommand):
                     for rule, data in triggered:
                         if rule.key == "user_incidents":
                             _record_user_incident_slack_delivery(data)
+                        elif rule.key == "work_record_date_anomalies":
+                            _record_work_record_date_slack_delivery(data)
                     self.stdout.write(self.style.SUCCESS(
                         f"\nSlack 전송 OK ({len(triggered)} rule(s))."
                     ))

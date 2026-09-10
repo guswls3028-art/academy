@@ -9,7 +9,7 @@ from rest_framework.decorators import action
 from rest_framework.filters import OrderingFilter
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
 
 from academy.adapters.db.django import repositories_staffs as staff_repo
 
@@ -34,6 +34,53 @@ from .helpers import (
 # ===========================
 # WorkRecord (Record 기준: 휴게/종료만)
 # ===========================
+
+
+class WorkRecordAuditUnavailable(APIException):
+    status_code = 503
+    default_detail = "근무기록 감사 이력을 저장하지 못했습니다. 잠시 후 다시 시도해 주세요."
+    default_code = "work_record_audit_unavailable"
+
+
+def _work_record_audit_payload(record) -> dict:
+    def serialize_time(value):
+        return value.isoformat() if value is not None else None
+
+    return {
+        "source": "payroll_manager_manual",
+        "work_record_id": record.id,
+        "staff_id": record.staff_id,
+        "work_type_id": record.work_type_id,
+        "date": str(record.date),
+        "start_time": serialize_time(record.start_time),
+        "end_time": serialize_time(record.end_time),
+        "break_minutes": record.break_minutes,
+        "break_total_seconds": record.break_total_seconds,
+        "current_break_started_at": serialize_time(record.current_break_started_at),
+        "meal_minutes": record.meal_minutes,
+        "work_hours": str(record.work_hours) if record.work_hours is not None else None,
+        "amount": record.amount,
+        "resolved_hourly_wage": record.resolved_hourly_wage,
+        "adjustment_amount": record.adjustment_amount,
+        "is_manually_edited": record.is_manually_edited,
+        "created_local_date": str(timezone.localdate(record.created_at)),
+    }
+
+
+def _record_required_work_record_audit(request, *, action: str, payload: dict):
+    from apps.core.services.ops_audit import record_audit
+
+    audit = record_audit(
+        request,
+        action=action,
+        target_tenant=request.tenant,
+        summary=f"work_record_id={payload['work_record_id']}",
+        payload=payload,
+    )
+    if audit is None:
+        raise WorkRecordAuditUnavailable()
+    return audit
+
 
 class WorkRecordViewSet(viewsets.ModelViewSet):
     serializer_class = WorkRecordSerializer
@@ -90,7 +137,15 @@ class WorkRecordViewSet(viewsets.ModelViewSet):
                     and has_open_work_record_conflict(staff=locked_staff)
                 ):
                     raise OpenWorkRecordConflict()
-                serializer.save(tenant_id=tenant.id, staff=locked_staff)
+                saved_record = serializer.save(
+                    tenant_id=tenant.id,
+                    staff=locked_staff,
+                )
+                _record_required_work_record_audit(
+                    self.request,
+                    action="staff.work_record_created",
+                    payload=_work_record_audit_payload(saved_record),
+                )
         except IntegrityError as exc:
             if (
                 serializer.validated_data.get("end_time") is None
@@ -112,7 +167,13 @@ class WorkRecordViewSet(viewsets.ModelViewSet):
             )
             if is_month_locked(locked_staff, instance.date):
                 raise ValidationError("마감된 월입니다. 근무기록을 삭제할 수 없습니다.")
+            payload = _work_record_audit_payload(instance)
             instance.delete()
+            _record_required_work_record_audit(
+                self.request,
+                action="staff.work_record_deleted",
+                payload=payload,
+            )
 
     def perform_update(self, serializer):
         # Direct override fields: admin explicitly sets the final work_hours or amount
