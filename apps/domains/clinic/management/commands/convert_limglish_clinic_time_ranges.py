@@ -10,7 +10,11 @@ from django.utils import timezone
 
 from apps.core.models import Tenant
 from apps.domains.clinic.models import Session, SessionParticipant
-from apps.domains.clinic.time_ranges import is_supported_time_range_session, session_window
+from apps.domains.clinic.time_ranges import (
+    booking_window,
+    is_supported_time_range_session,
+    session_window,
+)
 
 
 TENANT_CODE = "limglish"
@@ -85,6 +89,8 @@ def _build_plan(*, tenant, from_date: datetime.date, lock: bool) -> dict:
     target_participant_ids = []
     fingerprint_participants = []
     for participant in participants:
+        session = session_by_id[participant.session_id]
+        session_start, session_end = session_window(session)
         pair = (
             participant.booking_start_time is not None,
             participant.booking_end_time is not None,
@@ -98,10 +104,35 @@ def _build_plan(*, tenant, from_date: datetime.date, lock: bool) -> dict:
                 raise CommandError(
                     f"fixed session participant {participant.id} already has a booking range; no rows were changed"
                 )
+            booking_start, booking_end = session_start, session_end
             target_participant_ids.append(participant.id)
         elif not pair[0]:
             raise CommandError(
                 f"time-range participant {participant.id} has no booking range; no rows were changed"
+            )
+        else:
+            booking_start, booking_end = booking_window(
+                session=session,
+                start_time=participant.booking_start_time,
+                end_time=participant.booking_end_time,
+            )
+        if not (session_start <= booking_start < booking_end <= session_end):
+            raise CommandError(
+                f"participant {participant.id} booking range is outside its session; no rows were changed"
+            )
+        interval_seconds = INTERVAL_MINUTES * 60
+        if (
+            int((booking_start - session_start).total_seconds()) % interval_seconds
+            or int((booking_end - session_start).total_seconds()) % interval_seconds
+        ):
+            raise CommandError(
+                f"participant {participant.id} booking range is not aligned to the "
+                f"{INTERVAL_MINUTES}-minute interval; no rows were changed"
+            )
+        if booking_end - booking_start > datetime.timedelta(minutes=MAX_STAY_MINUTES):
+            raise CommandError(
+                f"participant {participant.id} booking range exceeds the "
+                f"{MAX_STAY_MINUTES}-minute maximum stay; no rows were changed"
             )
         fingerprint_participants.append({
             "id": participant.id,

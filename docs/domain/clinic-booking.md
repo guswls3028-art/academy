@@ -94,10 +94,15 @@
   따라서 15:00–22:00과 21:00–00:00은 지원하지만, 다음 날 00:30처럼 자정을
   넘겨 계속 운영하는 범위는 실패 폐쇄한다. 학생의 실제 예약 종료 `00:00`도
   같은 규칙으로 다음 날 자정으로 계산한다.
+- 단일·일괄 세션 생성은 요청에 예약 정책이 생략돼도 tenant 기본값을 먼저 적용한
+  유효 정책으로 간격·최대 체류·운영 종료 경계를 검사한다. 따라서 저장 뒤에야
+  `time_range`가 되는 호출도 지원하지 않는 자정 이후 세션을 만들 수 없다.
 - tenant 기본값 `clinic_booking_mode`, `clinic_booking_interval_minutes`,
   `clinic_booking_max_stay_minutes`는 owner/admin만 바꾼다. 모든 직원 역할은 값을
   읽을 수 있고, session의 snapshot은 이후 기본값 변경에 따라 바뀌지 않는다.
 - 활성 예약이 있는 session의 예약 방식·간격·최대 체류는 바꿀 수 없다.
+  `time_range` 세션은 기존 실제 예약을 운영 범위 밖으로 밀어내지 않도록 날짜·시작
+  시각·운영 시간도 바꿀 수 없다.
   `time_range`는 다중 session 선택과 섞지 않으며 반복 생성도 한 날짜씩 한다.
 
 `GET /api/v1/clinic/sessions/{id}/availability/`는 요청 tenant와 세션 대상 자격을
@@ -153,8 +158,10 @@ python manage.py convert_limglish_clinic_time_ranges --from-date 2026-09-10 --ex
   tenant·session·participant를 transaction 안에서 잠가 dry-run 뒤 대상이
   달라졌으면 실패 폐쇄한다.
 - 60분 단위의 고정 일정만 변환하고, 같은 날 종료 또는 정확한 다음 날 `00:00`
-  종료만 허용한다. 이미 부분 실제시간이 기록됐거나 형식이 섞인 참가자, 자정 이후
-  운영, 중복 tenant code는 임의 보정하지 않는다.
+  종료만 허용한다. 모든 기존 참가자의 현재 또는 변환 후 실제 범위도 세션 안에 있고,
+  세션 시작 기준 60분 경계에 맞으며, 새 최대 체류 600분 이하여야 한다. 하나라도
+  어긋나면 dry-run과 실행 모두 아무 행도 바꾸지 않고 실패한다. 이미 부분 실제시간이
+  기록됐거나 형식이 섞인 참가자, 자정 이후 운영, 중복 tenant code도 임의 보정하지 않는다.
 - 예약·취소·거절 등 기존 참가자 행은 삭제하지 않고 원래 세션 전체 범위를 실제
   `booking_start_time`/`booking_end_time`으로 채운다. 상태와 알림 이력은 유지한다.
 - 대상 session은 `time_range`, 60분 간격, 최대 600분, 여러 고정 세션 예약 OFF로

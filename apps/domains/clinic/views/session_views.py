@@ -208,10 +208,14 @@ class SessionViewSet(viewsets.ModelViewSet):
             "tenant": tenant,
             "created_by": created_by,
         }
+        effective_booking_mode = serializer.validated_data.get(
+            "booking_mode",
+            tenant.clinic_booking_mode,
+        )
         if "allow_multi_slot_booking" not in serializer.validated_data:
             save_kwargs["allow_multi_slot_booking"] = (
                 False
-                if serializer.validated_data.get("booking_mode") == "time_range"
+                if effective_booking_mode == "time_range"
                 else bool(tenant.clinic_allow_multi_slot_booking_default)
             )
         if "booking_mode" not in serializer.validated_data:
@@ -494,7 +498,10 @@ class SessionViewSet(viewsets.ModelViewSet):
                 {"tenant": "테넌트 컨텍스트가 필요합니다."}
             )
 
-        ser = ClinicSessionBulkCreateSerializer(data=request.data)
+        ser = ClinicSessionBulkCreateSerializer(
+            data=request.data,
+            context={"request": request},
+        )
         ser.is_valid(raise_exception=True)
         data = ser.validated_data
 

@@ -187,6 +187,54 @@ class ConvertLimglishClinicTimeRangesCommandTest(TestCase, ClinicTestMixin):
                 expected_range,
             )
 
+    def test_existing_time_range_with_half_hour_participant_fails_before_normalizing(self):
+        self.session.booking_mode = "time_range"
+        self.session.booking_interval_minutes = 30
+        self.session.save(update_fields=[
+            "booking_mode",
+            "booking_interval_minutes",
+            "updated_at",
+        ])
+        participant = self.participants[0]
+        participant.booking_start_time = datetime.time(18, 30)
+        participant.booking_end_time = datetime.time(20, 0)
+        participant.save(update_fields=[
+            "booking_start_time",
+            "booking_end_time",
+            "updated_at",
+        ])
+        other = self.participants[1]
+        other.booking_start_time = datetime.time(20, 0)
+        other.booking_end_time = datetime.time(22, 0)
+        other.save(update_fields=[
+            "booking_start_time",
+            "booking_end_time",
+            "updated_at",
+        ])
+
+        with self.assertRaisesMessage(CommandError, "60-minute interval"):
+            self._dry_run()
+
+        self.session.refresh_from_db()
+        participant.refresh_from_db()
+        self.assertEqual(self.session.booking_interval_minutes, 30)
+        self.assertEqual(participant.booking_start_time, datetime.time(18, 30))
+
+    def test_fixed_participant_longer_than_new_max_stay_fails_without_writes(self):
+        self.session.start_time = datetime.time(8, 0)
+        self.session.duration_minutes = 720
+        self.session.save(update_fields=["start_time", "duration_minutes", "updated_at"])
+
+        with self.assertRaisesMessage(CommandError, "maximum stay"):
+            self._dry_run()
+
+        self.session.refresh_from_db()
+        self.assertEqual(self.session.booking_mode, "fixed_slot")
+        for participant in self.participants:
+            participant.refresh_from_db()
+            self.assertIsNone(participant.booking_start_time)
+            self.assertIsNone(participant.booking_end_time)
+
     def test_exact_tenant_code_must_resolve_once(self):
         self.limglish["tenant"].delete()
 

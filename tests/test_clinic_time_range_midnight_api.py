@@ -97,6 +97,133 @@ class ClinicTimeRangeMidnightAPITest(APITestCase, ClinicAPITestMixin):
             )
         )
 
+    def test_explicit_time_range_session_cannot_end_after_next_day_midnight(self):
+        self.client.force_authenticate(user=self.data["admin_user"])
+
+        response = self.client.post(
+            "/api/v1/clinic/sessions/",
+            {
+                "date": self.session.date,
+                "start_time": "18:00",
+                "duration_minutes": 420,
+                "location": "overnight-invalid",
+                "max_participants": 10,
+                "booking_mode": "time_range",
+                "booking_interval_minutes": 60,
+                "booking_max_stay_minutes": 600,
+            },
+            format="json",
+            **self._headers(),
+        )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        update = self.client.patch(
+            f"/api/v1/clinic/sessions/{self.session.id}/",
+            {"duration_minutes": 420},
+            format="json",
+            **self._headers(),
+        )
+        self.assertEqual(update.status_code, 400, update.data)
+        self.session.refresh_from_db()
+        self.assertEqual(self.session.duration_minutes, 360)
+
+    def test_omitted_mode_uses_time_range_tenant_default_for_create_and_bulk_validation(self):
+        self.tenant.clinic_booking_mode = "time_range"
+        self.tenant.clinic_booking_interval_minutes = 60
+        self.tenant.clinic_booking_max_stay_minutes = 600
+        self.tenant.save(update_fields=[
+            "clinic_booking_mode",
+            "clinic_booking_interval_minutes",
+            "clinic_booking_max_stay_minutes",
+        ])
+        self.client.force_authenticate(user=self.data["admin_user"])
+        common = {
+            "start_time": "18:00",
+            "duration_minutes": 420,
+            "location": "tenant-default-invalid",
+            "max_participants": 10,
+        }
+
+        create = self.client.post(
+            "/api/v1/clinic/sessions/",
+            {**common, "date": self.session.date},
+            format="json",
+            **self._headers(),
+        )
+        bulk = self.client.post(
+            "/api/v1/clinic/sessions/bulk-create/",
+            {**common, "dates": [self.session.date]},
+            format="json",
+            **self._headers(),
+        )
+        bulk_with_multi_slot = self.client.post(
+            "/api/v1/clinic/sessions/bulk-create/",
+            {
+                **common,
+                "dates": [self.session.date],
+                "duration_minutes": 360,
+                "allow_multi_slot_booking": True,
+            },
+            format="json",
+            **self._headers(),
+        )
+
+        self.assertEqual(create.status_code, 400, create.data)
+        self.assertEqual(bulk.status_code, 400, bulk.data)
+        self.assertEqual(bulk_with_multi_slot.status_code, 400, bulk_with_multi_slot.data)
+
+        valid_create = self.client.post(
+            "/api/v1/clinic/sessions/",
+            {
+                **common,
+                "date": self.session.date,
+                "duration_minutes": 360,
+                "location": "tenant-default-valid-create",
+            },
+            format="json",
+            **self._headers(),
+        )
+        valid_bulk = self.client.post(
+            "/api/v1/clinic/sessions/bulk-create/",
+            {
+                **common,
+                "dates": [self.session.date + datetime.timedelta(days=1)],
+                "duration_minutes": 360,
+                "location": "tenant-default-valid-bulk",
+            },
+            format="json",
+            **self._headers(),
+        )
+        self.assertEqual(valid_create.status_code, 201, valid_create.data)
+        self.assertEqual(valid_create.data["booking_mode"], "time_range")
+        self.assertEqual(valid_create.data["end_time"], datetime.time.min)
+        self.assertEqual(valid_bulk.status_code, 201, valid_bulk.data)
+        bulk_session = self.session.__class__.objects.get(
+            id=valid_bulk.data["created"][0]["id"]
+        )
+        self.assertEqual(bulk_session.booking_mode, "time_range")
+        bulk_end = datetime.datetime.combine(
+            bulk_session.date,
+            bulk_session.start_time,
+        ) + datetime.timedelta(minutes=bulk_session.duration_minutes)
+        self.assertEqual(bulk_end.time(), datetime.time.min)
+
+    def test_active_time_range_booking_blocks_window_change_that_would_orphan_it(self):
+        booked = self._book(self.students[0], start="22:00", end="00:00")
+        self.assertEqual(booked.status_code, 201, booked.data)
+        self.client.force_authenticate(user=self.data["admin_user"])
+
+        response = self.client.patch(
+            f"/api/v1/clinic/sessions/{self.session.id}/",
+            {"duration_minutes": 240},
+            format="json",
+            **self._headers(),
+        )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        self.session.refresh_from_db()
+        self.assertEqual(self.session.duration_minutes, 360)
+
 
 class ClinicTimeRangeMidnightConstraintTest(TestCase, ClinicAPITestMixin):
     def test_database_allows_paired_range_that_ends_exactly_at_midnight(self):

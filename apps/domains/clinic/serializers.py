@@ -6,6 +6,7 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from .models import Session, SessionParticipant, Test, Submission
 from .services.lifecycle import booking_availability_for_session
+from .time_ranges import is_supported_time_range_values
 from apps.core.permissions import is_effective_staff
 from apps.support.clinic.session_dependencies import (
     active_students_for_clinic_tenant,
@@ -69,14 +70,22 @@ class ClinicSessionSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         instance = self.instance
-        mode = attrs.get("booking_mode", getattr(instance, "booking_mode", "fixed_slot"))
+        request = self.context.get("request")
+        tenant = getattr(request, "tenant", None) if request else None
+        mode = attrs.get(
+            "booking_mode",
+            getattr(instance, "booking_mode", None)
+            or getattr(tenant, "clinic_booking_mode", "fixed_slot"),
+        )
         interval = attrs.get(
             "booking_interval_minutes",
-            getattr(instance, "booking_interval_minutes", 60),
+            getattr(instance, "booking_interval_minutes", None)
+            or getattr(tenant, "clinic_booking_interval_minutes", 60),
         )
         max_stay = attrs.get(
             "booking_max_stay_minutes",
-            getattr(instance, "booking_max_stay_minutes", 240),
+            getattr(instance, "booking_max_stay_minutes", None)
+            or getattr(tenant, "clinic_booking_max_stay_minutes", 240),
         )
         if interval not in (30, 60):
             raise serializers.ValidationError(
@@ -93,21 +102,24 @@ class ClinicSessionSerializer(serializers.ModelSerializer):
                 SessionParticipant.Status.ATTENDED,
             )
         ).exists():
+            frozen_fields = [
+                "booking_mode",
+                "booking_interval_minutes",
+                "booking_max_stay_minutes",
+            ]
+            if instance.booking_mode == "time_range":
+                frozen_fields.extend(("date", "start_time", "duration_minutes"))
             changed = any(
                 key in attrs and attrs[key] != getattr(instance, key)
-                for key in (
-                    "booking_mode",
-                    "booking_interval_minutes",
-                    "booking_max_stay_minutes",
-                )
+                for key in frozen_fields
             )
             if changed:
                 raise serializers.ValidationError(
-                    {"booking_policy": "활성 예약이 있는 세션의 예약 방식은 변경할 수 없습니다."}
+                    {"booking_policy": "활성 예약이 있는 세션의 예약 방식과 운영 시간은 변경할 수 없습니다."}
                 )
         if mode == "time_range" and attrs.get(
             "allow_multi_slot_booking",
-            getattr(instance, "allow_multi_slot_booking", False),
+            getattr(instance, "allow_multi_slot_booking", False) if instance else False,
         ):
             raise serializers.ValidationError(
                 {"allow_multi_slot_booking": "시간 범위 방식은 여러 세션 동시 예약과 함께 사용할 수 없습니다."}
@@ -116,6 +128,21 @@ class ClinicSessionSerializer(serializers.ModelSerializer):
         if mode == "time_range" and duration % interval:
             raise serializers.ValidationError(
                 {"duration_minutes": "시간 범위 세션의 운영 시간은 예약 간격의 배수여야 합니다."}
+            )
+        session_date = attrs.get("date", getattr(instance, "date", None))
+        start_time = attrs.get("start_time", getattr(instance, "start_time", None))
+        if (
+            mode == "time_range"
+            and session_date is not None
+            and start_time is not None
+            and not is_supported_time_range_values(
+                session_date=session_date,
+                start_time=start_time,
+                duration_minutes=duration,
+            )
+        ):
+            raise serializers.ValidationError(
+                {"duration_minutes": "시간 범위 세션은 같은 날 또는 정확히 다음 날 00:00에 끝나야 합니다."}
             )
         return attrs
 
@@ -633,19 +660,43 @@ class ClinicSessionBulkCreateSerializer(serializers.Serializer):
         return value
 
     def validate(self, attrs):
-        interval = attrs.get("booking_interval_minutes", 60)
-        max_stay = attrs.get("booking_max_stay_minutes", 240)
-        if max_stay % interval:
+        request = self.context.get("request")
+        tenant = getattr(request, "tenant", None) if request else None
+        mode = attrs.get(
+            "booking_mode",
+            getattr(tenant, "clinic_booking_mode", "fixed_slot"),
+        )
+        interval = attrs.get(
+            "booking_interval_minutes",
+            getattr(tenant, "clinic_booking_interval_minutes", 60),
+        )
+        max_stay = attrs.get(
+            "booking_max_stay_minutes",
+            getattr(tenant, "clinic_booking_max_stay_minutes", 240),
+        )
+        if max_stay < interval or max_stay % interval:
             raise serializers.ValidationError(
-                {"booking_max_stay_minutes": "최대 체류 시간은 예약 간격의 배수여야 합니다."}
+                {"booking_max_stay_minutes": "최대 체류 시간은 예약 간격의 양의 배수여야 합니다."}
             )
-        if attrs.get("booking_mode") == "time_range" and len(attrs["dates"]) > 1:
+        if mode == "time_range" and len(attrs["dates"]) > 1:
             raise serializers.ValidationError(
                 {"dates": "시간 범위 방식은 한 날짜씩 생성해 주세요."}
             )
-        if attrs.get("booking_mode") == "time_range" and attrs["duration_minutes"] % interval:
+        if mode == "time_range" and attrs.get("allow_multi_slot_booking", False):
+            raise serializers.ValidationError(
+                {"allow_multi_slot_booking": "시간 범위 방식은 여러 세션 동시 예약과 함께 사용할 수 없습니다."}
+            )
+        if mode == "time_range" and attrs["duration_minutes"] % interval:
             raise serializers.ValidationError(
                 {"duration_minutes": "시간 범위 세션의 운영 시간은 예약 간격의 배수여야 합니다."}
+            )
+        if mode == "time_range" and not is_supported_time_range_values(
+            session_date=attrs["dates"][0],
+            start_time=attrs["start_time"],
+            duration_minutes=attrs["duration_minutes"],
+        ):
+            raise serializers.ValidationError(
+                {"duration_minutes": "시간 범위 세션은 같은 날 또는 정확히 다음 날 00:00에 끝나야 합니다."}
             )
         return attrs
 

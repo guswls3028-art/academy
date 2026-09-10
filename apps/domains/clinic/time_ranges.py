@@ -9,13 +9,27 @@ def session_window(session) -> tuple[datetime.datetime, datetime.datetime]:
     return start, end
 
 
-def is_supported_time_range_session(session) -> bool:
+def is_supported_time_range_values(
+    *,
+    session_date: datetime.date,
+    start_time: datetime.time,
+    duration_minutes: int,
+) -> bool:
     """Allow same-day ranges and the exact next-day midnight boundary only."""
 
-    _start, end = session_window(session)
-    return end.date() == session.date or (
-        end.date() == session.date + datetime.timedelta(days=1)
+    start = datetime.datetime.combine(session_date, start_time)
+    end = start + datetime.timedelta(minutes=int(duration_minutes))
+    return end.date() == session_date or (
+        end.date() == session_date + datetime.timedelta(days=1)
         and end.time() == datetime.time.min
+    )
+
+
+def is_supported_time_range_session(session) -> bool:
+    return is_supported_time_range_values(
+        session_date=session.date,
+        start_time=session.start_time,
+        duration_minutes=session.duration_minutes,
     )
 
 
@@ -39,4 +53,3 @@ def ranges_overlap(
     second_end: datetime.datetime,
 ) -> bool:
     return first_start < second_end and first_end > second_start
-
