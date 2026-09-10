@@ -7,7 +7,6 @@ from rest_framework import status
 
 from apps.domains.enrollment.selectors import active_enrollments_for_students
 from apps.domains.student_app.permissions import get_request_student
-from apps.domains.students.selectors import active_students_for_parent, student_for_tenant_user
 from apps.domains.video.models import AccessMode
 from apps.domains.video.policy import (
     is_video_progress_complete,
@@ -59,23 +58,8 @@ def get_students_for_request(request):
     tenant = getattr(request, "tenant", None)
     if not tenant or not getattr(request.user, "is_active", False):
         return []
-
-    student = student_for_tenant_user(tenant, request.user, deleted="active")
-    if student:
-        return [student]
-
-    parent = getattr(request.user, "parent_profile", None)
-    if parent:
-        active_students = active_students_for_parent(tenant, parent)
-        if "HTTP_X_STUDENT_ID" in request.META:
-            header_id = request.META.get("HTTP_X_STUDENT_ID")
-            try:
-                selected = active_students.filter(id=int(header_id)).first()
-            except (TypeError, ValueError):
-                selected = None
-            return [selected] if selected else []
-        return list(active_students)
-    return []
+    student = get_request_student(request)
+    return [student] if student else []
 
 
 def direct_entitlements_for_request_student(request, *, student=None):

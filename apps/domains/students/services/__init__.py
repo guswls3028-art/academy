@@ -37,7 +37,6 @@ from .identity import (
 )
 from .import_passwords import (
     FIXED_PASSWORD_MODE,
-    PHONE_LAST4_PASSWORD_MODE,
     RANDOM_PASSWORD_MODE,
     StudentImportPasswordError,
     StudentImportPasswordPolicy,
@@ -90,7 +89,6 @@ __all__ = [
     "resolve_student_login_id",
     "student_login_id_taken",
     "FIXED_PASSWORD_MODE",
-    "PHONE_LAST4_PASSWORD_MODE",
     "RANDOM_PASSWORD_MODE",
     "StudentImportPasswordError",
     "StudentImportPasswordPolicy",

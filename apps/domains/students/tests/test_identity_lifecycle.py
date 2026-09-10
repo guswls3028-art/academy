@@ -19,6 +19,7 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 from apps.core.models.tenant import Tenant
 from apps.core.models.tenant_membership import TenantMembership
 from apps.core.models.user import user_internal_username, user_display_username
+from apps.domains.parents.test_support import create_parent_account_fixture
 from apps.domains.students.models import Student
 from apps.domains.students.serializers import StudentDetailSerializer
 from apps.domains.students.services import StudentLifecycleError, restore_student, soft_delete_student
@@ -276,11 +277,12 @@ class TestSoftDeleteLifecycleService(TestCase):
             phone="01044445555",
             parent_phone="01099998888",
         )
-        self.parent = Parent.objects.create(
+        self.parent = create_parent_account_fixture(
             tenant=self.tenant,
-            name="학부모",
-            phone=self.student.parent_phone,
-        )
+            parent_phone=self.student.parent_phone,
+            student_name=self.student.name,
+            initial_password="chosen-parent-password",
+        ).parent
         self.student.parent = self.parent
         self.student.save(update_fields=["parent"])
         self.lecture = Lecture.objects.create(
@@ -531,6 +533,14 @@ class TestSoftDeleteViewRouting(TestCase):
         send_notification,
     ):
         student, _enrollment, _participant = self._student_with_edges("0011")
+        parent = create_parent_account_fixture(
+            tenant=self.tenant,
+            parent_phone=student.parent_phone,
+            student_name=student.name,
+            initial_password="chosen-parent-password",
+        ).parent
+        student.parent = parent
+        student.save(update_fields=["parent"])
 
         def destroy_once():
             request = self.factory.delete(f"/api/v1/students/{student.id}/")
@@ -683,9 +693,12 @@ class TestBulkRestoreFlow(TestCase):
         TenantMembership.ensure_active(tenant=self.tenant, user=self.admin, role="owner")
         self.student = _create_student(self.tenant, "R11111", phone="01033334444", parent_phone="01055556666")
         # Create parent
-        self.parent = Parent.objects.create(
-            tenant=self.tenant, name="학부모", phone="01055556666"
-        )
+        self.parent = create_parent_account_fixture(
+            tenant=self.tenant,
+            parent_phone="01055556666",
+            student_name=self.student.name,
+            initial_password="chosen-parent-password",
+        ).parent
         self.student.parent = self.parent
         self.student.save(update_fields=["parent"])
         # Soft delete
@@ -716,6 +729,48 @@ class TestBulkRestoreFlow(TestCase):
         self.assertTrue(
             TenantMembership.objects.get(tenant=self.tenant, user=self.student.user).is_active
         )
+
+    def test_restore_missing_parent_account_requires_explicit_password_without_reactivating_student(self):
+        parent_user = self.parent.user
+        self.parent.delete()
+        parent_user.delete()
+
+        with self.assertRaises(StudentLifecycleError) as ctx:
+            restore_student(self.student, tenant=self.tenant)
+
+        self.assertEqual(ctx.exception.code, "parent_account_password_required")
+        self.student.refresh_from_db()
+        self.student.user.refresh_from_db()
+        self.assertIsNotNone(self.student.deleted_at)
+        self.assertFalse(self.student.user.is_active)
+
+    def test_restore_missing_parent_account_uses_explicit_password(self):
+        parent_user = self.parent.user
+        self.parent.delete()
+        parent_user.delete()
+
+        result = restore_student(
+            self.student,
+            tenant=self.tenant,
+            parent_initial_password="teacher-selected-password",
+        )
+
+        self.assertTrue(result.parent_credentials_initialized)
+        self.assertEqual(result.parent_password_for_notice, "teacher-selected-password")
+        self.student.refresh_from_db()
+        self.assertIsNotNone(self.student.parent_id)
+        self.assertTrue(self.student.parent.user.check_password("teacher-selected-password"))
+
+    def test_restore_inactive_parent_account_is_not_reported_as_password_required(self):
+        self.parent.user.is_active = False
+        self.parent.user.save(update_fields=["is_active"])
+
+        with self.assertRaises(StudentLifecycleError) as ctx:
+            restore_student(self.student, tenant=self.tenant)
+
+        self.assertEqual(ctx.exception.code, "parent_account_invalid")
+        self.student.refresh_from_db()
+        self.assertIsNotNone(self.student.deleted_at)
 
     def test_restore_collision_detection(self):
         """복원 시 ps_number가 다른 활성 학생에게 사용 중이면 충돌."""
@@ -755,6 +810,37 @@ class TestBulkRestoreFlow(TestCase):
         self.assertEqual(self.student.user.phone, "01033334444")
         self.assertEqual(self.student.parent_id, self.parent.id)
 
+    @patch(
+        "apps.domains.students.views.student_views.send_parent_account_credentials_notice",
+        return_value=True,
+    )
+    def test_bulk_restore_repairs_missing_parent_with_explicit_password_and_sends_notice(
+        self,
+        send_notice_mock,
+    ):
+        parent_user = self.parent.user
+        self.parent.delete()
+        parent_user.delete()
+        request = self.factory.post(
+            "/api/v1/students/bulk_restore/",
+            data={
+                "ids": [self.student.id],
+                "parent_initial_password": "teacher-selected-password",
+            },
+            format="json",
+        )
+        force_authenticate(request, user=self.admin)
+        request.tenant = self.tenant
+
+        response = StudentViewSet.as_view({"post": "bulk_restore"})(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["restored"], 1)
+        self.student.refresh_from_db()
+        self.assertIsNotNone(self.student.parent_id)
+        self.assertTrue(self.student.parent.user.check_password("teacher-selected-password"))
+        send_notice_mock.assert_called_once()
+
     def test_lecture_enroll_restore_uses_restore_lifecycle(self):
         from apps.domains.students.services.lecture_enroll import (
             get_or_create_student_for_lecture_enroll,
@@ -787,7 +873,6 @@ class TestBulkRestoreFlow(TestCase):
             "/api/v1/students/bulk_resolve_conflicts/",
             data={
                 "initial_password": "newpass123",
-                "send_welcome_message": True,
                 "resolutions": [
                     {
                         "row": 1,

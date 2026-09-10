@@ -8,6 +8,7 @@ from django.db.models import Count, Q
 
 from apps.core.models import TenantMembership
 from apps.core.models.user import user_internal_username
+from apps.core.services.login_identifier import normalize_login_identifier
 from apps.core.services.password import adopt_password_hash
 from apps.support.students.lifecycle_dependencies import (
     locked_parent_account_by_phone_for_registration,
@@ -18,6 +19,7 @@ from ..models import Student, StudentRegistrationRequest
 from .creation import create_student_account
 from .identity import (
     StudentIdentityError,
+    canonical_student_phone,
     derive_student_omr_code,
     phone_digits,
     resolve_student_login_id,
@@ -68,14 +70,25 @@ def _resolve_login_id(
     exclude_user_id: int | None = None,
 ) -> str:
     try:
-        return resolve_student_login_id(
+        student_phone = canonical_student_phone(
+            phone=reg.phone,
+            parent_phone=reg.parent_phone,
+        )
+        login_id = resolve_student_login_id(
             tenant=tenant,
             requested_id=reg.username,
-            phone=reg.phone,
-            requested_conflict="error",
+            phone=student_phone,
             exclude_student_id=exclude_student_id,
             exclude_user_id=exclude_user_id,
         )
+        if (
+            normalize_login_identifier(reg.username)
+            and login_id == phone_digits(reg.parent_phone)
+        ):
+            raise StudentIdentityError(
+                {"username": "학부모 전화번호는 학생 로그인 아이디로 사용할 수 없습니다."}
+            )
+        return login_id
     except StudentIdentityError as exc:
         raise RegistrationApprovalError(str(exc.detail), status_code=400) from exc
 
@@ -88,7 +101,7 @@ def _registration_identity_query(tenant, reg: StudentRegistrationRequest) -> Q:
     student_phone = phone_digits(reg.phone)
     if student_phone:
         query |= Q(phone=student_phone) | Q(user__phone=student_phone)
-    requested_id = str(reg.username or "").strip()
+    requested_id = normalize_login_identifier(reg.username)
     if requested_id:
         query |= Q(ps_number=requested_id) | Q(
             user__username=user_internal_username(tenant, requested_id)
@@ -234,7 +247,7 @@ def _registration_identity_lock_keys(tenant, reg: StudentRegistrationRequest) ->
     name = str(reg.name or "").strip()
     parent_phone = phone_digits(reg.parent_phone)
     student_phone = phone_digits(reg.phone)
-    requested_id = str(reg.username or "").strip()
+    requested_id = normalize_login_identifier(reg.username)
     keys = {f"{prefix}name-parent:{name}:{parent_phone}"}
     if student_phone:
         keys.add(f"{prefix}identity-value:{student_phone}")
@@ -600,6 +613,7 @@ def approve_registration_request(
             tenant=tenant,
             password_hash=reg.initial_password,
             account_notice_student_password="가입 신청 시 입력한 비밀번호",
+            account_notice_parent_password="가입 신청 시 입력한 비밀번호",
             student_data={
                 "name": reg.name,
                 "parent_phone": parent_phone,

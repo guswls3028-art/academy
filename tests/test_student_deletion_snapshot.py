@@ -237,7 +237,11 @@ class StudentDeletionSnapshotPostgresTests(TestCase):
             "PENDING",
         )
 
-        restore_student(self.student, tenant=self.tenant)
+        restore_student(
+            self.student,
+            tenant=self.tenant,
+            parent_initial_password="test-password",
+        )
 
         active_enrollment.refresh_from_db()
         pending_enrollment.refresh_from_db()

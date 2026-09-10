@@ -20,7 +20,9 @@ from django.db import transaction
 from academy.adapters.db.django import repositories_core as core_repo
 from academy.adapters.db.django import repositories_enrollment as enroll_repo
 from academy.adapters.db.django import repositories_students as student_repo
+from apps.support.students.lifecycle_dependencies import ensure_parent_account_for_student
 
+from .account_notifications import send_parent_account_credentials_notice
 from .creation import create_student_account
 from .custom_fields import (
     StudentCustomFieldError,
@@ -230,11 +232,12 @@ def _choose_ps_number(
     tenant,
     phone: str | None,
     identity_policy: StudentImportIdentityPolicy,
+    requested_id: Any = "",
 ) -> str:
     try:
         return resolve_student_login_id(
             tenant=tenant,
-            requested_id="",
+            requested_id=requested_id,
             phone=phone if identity_policy == "phone_if_available" else "",
         )
     except StudentIdentityError as exc:
@@ -261,8 +264,6 @@ def resolve_student_import_row(
 ) -> StudentImportRowResolution:
     """Resolve one imported row to an active student in one tenant."""
     initial_password = (initial_password or "").strip()
-    if len(initial_password) < 4:
-        raise ValueError("initial_password는 4자 이상이어야 합니다.")
 
     normalized = _normalize_import_row(
         tenant=tenant,
@@ -346,6 +347,7 @@ def resolve_student_import_row(
         tenant=tenant,
         phone=normalized.phone,
         identity_policy=identity_policy,
+        requested_id=row.get("ps_number") or row.get("psNumber") or "",
     )
     try:
         omr_code = derive_student_omr_code(
@@ -360,6 +362,8 @@ def resolve_student_import_row(
         "ps_number": ps_number,
         "omr_code": omr_code,
     }
+    if len(initial_password) < 4:
+        raise StudentImportRowError("신규 학생 초기 비밀번호는 4자 이상 입력해 주세요.")
 
     with transaction.atomic():
         if normalized.phone:
@@ -408,7 +412,6 @@ def import_students_from_rows(
     students_data: list[dict],
     initial_password: str,
     password_mode: str = "fixed",
-    send_welcome_message: bool = True,
     on_row_progress: Callable[[int, int], None] | None = None,
     source_job_id: str = "",
 ) -> dict:
@@ -561,7 +564,6 @@ def resolve_student_import_conflicts(
     tenant,
     resolutions: list[dict],
     initial_password: str,
-    send_welcome_message: bool = True,
 ) -> dict:
     """
     Resolve deleted-student import conflicts through the same row policy.
@@ -581,6 +583,7 @@ def resolve_student_import_conflicts(
 
     created_count = 0
     restored_count = 0
+    resolved_rows: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
     valid_school_types = student_import_valid_school_types(tenant)
     custom_field_definitions = active_custom_field_definitions(tenant)
@@ -645,12 +648,38 @@ def resolve_student_import_conflicts(
                     valid_school_types=valid_school_types,
                     custom_field_definitions=custom_field_definitions,
                 )
-                restore_student(
-                    deleted_student,
-                    tenant=tenant,
-                    profile_data=normalized.restore_data,
-                )
+                with transaction.atomic():
+                    parent_result = ensure_parent_account_for_student(
+                        tenant=tenant,
+                        parent_phone=normalized.parent_phone,
+                        student_name=normalized.name,
+                        initial_password=initial_password,
+                    )
+                    restored_result = restore_student(
+                        deleted_student,
+                        tenant=tenant,
+                        profile_data=normalized.restore_data,
+                    )
+                    if parent_result.credentials_initialized:
+                        delivered = send_parent_account_credentials_notice(
+                            student=restored_result.student,
+                            parent=parent_result.parent,
+                            parent_password=parent_result.password_for_notice,
+                            origin_type="student_import_conflict_restore",
+                            origin_id=str(row or deleted_student.id),
+                        )
+                        if not delivered:
+                            raise StudentImportRowError(
+                                "학부모 계정 안내 알림톡을 보내지 못해 복원을 취소했습니다."
+                            )
                 restored_count += 1
+                resolved_rows.append(
+                    {
+                        "row": row,
+                        "student_id": restored_result.student.id,
+                        "state": "restored",
+                    }
+                )
                 continue
 
             with transaction.atomic():
@@ -668,8 +697,22 @@ def resolve_student_import_conflicts(
                 )
             if resolved.created:
                 created_count += 1
+                resolved_rows.append(
+                    {
+                        "row": row,
+                        "student_id": resolved.student.id,
+                        "state": "created",
+                    }
+                )
             elif resolved.restored:
                 restored_count += 1
+                resolved_rows.append(
+                    {
+                        "row": row,
+                        "student_id": resolved.student.id,
+                        "state": "restored",
+                    }
+                )
             elif resolved.duplicate:
                 failed.append({
                     "row": row,
@@ -702,5 +745,6 @@ def resolve_student_import_conflicts(
     return {
         "created": created_count,
         "restored": restored_count,
+        "resolved": resolved_rows,
         "failed": failed,
     }

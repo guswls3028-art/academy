@@ -116,6 +116,70 @@ class StudentIdentityConvergenceTests(TestCase):
         self.assertNotEqual(student.ps_number, student.parent_phone)
         self.assertEqual(student.omr_code, "88887777")
 
+    def test_admin_create_rejects_explicit_parent_phone_as_student_login_id(self):
+        request = self.factory.post(
+            "/api/v1/students/",
+            data={
+                "name": "학부모아이디충돌학생",
+                "parent_phone": "01088887777",
+                "ps_number": "010-8888-7777",
+                "no_phone": True,
+                "initial_password": "test1234",
+                "school_type": "HIGH",
+                "grade": 1,
+            },
+            format="json",
+        )
+        force_authenticate(request, user=self.admin)
+        request.tenant = self.tenant
+
+        response = StudentViewSet.as_view({"post": "create"})(request)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("ps_number", response.data)
+        self.assertFalse(
+            Student.objects.filter(
+                tenant=self.tenant,
+                name="학부모아이디충돌학생",
+            ).exists()
+        )
+
+    def test_admin_create_rejects_student_phone_login_collision_without_generated_fallback(self):
+        phone = "01066667777"
+        conflicting_user = User.objects.create_user(
+            username=user_internal_username(self.tenant, phone),
+            tenant=self.tenant,
+            password="staff-password",
+            name="기존 사용자",
+        )
+        TenantMembership.ensure_active(
+            tenant=self.tenant,
+            user=conflicting_user,
+            role="teacher",
+        )
+        request = self.factory.post(
+            "/api/v1/students/",
+            data={
+                "name": "충돌학생",
+                "phone": phone,
+                "parent_phone": "01088887777",
+                "initial_password": "test1234",
+                "school_type": "HIGH",
+                "grade": 1,
+            },
+            format="json",
+        )
+        force_authenticate(request, user=self.admin)
+        request.tenant = self.tenant
+
+        response = StudentViewSet.as_view({"post": "create"})(request)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("ps_number", response.data)
+        self.assertFalse(
+            Student.objects.filter(tenant=self.tenant, name="충돌학생").exists()
+        )
+
     def test_admin_update_clearing_student_phone_recomputes_omr_from_parent_without_fake_phone(self):
         student = make_student(
             self.tenant,

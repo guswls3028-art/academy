@@ -130,7 +130,7 @@ def _student_scope_profile(request):
     if getattr(user, "parent_profile", None) is not None:
         from apps.domains.student_app.permissions import get_request_student
 
-        return get_request_student(request, require_explicit_parent_child=True)
+        return get_request_student(request)
     student = getattr(user, "student_profile", None)
     if (
         student is not None

@@ -160,7 +160,7 @@ def parse_teacher_ops_text(*, ocr_text: str, message: str) -> ExtractedTeacherOp
     if not name:
         warnings.append("학생 이름을 확실히 읽지 못했습니다.")
     if not student_phone:
-        warnings.append("학생 전화번호를 읽지 못했습니다. 신규 등록에는 학생 번호가 필요합니다.")
+        warnings.append("학생 전화번호를 읽지 못했습니다. 신규 등록이면 로그인 아이디를 자동 발급합니다.")
     if not parent_phone:
         warnings.append("학부모 전화번호를 읽지 못했습니다.")
     if not any((register_student, enroll_lecture, open_video)):

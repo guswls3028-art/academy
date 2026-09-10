@@ -1,7 +1,7 @@
 # 학생 생명주기 SSOT
 
 **상태:** Active
-**최종 점검:** 2026-08-27
+**최종 점검:** 2026-09-10
 **코드 기준:** `apps/domains/students/services/lifecycle.py`, `apps/domains/enrollment/services/lifecycle.py`, `apps/domains/students/views/student_views.py`
 
 ## 1. 상태
@@ -45,7 +45,7 @@ SSOT: `soft_delete_student(student, tenant=...)`
 
 ## 3. Restore
 
-SSOT: `restore_student(student, tenant=..., profile_data=None)`
+SSOT: `restore_student(student, tenant=..., profile_data=None, parent_initial_password=None)`
 
 - `_del_` 접두사에서 원래 `ps_number`를 복원한다.
 - 같은 테넌트 활성 학생과 아이디 충돌이 있으면 실패한다.
@@ -57,7 +57,13 @@ SSOT: `restore_student(student, tenant=..., profile_data=None)`
   `ACTIVE`/`PENDING`이어도 `INACTIVE`로 유지한다.
 - 활성으로 돌아온 enrollment의 수강료 연결은 다시 계산하지만, 기존 enrollment를
   복원하는 동작만으로 첫 계정 안내를 재발송하지 않는다.
-- 복원은 비밀번호를 재발급하지 않는다. 가입 안내 알림톡도 새 비밀번호처럼 보내지 않는다.
+- 정상 학부모 계정이 있으면 복원은 그 비밀번호를 바꾸거나 계정 안내를 재발송하지
+  않는다. legacy 데이터에 학부모 계정이 없거나 비밀번호를 사용할 수 없으면 임의값을
+  만들지 않고 `parent_account_password_required`로 실패한다.
+- 교직원 `bulk_restore`는 선택 입력 `parent_initial_password`를 받을 수 있다. 이 값은
+  누락·사용불가 학부모 계정에만 적용되며 정상 계정에는 적용되지 않는다. 새 자격 증명을
+  만든 경우 학부모 알림톡도 같은 transaction에서 예약하고, 예약 실패 시 해당 학생
+  복원과 계정 생성을 함께 rollback한다.
 
 `enrollment.0002_student_deletion_status_snapshot` 적용 전에 이미 삭제되어 있던 학생의
 원래 수강 상태는 과거 `INACTIVE` 덮어쓰기로 복원할 수 없다. 마이그레이션은 이를
@@ -162,7 +168,8 @@ python manage.py purge_deleted_students
 
 - soft delete, restore, permanent delete는 학생 생명주기 테스트에 포함되어야 한다.
 - soft delete/restore 변경 시 `ACTIVE`/`PENDING`/`INACTIVE` 보존, 삭제 중 종료된 강의
-  비활성 유지, 계정 안내 미발송, 삭제 학생 수강/차시 등록 차단을 함께 검증한다.
+  비활성 유지, 정상 계정의 안내 미발송, 명시 비밀번호로 복구한 학부모 계정의 필수
+  안내와 실패 rollback, 삭제 학생 수강/차시 등록 차단을 함께 검증한다.
 - PostgreSQL에서는 구 런타임 형태의 상태 일괄갱신→신 런타임 복원과, 역순으로 겹치는
   수강/차시 batch write가 교착 없이 끝나는지 함께 검증한다.
 - permanent delete 변경 시 최소 검증:

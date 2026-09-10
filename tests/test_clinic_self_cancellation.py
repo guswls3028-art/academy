@@ -149,11 +149,17 @@ class ClinicSelfCancellationAPITest(APITestCase, ClinicAPITestMixin):
                 {"target": "student", "requested": True},
             ],
         }
+        decision_time = timezone.make_aware(
+            datetime.datetime.combine(self.week_start, datetime.time(12, 0))
+        )
 
         with patch(
             "apps.domains.clinic.services.lifecycle.send_clinic_event_notification",
             return_value=True,
-        ) as send_notification:
+        ) as send_notification, patch(
+            "apps.domains.clinic.services.lifecycle.timezone.now",
+            return_value=decision_time,
+        ):
             response = self._cancel(first)
 
         self.assertEqual(response.status_code, 200, response.data)
@@ -754,7 +760,7 @@ class ClinicSelfCancellationConcurrencyTest(TransactionTestCase, ClinicTestMixin
             source_type="exam",
             source_id=exam.id,
         )
-        week_start = timezone.localdate() - datetime.timedelta(
+        self.week_start = timezone.localdate() - datetime.timedelta(
             days=timezone.localdate().weekday()
         )
         self.participants = [
@@ -762,7 +768,7 @@ class ClinicSelfCancellationConcurrencyTest(TransactionTestCase, ClinicTestMixin
                 self.tenant,
                 self.make_clinic_session(
                     self.tenant,
-                    date=week_start + datetime.timedelta(days=offset),
+                    date=self.week_start + datetime.timedelta(days=offset),
                     start_time=datetime.time(hour, 0),
                     location=f"race-{offset}",
                 ),
@@ -778,6 +784,9 @@ class ClinicSelfCancellationConcurrencyTest(TransactionTestCase, ClinicTestMixin
         barrier = threading.Barrier(2)
         outcomes = []
         outcome_lock = threading.Lock()
+        decision_time = timezone.make_aware(
+            datetime.datetime.combine(self.week_start, datetime.time(12, 0))
+        )
 
         def cancel(participant_id):
             close_old_connections()
@@ -804,6 +813,9 @@ class ClinicSelfCancellationConcurrencyTest(TransactionTestCase, ClinicTestMixin
         with patch(
             "apps.domains.clinic.services.lifecycle.send_clinic_event_notification",
             return_value=True,
+        ), patch(
+            "apps.domains.clinic.services.lifecycle.timezone.now",
+            return_value=decision_time,
         ):
             threads = [
                 threading.Thread(target=cancel, args=(participant.id,))

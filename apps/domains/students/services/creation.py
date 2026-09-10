@@ -8,14 +8,15 @@ from django.db import transaction
 
 from academy.adapters.db.django import repositories_students as student_repo
 from apps.core.models import TenantMembership
+from apps.core.services.login_identifier import normalize_login_identifier
 from apps.support.students.lifecycle_dependencies import ensure_parent_account_for_student
 
 from .account_notice import stage_pending_account_notice
 from .identity import (
+    StudentIdentityError,
     canonical_student_phone,
     derive_student_omr_code,
     phone_digits,
-    resolve_student_login_id,
 )
 
 
@@ -26,7 +27,7 @@ class StudentAccountCreationResult:
     parent: Any | None
     parent_phone: str
     parent_password_for_notice: str
-    parent_user_created: bool
+    parent_credentials_initialized: bool
 
     @property
     def parent_password_by_phone(self) -> dict[str, str]:
@@ -43,6 +44,7 @@ def create_student_account(
     password_hash: str | None = None,
     must_change_password: bool = False,
     account_notice_student_password: str | None = None,
+    account_notice_parent_password: str | None = None,
     account_notice_origin_type: str = "",
     account_notice_origin_id: str = "",
 ) -> StudentAccountCreationResult:
@@ -59,13 +61,16 @@ def create_student_account(
         raise ValueError("password or password_hash is required")
     if password is not None and password_hash is not None:
         raise ValueError("password and password_hash are mutually exclusive")
+    if password is not None and len(str(password)) < 4:
+        raise ValueError("초기 비밀번호는 4자 이상이어야 합니다.")
 
     data = dict(student_data)
     parent_phone = str(data.get("parent_phone") or "").strip()
     name = str(data.get("name") or "").strip()
-    ps_number = str(data.get("ps_number") or "").strip()
+    ps_number = normalize_login_identifier(data.get("ps_number"))
     if not ps_number:
         raise ValueError("ps_number is required")
+    data["ps_number"] = ps_number
 
     original_phone = phone_digits(data.get("phone"))
     student_phone = canonical_student_phone(
@@ -82,29 +87,31 @@ def create_student_account(
             current=data.get("omr_code"),
         )
     normalized_parent_phone = phone_digits(parent_phone)
-    if (
-        student_phone is None
-        and normalized_parent_phone
-        and ps_number == normalized_parent_phone
-    ):
-        ps_number = resolve_student_login_id(tenant=tenant)
-        data["ps_number"] = ps_number
-        data["uses_identifier"] = True
+    if normalized_parent_phone and ps_number == normalized_parent_phone:
+        raise StudentIdentityError(
+            {"ps_number": "학부모 전화번호는 학생 로그인 아이디로 사용할 수 없습니다."}
+        )
 
     with transaction.atomic():
         parent = None
         parent_password_for_notice = ""
-        parent_user_created = False
+        parent_credentials_initialized = False
         if parent_phone:
             parent_result = ensure_parent_account_for_student(
                 tenant=tenant,
                 parent_phone=parent_phone,
                 student_name=name,
                 initial_password=password,
+                initial_password_hash=password_hash,
+                initial_password_notice=(
+                    account_notice_parent_password
+                    or account_notice_student_password
+                    or password
+                ),
             )
             parent = parent_result.parent
             parent_password_for_notice = parent_result.password_for_notice
-            parent_user_created = parent_result.user_created
+            parent_credentials_initialized = parent_result.credentials_initialized
 
         user = student_repo.user_create_user(
             username=ps_number,
@@ -151,5 +158,5 @@ def create_student_account(
         parent=parent,
         parent_phone=parent_phone,
         parent_password_for_notice=parent_password_for_notice,
-        parent_user_created=parent_user_created,
+        parent_credentials_initialized=parent_credentials_initialized,
     )

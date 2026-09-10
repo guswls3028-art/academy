@@ -28,6 +28,7 @@ class RepairSharedStudentParentPhonesTests(TestCase):
             tenant=self.tenant,
             parent_phone=phone,
             student_name=f"학생{suffix}",
+            initial_password=f"parent-password-{suffix}",
         ).parent
         user = User.objects.create_user(
             username=user_internal_username(self.tenant, f"CUSTOM-{suffix}"),

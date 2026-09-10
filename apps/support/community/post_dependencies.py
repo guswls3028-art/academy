@@ -8,14 +8,14 @@ from typing import Any, Callable
 def get_request_student(request: Any) -> Any | None:
     from apps.domains.student_app.permissions import get_request_student as _get_request_student
 
-    return _get_request_student(request, require_explicit_parent_child=False)
+    return _get_request_student(request)
 
 
 def get_request_student_for_write(request: Any) -> Any | None:
     """Resolve the exact selected child for a student/parent community write."""
     from apps.domains.student_app.permissions import get_request_student as _get_request_student
 
-    return _get_request_student(request, require_explicit_parent_child=True)
+    return _get_request_student(request)
 
 
 def visible_scope_node_ids_for_students(*, tenant: Any, student_ids: list[int]) -> set[int]:

@@ -5,10 +5,8 @@ import logging
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from rest_framework.views import APIView
-from rest_framework.exceptions import ValidationError
 
 from apps.core.permissions import TenantResolved
-from apps.core.parsing import parse_bool
 from apps.api.common.throttles import AlimtalkEndpointThrottle, StaffPasswordResetThrottle
 from apps.core.models import TenantMembership
 
@@ -81,7 +79,7 @@ class StudentPasswordResetSendView(APIView):
     throttle_classes = [AlimtalkEndpointThrottle]
 
     def get_authenticators(self):
-        """AllowAny이지만 JWT가 있으면 파싱 — staff 판별용 (temp_password/skip_notify)."""
+        """AllowAny이지만 JWT가 있으면 파싱해 staff reset 권한을 판별한다."""
         from apps.core.authentication import TokenVersionJWTAuthentication
 
         return [TokenVersionJWTAuthentication()]
@@ -105,14 +103,6 @@ class StudentPasswordResetSendView(APIView):
             return Response({"detail": "대상을 선택해 주세요. (학생 / 학부모)"}, status=400)
         if not student_name:
             return Response({"detail": "학생 이름을 입력해 주세요."}, status=400)
-
-        try:
-            skip_notify_requested = parse_bool(
-                request.data.get("skip_notify", False),
-                field_name="skip_notify",
-            )
-        except ValidationError as e:
-            return Response(e.detail, status=400)
 
         is_staff_request = _is_staff_password_reset_request(request)
 
@@ -179,7 +169,6 @@ class StudentPasswordResetSendView(APIView):
             message = reset_staff_password(
                 account,
                 temp_password=(request.data.get("temp_password") or "").strip(),
-                skip_notify=skip_notify_requested,
             )
         except AccountRecoveryValidationError as e:
             return Response({"detail": e.detail}, status=400)

@@ -21,7 +21,7 @@ Risk scale:
 | Student schedule hidden state | `StudentSessionClearPastView`, `StudentSessionHideView`, `StudentSessionUnhideView` write `Student.schedule_hidden_*` | Student sessions page | `students.services.update_schedule_visibility` or student-app policy wrapper | Inline mutation in student-app session views | P2 | Student/parent tenant and child selection tests |
 | Student soft delete | `[COMPLETED]` `StudentViewSet.destroy`, `bulk_delete` are compatibility HTTP facades | Admin/teacher delete, E2E cleanup | `students.services.soft_delete_student` plus enrollment/clinic lifecycle hooks | Direct duplicated user/membership/enrollment/clinic side effects removed from student views | P0 | `[DONE]` soft delete state machine, single/bulk routing, enrollment deactivation, clinic cancellation |
 | Student permanent delete | `[COMPLETED ENTRYPOINT]` `bulk_permanent_delete`, `bulk_resolve_conflicts` delete action, purge/deleted duplicate commands are compatibility facades | Deleted students admin cleanup, conflict re-register, E2E cleanup, retention purge | `students.services.permanently_delete_students`; future domain hooks/events for cross-domain cleanup | Raw SQL removed from view/commands. Guarded destructive table graph still lives in student lifecycle service until domain hooks exist | P0 | `[DONE]` tenant isolation, fee/section FK cleanup, command routing, retained-account profile guard, production cleanup QA; `[TODO]` dry-run/domain hook extraction |
-| Parent link/account | `[PARTIAL]` parent account creation now returns password-notice metadata and student creation routes consume it through `students.services.create_student_account` | Student create/edit, signup approval, parent app, account recovery | `parents.services.ensure_parent_account_for_student` for creation/notice; `ensure_parent_for_student` remains compatibility facade | Remaining profile/recovery/restore relink callers still use parent facade; parent phone change/read DTO convergence remains separate | P1 | `[DONE]` new parent notice = phone last 4, existing parent notice = unchanged, restored student does not receive new-password welcome, create roots share account graph; `[TODO]` parent phone change updates relation and linkedStudents |
+| Parent link/account | `[COMPLETED]` explicit creation and lookup-only recovery/restore paths are separated | Staff student create/edit, signup approval, parent app, account recovery | `parents.services.ensure_parent_account_for_student` for explicit creation; `find_parent_account` for reads | Deleted implicit-password facade and bulk password/account commands; student self-service cannot relink Parent | P1 | `[DONE]` direct/fixed or random password only, existing password preservation, login-ID collision denial, selected-child fail-closed coverage, enrollment/video/account notice regression |
 | Password/account recovery | `[SEALED]` `/auth/account-recovery/dispatch/`, `/students/password_reset_send/`, `/students/send_existing_credentials/`; legacy `/students/password_find/request/verify` returns 410 | Auth recovery UI, admin password modal, teacher password modal, signup duplicate flow, E2E password reset | `apps/domains/students/services/account_recovery.py` plus `apps/core/services/password.py` SSOT | Public/duplicate/admin reset paths delegate to account recovery service; OTP 인증번호 path is sealed; account NotificationLog target metadata powers student detail status | P1 | `[DONE]` account recovery/password safety tests, account notification metadata; `[TODO]` production canary after deploy |
 | Registration request approve | `[COMPLETED]` `RegistrationRequestViewSet.approve`, `bulk_approve`, auto-approve inside create are compatibility facades | Signup modal, admin requests page, teacher comms notifications | `students.services.approve_registration_request` | View-owned create/status logic removed; view keeps response shape and nonfatal message dispatch | P1 | `[DONE]` approval contract, auto-approve, duplicate fallback, parent password payload, notification-failure nonrollback |
 | Excel student import | `[COMPLETED]` `/students/bulk_create_from_excel/`, `ExcelParsingService`, legacy `bulk_from_excel` facade | Admin/teacher student Excel upload, AI job status | `students.services.import_students_from_rows` called by student-registration worker | Student creation/password policy is isolated from enrollment Excel; teacher mobile no longer uploads with hidden `0000`/implicit welcome flag | P1 | `[DONE]` job payload contract, row validation, duplicate/restore, welcome flag, local/prod sheet rendering, production worker QA, AlimTalk log success |
@@ -91,6 +91,12 @@ Risk scale:
   compatibility facades. Teacher mobile Excel upload now opens a bottom sheet
   to confirm initial password and welcome AlimTalk flag instead of silently
   uploading with hardcoded `0000`.
+- 2026-09-10: Parent account ownership was completed. Phone-derived and blank
+  password fallbacks, the compatibility ensure facade, bulk account/password
+  commands, and first-child selection fallback were removed. Staff create/edit
+  now supplies an explicit password or verified signup hash, lookup/recovery/
+  restore paths never create accounts, and public login identifiers cannot
+  collide silently across student and parent accounts.
 - 2026-08-23: Lecture/session Excel enrollment was split from the student
   creation/import resolver. It now matches only active students in the current
   tenant by exact student ID first, or by exact name and normalized parent
@@ -214,9 +220,9 @@ Risk scale:
   `TenantMembership` creation. Validation, duplicate/deleted-student policy,
   response shape, and message dispatch intentionally remain at each caller until
   their orchestration contracts are snapshotted. Frontend teacher create now
-  calls the shared student contract, admin Excel upload passes the
-  `send_welcome_message` flag through the worker payload, and the worker parses
-  string booleans explicitly instead of treating `"false"` as truthy.
+  calls the shared student contract. The dead `send_welcome_message` API and
+  worker option was removed; every new account stages one credential notice and
+  the first ACTIVE enrollment owns its dispatch timing.
 - 2026-05-23: Registration approval orchestration converged on
   `apps.domains.students.services.approve_registration_request`. Approve,
   bulk_approve, and auto-approve now share the same row lock, pending-state
@@ -224,9 +230,9 @@ Risk scale:
   student account graph call. Approval notification dispatch remains outside
   the durable transaction and failures are logged without hiding the committed
   approval from the API caller.
-- 2026-05-23: Parent account welcome-password drift reduced. Parent creation
+- 2026-05-23 (superseded by 2026-09-10): Parent account welcome-password drift reduced. Parent creation
   paths now use `ensure_parent_account_for_student()` result metadata, so new
-  parent accounts announce `parent_initial_password(phone)` while existing
+  parent accounts announced the then-current phone-derived password while existing
   parent accounts announce `변경되지 않음`. Student conflict restore no longer
   sends a new-password welcome message because restore does not reset passwords.
 - 2026-05-22: Clinic participant/session/idcard active-student reads moved to

@@ -10,7 +10,7 @@ from apps.core.models import PendingPasswordReset, Tenant, TenantMembership
 from apps.core.models.user import user_internal_username
 from apps.core.views.account_recovery import AccountRecoveryDispatchView
 from apps.domains.parents.models import Parent
-from apps.domains.parents.services import ensure_parent_for_student
+from apps.domains.parents.services import ensure_parent_account_for_student
 from apps.domains.students.models import Student
 
 
@@ -299,6 +299,12 @@ class AccountRecoveryDispatchTests(TestCase):
 
     @patch("apps.domains.messaging.policy.send_alimtalk_via_owner", return_value=True)
     def test_parent_pending_temp_password_login_activates_parent_reset(self, send_mock):
+        ensure_parent_account_for_student(
+            tenant=self.tenant,
+            parent_phone=self.student.parent_phone,
+            student_name=self.student.name,
+            initial_password="existing-parent-password",
+        )
         response = self._post(
             {
                 "mode": "password",
@@ -505,10 +511,11 @@ class AccountRecoveryDispatchTests(TestCase):
 
     @patch("apps.domains.messaging.policy.send_alimtalk_via_owner", return_value=True)
     def test_parent_username_recovery_uses_parent_account(self, send_mock):
-        ensure_parent_for_student(
+        ensure_parent_account_for_student(
             tenant=self.tenant,
             parent_phone=self.student.parent_phone,
             student_name=self.student.name,
+            initial_password="parent-chosen-password",
         )
 
         response = self._post(

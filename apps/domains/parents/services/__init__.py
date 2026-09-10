@@ -1,42 +1,50 @@
 # PATH: apps/domains/parents/services.py
-"""
-학부모 계정 생성/연결 서비스
-- 학생 생성 시 학부모 계정 자동 생성
-- 학부모 ID = 학부모 전화번호
-"""
+"""학부모 계정을 명시적 비밀번호로 만들거나 기존 계정에 연결한다."""
 
 from dataclasses import dataclass
 
-from django.db import IntegrityError, transaction
 from django.contrib.auth import get_user_model
+from django.contrib.auth.hashers import identify_hasher
+from django.db import IntegrityError, transaction
 
+from academy.adapters.db.django import repositories_core as core_repo
 from apps.core.models import TenantMembership
 from ..models import Parent
 
 
-# 과거 정책: 모든 학부모가 동일 비번 "0000" 사용 → 학부모 전화번호만 알면 자녀 성적/출결 전체 열람.
-# 학생 등록에서 초기 비밀번호를 함께 받으면 학생/학부모 계정에 같은 값을 사용한다.
-# 독립 복구/legacy ensure에는 학부모 전화번호 마지막 4자리를 안전한 fallback으로 쓴다.
-PARENT_DEFAULT_PASSWORD = "0000"  # deprecated — 외부 import 호환용 상수. 신규 코드에서는 절대 쓰지 말 것.
-
-
-def parent_initial_password(parent_phone: str) -> str:
-    """학부모 초기 비번 SSOT — 정규화된 휴대번호의 마지막 4자리."""
+def normalize_parent_phone(parent_phone: str) -> str:
     digits = "".join(ch for ch in str(parent_phone or "") if ch.isdigit())
     if len(digits) != 11 or not digits.startswith("010"):
         raise ValueError("학부모 휴대번호를 010 11자리로 입력해 주세요.")
-    return digits[-4:]
+    return digits
+
+
+def _assert_parent_login_identity_available(
+    *,
+    tenant,
+    phone: str,
+    user_id: int | None = None,
+) -> None:
+    conflicts = [
+        user
+        for user in core_repo.user_list_by_tenant_login_identifier(tenant, phone)
+        if user.id != user_id
+    ]
+    if conflicts:
+        raise ValueError(
+            "학부모 전화번호가 다른 계정의 로그인 아이디로 사용 중입니다."
+        )
 
 
 @dataclass(frozen=True)
 class ParentAccountEnsureResult:
     parent: Parent
-    user_created: bool
-    initial_password: str | None
+    credentials_initialized: bool
+    password_notice: str | None
 
     @property
     def password_for_notice(self) -> str:
-        return self.initial_password or "변경되지 않음"
+        return self.password_notice or "변경되지 않음"
 
 
 def ensure_parent_account_for_student(
@@ -45,17 +53,28 @@ def ensure_parent_account_for_student(
     parent_phone: str,
     student_name: str,
     initial_password: str | None = None,
+    initial_password_hash: str | None = None,
+    initial_password_notice: str | None = None,
 ) -> ParentAccountEnsureResult:
     """
-    학부모 전화번호로 Parent 조회 또는 생성
-    - 없으면 User + Parent + TenantMembership 생성
-    - 있으면 기존 Parent 반환 (User 없으면 생성)
+    학부모 전화번호로 기존 계정을 찾거나 명시적 자격 증명으로 새 계정을 만든다.
+
+    사용 가능한 기존 계정의 비밀번호는 절대 변경하지 않는다. 새 User를 만들거나
+    비밀번호가 없는 미완성 계정을 복구할 때만 호출자가 입력한 초기 비밀번호 또는
+    가입 신청의 검증된 비밀번호 hash를 사용한다.
     """
-    parent_phone = "".join(ch for ch in str(parent_phone or "") if ch.isdigit())
-    fallback_pw = parent_initial_password(parent_phone)
-    initial_pw = str(initial_password or fallback_pw)
-    if len(initial_pw) < 4:
+    parent_phone = normalize_parent_phone(parent_phone)
+    initial_pw = str(initial_password or "")
+    password_hash = str(initial_password_hash or "")
+    password_notice = str(initial_password_notice or initial_pw)
+    if initial_pw and password_hash:
+        raise ValueError("학부모 초기 비밀번호와 비밀번호 해시는 함께 입력할 수 없습니다.")
+    if initial_pw and len(initial_pw) < 4:
         raise ValueError("학부모 초기 비밀번호는 4자 이상이어야 합니다.")
+    if password_hash:
+        identify_hasher(password_hash)
+        if not password_notice:
+            raise ValueError("학부모 계정 안내값이 필요합니다.")
 
     User = get_user_model()
     # tenant 내 유일한 학부모 식별: username = p_{tenant_id}_{phone}
@@ -73,6 +92,26 @@ def ensure_parent_account_for_student(
                     .first()
                 )
                 if parent and parent.user_id:
+                    _assert_parent_login_identity_available(
+                        tenant=tenant,
+                        phone=parent_phone,
+                        user_id=parent.user_id,
+                    )
+                    if not parent.user.is_active:
+                        raise ValueError("비활성화된 학부모 계정입니다. 계정 복구 후 다시 시도해 주세요.")
+                    credentials_initialized = False
+                    if not parent.user.has_usable_password():
+                        if not initial_pw and not password_hash:
+                            raise ValueError(
+                                "학부모 계정을 사용하려면 초기 비밀번호를 입력해 주세요."
+                            )
+                        if password_hash:
+                            parent.user.password = password_hash
+                        else:
+                            parent.user.set_password(initial_pw)
+                        parent.user.must_change_password = True
+                        parent.user.save(update_fields=["password", "must_change_password"])
+                        credentials_initialized = True
                     TenantMembership.ensure_active(
                         tenant=tenant,
                         user=parent.user,
@@ -80,8 +119,8 @@ def ensure_parent_account_for_student(
                     )
                     return ParentAccountEnsureResult(
                         parent=parent,
-                        user_created=False,
-                        initial_password=None,
+                        credentials_initialized=credentials_initialized,
+                        password_notice=password_notice if credentials_initialized else None,
                     )
 
                 user = (
@@ -89,8 +128,15 @@ def ensure_parent_account_for_student(
                     .filter(username=parent_username)
                     .first()
                 )
-                user_created = user is None
                 if user is None:
+                    if not initial_pw and not password_hash:
+                        raise ValueError(
+                            "새 학부모 계정을 만들려면 초기 비밀번호를 입력해 주세요."
+                        )
+                    _assert_parent_login_identity_available(
+                        tenant=tenant,
+                        phone=parent_phone,
+                    )
                     user_name = (parent.name if parent else "") or f"{student_name} 학부모"
                     user = User.objects.create_user(
                         username=parent_username,
@@ -98,11 +144,30 @@ def ensure_parent_account_for_student(
                         name=user_name,
                         tenant=tenant,
                     )
-                    user.set_password(initial_pw)
-                    user.must_change_password = True
-                    user.save()
                 elif user.tenant_id != tenant.id:
                     raise ValueError("학부모 계정의 테넌트가 일치하지 않습니다.")
+                else:
+                    _assert_parent_login_identity_available(
+                        tenant=tenant,
+                        phone=parent_phone,
+                        user_id=user.id,
+                    )
+
+                if not user.is_active:
+                    raise ValueError("비활성화된 학부모 계정입니다. 계정 복구 후 다시 시도해 주세요.")
+                credentials_initialized = False
+                if not user.has_usable_password():
+                    if not initial_pw and not password_hash:
+                        raise ValueError(
+                            "학부모 계정을 사용하려면 초기 비밀번호를 입력해 주세요."
+                        )
+                    if password_hash:
+                        user.password = password_hash
+                    else:
+                        user.set_password(initial_pw)
+                    user.must_change_password = True
+                    user.save(update_fields=["password", "must_change_password"])
+                    credentials_initialized = True
 
                 if parent is None:
                     parent = Parent.objects.create(
@@ -122,8 +187,8 @@ def ensure_parent_account_for_student(
                 )
                 return ParentAccountEnsureResult(
                     parent=parent,
-                    user_created=user_created,
-                    initial_password=initial_pw if user_created else None,
+                    credentials_initialized=credentials_initialized,
+                    password_notice=password_notice if credentials_initialized else None,
                 )
         except IntegrityError:
             if attempt:
@@ -132,15 +197,22 @@ def ensure_parent_account_for_student(
     raise RuntimeError("학부모 계정을 생성하지 못했습니다.")
 
 
-def ensure_parent_for_student(
-    *,
-    tenant,
-    parent_phone: str,
-    student_name: str,
-) -> Parent:
-    """Compatibility facade. New notification paths should use the result object."""
-    return ensure_parent_account_for_student(
-        tenant=tenant,
-        parent_phone=parent_phone,
-        student_name=student_name,
-    ).parent
+def find_parent_account(*, tenant, parent_phone: str) -> Parent | None:
+    """Return an existing tenant-scoped parent account without creating one."""
+    phone = normalize_parent_phone(parent_phone)
+    return (
+        Parent.objects.filter(tenant=tenant, phone=phone)
+        .select_related("user")
+        .first()
+    )
+
+
+def parent_account_needs_password(*, tenant, parent_phone: str) -> bool:
+    """Return whether this identity lacks usable credentials and needs an explicit password."""
+    phone = normalize_parent_phone(parent_phone)
+    parent = find_parent_account(tenant=tenant, parent_phone=phone)
+    if parent and parent.user_id:
+        return not parent.user.has_usable_password()
+    username = f"p_{tenant.id}_{phone}"
+    user = get_user_model().objects.filter(tenant=tenant, username=username).first()
+    return user is None or not user.has_usable_password()

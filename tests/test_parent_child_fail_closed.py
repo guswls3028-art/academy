@@ -6,6 +6,7 @@ from django.test import TestCase
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.test import APIRequestFactory, force_authenticate
 
+from academy.application.use_cases.student_video_access_context import get_students_for_request
 from apps.core.models import Tenant, TenantMembership
 from apps.core.models.user import user_internal_username
 from apps.domains.clinic.models import SessionParticipant
@@ -114,6 +115,18 @@ class ParentChildSelectionCrossDomainTests(TestCase):
                             META={"HTTP_X_STUDENT_ID": str(raw_student_id)},
                         )
                     )
+
+    def test_parent_without_child_header_never_falls_back(self):
+        request = SimpleNamespace(
+            user=self.parent_user,
+            tenant=self.tenant,
+            META={},
+        )
+
+        with self.assertRaises(PermissionDenied):
+            get_request_student(request)
+        with self.assertRaises(PermissionDenied):
+            get_students_for_request(request)
 
     @patch("apps.domains.submissions.views.submission_view.dispatch_submission")
     @patch("apps.domains.submissions.services.dispatcher.dispatch_submission")

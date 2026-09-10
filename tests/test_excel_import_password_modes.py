@@ -12,6 +12,7 @@ from apps.domains.lectures.models import Lecture
 from apps.domains.students.models import Student
 from apps.domains.students.services.account_notice import _decrypt
 from apps.domains.students.services import (
+    StudentImportPasswordError,
     import_students_from_rows,
 )
 
@@ -24,104 +25,25 @@ class StudentExcelImportPasswordModeTests(TestCase):
             is_active=True,
         )
 
-    @patch("apps.domains.messaging.services.send_welcome_messages")
-    def test_phone_last4_stages_each_created_student_password_until_enrollment(self, send_mock):
-        result = import_students_from_rows(
-            tenant_id=self.tenant.id,
-            students_data=[
-                {
-                    "name": "학생하나",
-                    "parent_phone": "01070001111",
-                    "phone": "01090001234",
-                    "school_type": "HIGH",
-                    "grade": 1,
-                    "uses_identifier": False,
-                },
-                {
-                    "name": "학생둘",
-                    "parent_phone": "01070002222",
-                    "phone": "01090005678",
-                    "school_type": "HIGH",
-                    "grade": 2,
-                    "uses_identifier": False,
-                },
-            ],
-            initial_password="",
-            password_mode="phone_last4",
-        )
+    def test_phone_last4_mode_is_rejected_without_creating_accounts(self):
+        with self.assertRaisesRegex(StudentImportPasswordError, "fixed 또는 random"):
+            import_students_from_rows(
+                tenant_id=self.tenant.id,
+                students_data=[
+                    {
+                        "name": "폐기정책학생",
+                        "parent_phone": "01070001111",
+                        "phone": "01090001234",
+                        "school_type": "HIGH",
+                        "grade": 1,
+                        "uses_identifier": False,
+                    }
+                ],
+                initial_password="",
+                password_mode="phone_last4",
+            )
 
-        self.assertEqual(result["created"], 2)
-        first = Student.objects.get(tenant=self.tenant, name="학생하나")
-        second = Student.objects.get(tenant=self.tenant, name="학생둘")
-        self.assertTrue(first.user.check_password("1234"))
-        self.assertTrue(second.user.check_password("5678"))
-        self.assertTrue(first.user.must_change_password)
-        self.assertTrue(second.user.must_change_password)
-        send_mock.assert_not_called()
-        self.assertEqual(
-            _decrypt(first.pending_account_notice_student_password_ciphertext),
-            "1234",
-        )
-        self.assertEqual(
-            _decrypt(second.pending_account_notice_student_password_ciphertext),
-            "5678",
-        )
-        self.assertNotIn("credentials", result)
-
-    def test_phone_last4_skips_invalid_row_and_creates_valid_student(self):
-        result = import_students_from_rows(
-            tenant_id=self.tenant.id,
-            students_data=[
-                {
-                    "name": "번호없는학생",
-                    "parent_phone": "01070003333",
-                    "phone": None,
-                    "school_type": "HIGH",
-                    "grade": 1,
-                    "uses_identifier": True,
-                },
-                {
-                    "name": "번호있는학생",
-                    "parent_phone": "01070004444",
-                    "phone": "01090004321",
-                    "school_type": "HIGH",
-                    "grade": 1,
-                    "uses_identifier": False,
-                },
-            ],
-            initial_password="",
-            password_mode="phone_last4",
-        )
-
-        self.assertEqual(result["created"], 1)
-        self.assertEqual(result["failed"][0]["row"], 1)
-        self.assertIn("학생 전화번호가 없어", result["failed"][0]["error"])
-        self.assertFalse(Student.objects.filter(tenant=self.tenant, name="번호없는학생").exists())
-        student = Student.objects.get(tenant=self.tenant, name="번호있는학생")
-        self.assertTrue(student.user.check_password("4321"))
-
-    def test_phone_last4_treats_matching_parent_phone_as_missing_student_phone(self):
-        result = import_students_from_rows(
-            tenant_id=self.tenant.id,
-            students_data=[
-                {
-                    "name": "동일번호학생",
-                    "parent_phone": "01070003333",
-                    "phone": "01070003333",
-                    "school_type": "HIGH",
-                    "grade": 1,
-                    "uses_identifier": False,
-                }
-            ],
-            initial_password="",
-            password_mode="phone_last4",
-        )
-
-        self.assertEqual(result["created"], 0)
-        self.assertIn("학생 전화번호가 없어", result["failed"][0]["error"])
-        self.assertFalse(
-            Student.objects.filter(tenant=self.tenant, name="동일번호학생").exists()
-        )
+        self.assertFalse(Student.objects.filter(tenant=self.tenant).exists())
 
     @patch("apps.domains.messaging.services.send_welcome_messages")
     @patch("apps.domains.students.services.import_passwords.secrets.randbelow", return_value=42)
@@ -147,20 +69,20 @@ class StudentExcelImportPasswordModeTests(TestCase):
         )
 
         student = Student.objects.get(tenant=self.tenant, name="랜덤학생")
-        self.assertTrue(student.user.check_password("0042"))
+        self.assertTrue(student.user.check_password("000042"))
         self.assertTrue(student.user.must_change_password)
         self.assertEqual(
             result["credentials"],
             [{
                 "name": "랜덤학생",
                 "login_id": student.ps_number,
-                "password": "0042",
+                "password": "000042",
             }],
         )
         send_mock.assert_not_called()
         self.assertEqual(
             _decrypt(student.pending_account_notice_student_password_ciphertext),
-            "0042",
+            "000042",
         )
 
     @patch(
@@ -189,8 +111,8 @@ class StudentExcelImportPasswordModeTests(TestCase):
                     "uses_identifier": False,
                 }
             ],
-            initial_password="",
-            password_mode="phone_last4",
+            initial_password="teacher-selected-password",
+            password_mode="fixed",
         )
 
         with self.captureOnCommitCallbacks(execute=True):
@@ -210,8 +132,11 @@ class StudentExcelImportPasswordModeTests(TestCase):
             )
 
         student = Student.objects.get(tenant=self.tenant, name="강의등록학생")
-        self.assertTrue(student.user.check_password("8765"))
+        self.assertTrue(student.user.check_password("teacher-selected-password"))
         self.assertEqual(result["created_students_count"], 0)
         self.assertEqual(result["enrolled_count"], 1)
         send_welcome.assert_called_once()
-        self.assertEqual(send_welcome.call_args.kwargs["student_password"], "8765")
+        self.assertEqual(
+            send_welcome.call_args.kwargs["student_password"],
+            "teacher-selected-password",
+        )

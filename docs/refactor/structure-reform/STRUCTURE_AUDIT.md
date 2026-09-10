@@ -131,11 +131,12 @@ creation/restoration and 4 roots for password/account recovery.
 - Frontend admin `updateStudent` with `noPhone` sends a synthetic phone and
   `omr_code`, while backend treats `omr_code` as read-only on update and computes
   it from phone/parent phone.
-- Parent password meaning drift has been reduced: `parents.services` creates
-  parent initial password from the last 4 digits, and active student create
-  roots now pass the returned notice value through welcome/approval messaging.
-  Remaining risk is in future parent relink/read DTO work, not duplicated
-  create-time password constants.
+- Parent password meaning is now explicit: new parent users require a staff-entered
+  password or the validated registration-request password hash. Existing parent
+  passwords are never replaced during create, restore, relink, or import. Phone-tail
+  derivation, compatibility ensure commands, and hidden account creation were removed.
+  Parent relink and missing-account repair return explicit state and require successful
+  account-notice delivery before their transaction can commit.
 
 Required report statement: this field is used as backend meaning A and frontend
 meaning B in multiple places. `uses_identifier/no_phone/omr_code` is the clearest

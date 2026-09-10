@@ -570,7 +570,12 @@ class TestParentCommunityReadOnly(CommunityHardeningFixture):
         view = ScopeNodeViewSet.as_view({"get": "list"})
 
         parent_response = view(
-            self._request("get", self.parent_user, "/api/v1/community/scope-nodes/")
+            self._request(
+                "get",
+                self.parent_user,
+                "/api/v1/community/scope-nodes/",
+                HTTP_X_STUDENT_ID=str(self.student.id),
+            )
         )
         student_response = view(
             self._request("get", self.student_user, "/api/v1/community/scope-nodes/")
@@ -597,7 +602,12 @@ class TestParentCommunityReadOnly(CommunityHardeningFixture):
     def test_parent_board_list_and_counts_follow_child_enrollments(self):
         board = PostViewSet.as_view({"get": "board"})
         response = board(
-            self._request("get", self.parent_user, "/api/v1/community/posts/board/?page_size=20")
+            self._request(
+                "get",
+                self.parent_user,
+                "/api/v1/community/posts/board/?page_size=20",
+                HTTP_X_STUDENT_ID=str(self.student.id),
+            )
         )
 
         self.assertEqual(response.status_code, 200)
@@ -607,7 +617,12 @@ class TestParentCommunityReadOnly(CommunityHardeningFixture):
 
         counts = PostViewSet.as_view({"get": "counts"})
         response = counts(
-            self._request("get", self.parent_user, "/api/v1/community/posts/counts/?post_type=board")
+            self._request(
+                "get",
+                self.parent_user,
+                "/api/v1/community/posts/counts/?post_type=board",
+                HTTP_X_STUDENT_ID=str(self.student.id),
+            )
         )
 
         self.assertEqual(response.status_code, 200)
@@ -741,6 +756,11 @@ class TestParentCommunityReadOnly(CommunityHardeningFixture):
                         "get",
                         user,
                         f"/api/v1/community/posts/counts/?post_type={post_type}",
+                        **(
+                            {"HTTP_X_STUDENT_ID": str(self.student.id)}
+                            if user == self.parent_user
+                            else {}
+                        ),
                     )
                 )
                 self.assertEqual(response.status_code, 200)
@@ -804,7 +824,12 @@ class TestParentCommunityReadOnly(CommunityHardeningFixture):
 
         list_view = PostViewSet.as_view({"get": "list"})
         response = list_view(
-            self._request("get", self.parent_user, "/api/v1/community/posts/?post_type=qna&page_size=100")
+            self._request(
+                "get",
+                self.parent_user,
+                "/api/v1/community/posts/?post_type=qna&page_size=100",
+                HTTP_X_STUDENT_ID=str(self.student.id),
+            )
         )
         self.assertEqual(response.status_code, 200)
         rows = response.data.get("results", response.data) if isinstance(response.data, dict) else response.data
@@ -815,21 +840,36 @@ class TestParentCommunityReadOnly(CommunityHardeningFixture):
         retrieve = PostViewSet.as_view({"get": "retrieve"})
         self.assertEqual(
             retrieve(
-                self._request("get", self.parent_user, f"/api/v1/community/posts/{qna.id}/"),
+                self._request(
+                    "get",
+                    self.parent_user,
+                    f"/api/v1/community/posts/{qna.id}/",
+                    HTTP_X_STUDENT_ID=str(self.student.id),
+                ),
                 pk=qna.id,
             ).status_code,
             200,
         )
         self.assertEqual(
             retrieve(
-                self._request("get", self.parent_user, f"/api/v1/community/posts/{counsel.id}/"),
+                self._request(
+                    "get",
+                    self.parent_user,
+                    f"/api/v1/community/posts/{counsel.id}/",
+                    HTTP_X_STUDENT_ID=str(self.student.id),
+                ),
                 pk=counsel.id,
             ).status_code,
             200,
         )
         self.assertEqual(
             retrieve(
-                self._request("get", self.parent_user, f"/api/v1/community/posts/{other_qna.id}/"),
+                self._request(
+                    "get",
+                    self.parent_user,
+                    f"/api/v1/community/posts/{other_qna.id}/",
+                    HTTP_X_STUDENT_ID=str(self.student.id),
+                ),
                 pk=other_qna.id,
             ).status_code,
             404,
@@ -837,7 +877,12 @@ class TestParentCommunityReadOnly(CommunityHardeningFixture):
 
         replies = PostViewSet.as_view({"get": "replies"})
         response = replies(
-            self._request("get", self.parent_user, f"/api/v1/community/posts/{qna.id}/replies/"),
+            self._request(
+                "get",
+                self.parent_user,
+                f"/api/v1/community/posts/{qna.id}/replies/",
+                HTTP_X_STUDENT_ID=str(self.student.id),
+            ),
             pk=qna.id,
         )
         self.assertEqual(response.status_code, 200)
@@ -868,6 +913,7 @@ class TestParentCommunityReadOnly(CommunityHardeningFixture):
                     self.parent_user,
                     f"/api/v1/community/posts/{self.visible_post.id}/replies/",
                     {"content": "parent reply"},
+                    HTTP_X_STUDENT_ID=str(self.student.id),
                 ),
                 {"pk": self.visible_post.id},
             ),
@@ -878,6 +924,7 @@ class TestParentCommunityReadOnly(CommunityHardeningFixture):
                     self.parent_user,
                     f"/api/v1/community/posts/{self.visible_post.id}/replies/{reply.id}/",
                     {"content": "edited"},
+                    HTTP_X_STUDENT_ID=str(self.student.id),
                 ),
                 {"pk": self.visible_post.id, "reply_id": reply.id},
             ),
@@ -887,6 +934,7 @@ class TestParentCommunityReadOnly(CommunityHardeningFixture):
                     "delete",
                     self.parent_user,
                     f"/api/v1/community/posts/{self.visible_post.id}/replies/{reply.id}/",
+                    HTTP_X_STUDENT_ID=str(self.student.id),
                 ),
                 {"pk": self.visible_post.id, "reply_id": reply.id},
             ),
@@ -898,6 +946,7 @@ class TestParentCommunityReadOnly(CommunityHardeningFixture):
                     f"/api/v1/community/posts/{self.visible_post.id}/attachments/",
                     {"files": [SimpleUploadedFile("parent.pdf", b"%PDF-", content_type="application/pdf")]},
                     format="multipart",
+                    HTTP_X_STUDENT_ID=str(self.student.id),
                 ),
                 {"pk": self.visible_post.id},
             ),
@@ -907,6 +956,7 @@ class TestParentCommunityReadOnly(CommunityHardeningFixture):
                     "delete",
                     self.parent_user,
                     f"/api/v1/community/posts/{self.visible_post.id}/attachments/{attachment.id}/",
+                    HTTP_X_STUDENT_ID=str(self.student.id),
                 ),
                 {"pk": self.visible_post.id, "att_id": attachment.id},
             ),
@@ -923,7 +973,12 @@ class TestParentCommunityReadOnly(CommunityHardeningFixture):
     def test_parent_cannot_like_or_report(self):
         like = PostViewSet.as_view({"post": "like"})
         response = like(
-            self._request("post", self.parent_user, f"/api/v1/community/posts/{self.visible_post.id}/like/"),
+            self._request(
+                "post",
+                self.parent_user,
+                f"/api/v1/community/posts/{self.visible_post.id}/like/",
+                HTTP_X_STUDENT_ID=str(self.student.id),
+            ),
             pk=self.visible_post.id,
         )
         self.assertEqual(response.status_code, 403)
@@ -936,6 +991,7 @@ class TestParentCommunityReadOnly(CommunityHardeningFixture):
                 self.parent_user,
                 f"/api/v1/community/posts/{self.visible_post.id}/report/",
                 {"reason": CommunityReport.REASON_OTHER},
+                HTTP_X_STUDENT_ID=str(self.student.id),
             ),
             pk=self.visible_post.id,
         )
