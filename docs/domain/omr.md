@@ -194,6 +194,25 @@ submission의 저장된 DONE 결과에 답안이 있고 기존 답안이 없으�
 확정한 뒤 진행도와 수업 분석을 갱신한다. 수동 검토 표시가 있는 OMR만 DRAFT를
 유지한다.
 
+### 5분 상태 복구 안전 계약
+
+EventBridge 규칙 `academy-v1-recover-stuck-omr`은 5분마다
+`recover_stuck_omr_submissions`를 실행한다. `SUBMITTED`, `DISPATCHED`,
+`EXTRACTING`, `GRADING`에서 상태별 timeout을 넘긴 OMR만 실패 복구 후보이며,
+탐지는 read-only다.
+
+복구는 후보 조회 결과를 그대로 신뢰하지 않는다. 각 Submission row를 잠근 뒤
+현재 상태와 탐지 당시 상태, `source=omr_scan`, 탐지 당시 `updated_at` 버전,
+현재 상태에 해당하는 cutoff를 한 번 더 모두 확인한다. 후보 조회 뒤 워커가
+heartbeat를 남기거나 다음 상태로 진행해 이 중 하나라도 달라졌으면 그 실행은
+skip하고, 다음 5분 실행이 새 상태와 버전으로 다시 판단한다. 따라서 늦게 row lock을
+얻은 recovery가 살아 있는 worker 상태를 `FAILED`로 덮어쓰지 않는다.
+
+`DONE`과 기존 `FAILED`는 이 recovery의 후보가 아니므로 변경하지 않는다. 동일한
+EventBridge 실행이 반복되어도 첫 성공만 `meta.state_recovery`를 기록하고 후속 실행은
+같은 Submission을 다시 전이하지 않는다. 실제 실패 복구는
+`stuck:<status>_timeout`과 actor를 기록해 기존 retry lifecycle로만 재처리한다.
+
 단일정답 문항에서 워커가 강한 복수마킹을 `status=ok, marking=multi`로 보내더라도
 정답과 완전히 일치하는 다중정답 키가 아니면 `ANSWER_SCORE_AMBIGUOUS`로 검토를
 요구한다. 재채점은 DONE 제출을 `ANSWERS_READY`로 되돌리는 데서 끝나지 않고
@@ -341,6 +360,7 @@ HTTPS 로고를 PDF 서버가 가져오지 못하면 `renderer/logos/{tenant.cod
 
 | 버전 | 날짜 | 변경 |
 |------|------|------|
+| v17.4 | 2026-09-07 | 5분 stale recovery가 탐지 후 worker heartbeat/상태 전이를 덮지 않도록 row lock 획득 시 상태·source·상태별 cutoff·탐지 `updated_at` 버전을 모두 재검사. DONE/FAILED 불변과 반복 실행 멱등성을 PostgreSQL barrier 및 command 회귀로 고정. |
 | v17.3 | 2026-09-07 | 종료된 시험의 종이 OMR도 교사가 미식별 학생을 확정하고 재채점할 수 있도록 온라인 응시 시간창과 사후 OMR 채점 경계를 분리. 학생 온라인 응시 시간, tenant, 대상자, 재응시, 중복 보호는 유지하고 예상 밖 재채점 실패는 원자 rollback과 운영 로그 및 재시도 가능한 안내를 제공. |
 | v17.2 | 2026-08-30 | 이미 연결된 fuzzy match를 답안 변경 없이 현재 학생으로 확정하는 OMR 검토 동작을 추가. 객관식 전용 수기 결과가 OMR의 학생·문항·답안·정오·점수와 완전히 같을 때만 기존 attempt를 원자적으로 연결하며, 불일치·혼합형은 기존 재응시 보호로 fail-closed. |
 | v17.1 | 2026-08-30 | OMR의 미사용 0~999 숫자 버블을 제거하고 모든 비객관식 문항을 번호가 붙은 서술형 빈 작성칸으로 통일. 종이 OMR AI 인식·자동판정은 객관식만 수행하며 기존 답안키/성적 데이터와 온라인 숫자 단답 자동채점은 유지. |

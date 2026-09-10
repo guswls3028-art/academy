@@ -15,14 +15,14 @@ GRADING 중 어느 단계에서든 30 분 이상 진행이 안 되면 hung 으�
     다시 dispatch 가능.
 
 호출:
-- cron / EventBridge 에서 `python manage.py recover_stuck_omr_submissions` 매분.
+- cron / EventBridge 에서 `python manage.py recover_stuck_omr_submissions` 5분마다.
 - 운영 점검 시 same command --dry-run 으로 detect 만.
 """
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from django.db import transaction
 from django.utils import timezone
@@ -55,6 +55,7 @@ class StuckSubmissionAlert:
     tenant_id: int
     target_type: str
     target_id: int
+    updated_at: datetime
 
 
 @dataclass
@@ -103,6 +104,7 @@ def detect_stuck_submissions(
                     tenant_id=int(s.tenant_id or 0),
                     target_type=str(s.target_type),
                     target_id=int(s.target_id or 0),
+                    updated_at=s.updated_at,
                 )
             )
     return out
@@ -134,20 +136,27 @@ def recover_stuck_submissions(
             )
         return report
 
-    now_iso = timezone.now().isoformat()
-    eligible_statuses = set((timeouts or RECOVERY_TIMEOUTS_MIN).keys())
+    recovery_now = timezone.now()
+    now_iso = recovery_now.isoformat()
+    active_timeouts = timeouts if timeouts is not None else RECOVERY_TIMEOUTS_MIN
 
     for alert in detected:
+        timeout_minutes = active_timeouts.get(alert.status)
+        if timeout_minutes is None:
+            report.skipped.append(alert.submission_id)
+            continue
+        cutoff = recovery_now - timedelta(minutes=int(timeout_minutes))
         try:
             with transaction.atomic():
                 try:
                     sub = Submission.objects.select_for_update().get(
-                        id=alert.submission_id
+                        id=alert.submission_id,
+                        status=alert.status,
+                        source=source,
+                        updated_at=alert.updated_at,
+                        updated_at__lt=cutoff,
                     )
                 except Submission.DoesNotExist:
-                    report.skipped.append(alert.submission_id)
-                    continue
-                if sub.status not in eligible_statuses:
                     report.skipped.append(alert.submission_id)
                     continue
                 try:

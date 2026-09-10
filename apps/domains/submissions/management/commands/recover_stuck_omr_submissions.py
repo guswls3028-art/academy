@@ -1,7 +1,7 @@
 """
 OMR pipeline state recovery management command.
 
-매분 cron / EventBridge 에서 호출. 30 분 이상 SUBMITTED / DISPATCHED /
+5분마다 cron / EventBridge 에서 호출. 30 분 이상 SUBMITTED / DISPATCHED /
 EXTRACTING / GRADING 에 박혀있는 OMR submission 을 FAILED 로 자동 전환하고
 운영 알람용 audit 로깅을 남긴다.
 
