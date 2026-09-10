@@ -560,7 +560,7 @@ class FeeOverdueView(APIView):
 def _resolve_student_or_children(request, tenant):
     """
     학생: 본인 student.
-    학부모: 선택된 자녀(X-Student-Id), 없으면 기본 자녀.
+    학부모: X-Student-Id로 명시한 활성 연결 자녀. 누락·오류 시 실패 폐쇄.
     어느 쪽도 아니면 None.
     """
     student = get_request_student(request)

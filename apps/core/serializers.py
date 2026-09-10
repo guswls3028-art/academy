@@ -11,8 +11,6 @@ User = get_user_model()
 
 class UserSerializer(serializers.ModelSerializer):
     tenantRole = serializers.SerializerMethodField()
-    linkedStudentId = serializers.SerializerMethodField()
-    linkedStudentName = serializers.SerializerMethodField()
     linkedStudents = serializers.SerializerMethodField()
     first_login_guide_required = serializers.SerializerMethodField()
 
@@ -26,100 +24,49 @@ class UserSerializer(serializers.ModelSerializer):
             "is_staff",
             "is_superuser",
             "tenantRole",
-            "linkedStudentId",
-            "linkedStudentName",
             "linkedStudents",
             "must_change_password",
             "first_login_guide_required",
         ]
 
     def get_tenantRole(self, user):
-        try:
-            request = self.context.get("request")
-            tenant = getattr(request, "tenant", None)
-            if not tenant:
-                return None
-            membership = core_repo.membership_get(tenant=tenant, user=user, is_active=True)
-            return membership.role if membership else None
-        except Exception:
+        request = self.context.get("request")
+        tenant = getattr(request, "tenant", None)
+        if not tenant:
             return None
-
-    def get_linkedStudentId(self, user):
-        """학부모(role=parent)일 때 연결된 학생 ID (첫 번째)"""
-        try:
-            request = self.context.get("request")
-            tenant = getattr(request, "tenant", None)
-            if not tenant:
-                return None
-            membership = core_repo.membership_get(tenant=tenant, user=user, is_active=True)
-            if not membership or membership.role != "parent":
-                return None
-            parent = core_repo.parent_get_by_user(user)
-            if not parent or parent.tenant_id != tenant.id:
-                return None
-            first_student = parent.students.filter(
-                tenant=tenant,
-                deleted_at__isnull=True,
-            ).first()
-            return first_student.id if first_student else None
-        except Exception:
-            return None
-
-    def get_linkedStudentName(self, user):
-        """학부모일 때 연결된 첫 학생 이름. 표시용 '{name} 학생 학부모님'"""
-        try:
-            request = self.context.get("request")
-            tenant = getattr(request, "tenant", None)
-            if not tenant:
-                return None
-            membership = core_repo.membership_get(tenant=tenant, user=user, is_active=True)
-            if not membership or membership.role != "parent":
-                return None
-            parent = core_repo.parent_get_by_user(user)
-            if not parent or parent.tenant_id != tenant.id:
-                return None
-            first_student = parent.students.filter(
-                tenant=tenant,
-                deleted_at__isnull=True,
-            ).first()
-            return (first_student.name or "").strip() if first_student else None
-        except Exception:
-            return None
+        membership = core_repo.membership_get(tenant=tenant, user=user, is_active=True)
+        return membership.role if membership else None
 
     def get_linkedStudents(self, user):
         """학부모일 때 연결된 자녀 목록 (삭제되지 않은 학생만). [{ id, name }, ...]"""
-        try:
-            request = self.context.get("request")
-            tenant = getattr(request, "tenant", None)
-            if not tenant:
-                return None
-            membership = core_repo.membership_get(tenant=tenant, user=user, is_active=True)
-            if not membership or membership.role != "parent":
-                return None
-            parent = core_repo.parent_get_by_user(user)
-            if not parent or parent.tenant_id != tenant.id:
-                return None
-            students = list(
-                parent.students.filter(
-                    tenant=tenant,
-                    deleted_at__isnull=True,
-                ).values_list("id", "name")
-            )
-            return [{"id": sid, "name": (name or "").strip() or "학생"} for sid, name in students]
-        except Exception:
+        request = self.context.get("request")
+        tenant = getattr(request, "tenant", None)
+        if not tenant:
             return None
+        membership = core_repo.membership_get(tenant=tenant, user=user, is_active=True)
+        if not membership or membership.role != "parent":
+            return None
+        parent = core_repo.parent_get_by_user(user)
+        if not parent or parent.tenant_id != tenant.id:
+            return None
+        students = list(
+            parent.students.filter(
+                tenant=tenant,
+                deleted_at__isnull=True,
+            )
+            .order_by("id")
+            .values_list("id", "name")
+        )
+        return [{"id": sid, "name": (name or "").strip() or "학생"} for sid, name in students]
 
     def get_first_login_guide_required(self, user):
         """현재 테넌트의 활성 계정이 첫 접속 안내를 아직 확인하지 않았는지 반환."""
-        try:
-            request = self.context.get("request")
-            tenant = getattr(request, "tenant", None)
-            if not tenant:
-                return False
-            membership = core_repo.membership_get(tenant=tenant, user=user, is_active=True)
-            return bool(membership and user.first_login_guide_completed_at is None)
-        except Exception:
+        request = self.context.get("request")
+        tenant = getattr(request, "tenant", None)
+        if not tenant:
             return False
+        membership = core_repo.membership_get(tenant=tenant, user=user, is_active=True)
+        return bool(membership and user.first_login_guide_completed_at is None)
 
 
 class ProgramPublicSerializer(serializers.ModelSerializer):

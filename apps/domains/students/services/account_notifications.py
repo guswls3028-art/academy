@@ -173,7 +173,7 @@ def send_parent_password_changed_notice(*, parent: Any, password: str, student: 
     if not parent_phone:
         logger.info("parent password notice skipped: no recipient parent_id=%s", getattr(parent, "id", None))
         return False
-    linked_student = student or parent.students.filter(deleted_at__isnull=True).order_by("-id").first()
+    linked_student = student
     student_name = getattr(linked_student, "name", "") or ""
     parent_username = user_display_username(getattr(parent, "user", None)) or parent_phone
     replacements = {
