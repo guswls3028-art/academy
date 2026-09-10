@@ -21,9 +21,14 @@
 - 공용 `문제 신고` 모달 접수
 - 관리자·선생님 개발자 메뉴의 `[BUG]` 제보
 
-운영 알림 채널은 Slack webhook 하나다. `DEV_ALERTS_WEBHOOK_URL`이 없으면 외부 발송은
-하지 않고, 경고 발견 여부와 관계없이 명령을 실패 종료한다. 수신처 없이 평가만 하는
-명시적 `--dry-run`은 허용하지만 외부 알림 정상 동작의 증거가 아니다. SMS/LMS 설정, 실발송 테스트,
+운영 알림 채널은 Slack webhook 하나다. 채널을 사용하지 않는 상태에서는
+`DEV_ALERTS_WEBHOOK_URL`과 `DEV_ALERTS_WEBHOOK_REQUIRED=false`를 함께 유지한다.
+이 경우 외부 발송 없이 룰을 평가하고, 감사 로그 payload에
+`delivery_status=not_configured`를 남긴다. 채널을 활성화할 때는
+`scripts/v1/set-dev-alerts-webhook.ps1`로 URL과 required 상태를 함께 바꾼다.
+`DEV_ALERTS_WEBHOOK_REQUIRED=true`인데 URL이 없으면 명령은 실패 종료한다.
+수신처 없이 평가만 하는 명시적 `--dry-run`은 허용하지만 외부 알림 정상 동작의
+증거가 아니다. SMS/LMS 설정, 실발송 테스트,
 CloudWatch transition 문자 발송 예외는 모두 제거되었다. 운영 장애용으로 승인된 공용
 카카오 템플릿이 없으므로 이 경로를 임의의 알림톡으로 대체하지 않고 fail-closed한다.
 
@@ -34,13 +39,16 @@ fingerprint를 소비하지 않는다. 폐기 전 SMS가 남긴
 `OpsAuditLog(action=alerts.user_incident_sms)`는 기존 2일 중복 억제와 사고 이력
 조회에만 읽으며, 새 SMS provider 호출이나 재조회·재시도에는 사용하지 않는다.
 
-명령은 알 수 없는 `--rule`, 어느 룰이든 평가 오류, webhook 미설정·전송 실패를
+명령은 알 수 없는 `--rule`, 어느 룰이든 평가 오류, 필수 webhook 미설정·전송 실패를
 종료 코드 1과 `cron.check_dev_alerts.result=failed`로 기록한다. 일부 룰 평가가
 실패해도 나머지 정상 평가된 경고의 전송은 시도하며, 수락된 사용자 오류만
 fingerprint를 소비한다. 실패한 전체 검사를 `All clear`로 출력하지 않는다.
 `--silent`는 정상 무경고 출력만 억제하며 실패를 성공으로 바꾸지 않는다.
 `--dry-run`도 검사 오류는 실패한다. 감사 기록 자체를 저장할 수 없어도 명령은
 실패 종료하며, 예외 원문·webhook URL 대신 고정 사유와 예외 종류만 남긴다.
+`audit_failed_24h`는 `cron.check_dev_alerts` 자체의 실패를 제외한다. 크론 실패는
+GitHub 실행과 해당 감사 로그에서 직접 관측하고, 그 실패가 다시 같은 크론의 실패
+임계치를 키우지는 않는다.
 
 무경고 실행은 수신처가 설정되어 있어도 불필요한 시험 메시지를 보내지 않는다.
 따라서 성공 실행은 해당 검사 완료의 근거이며, Slack 실수신 확인과 같지 않다.
