@@ -2,7 +2,7 @@
 
 import uuid
 
-from django.db import models, transaction
+from django.db import IntegrityError, models, transaction
 from django.conf import settings
 
 from apps.api.common.models import TimestampModel
@@ -10,9 +10,14 @@ from apps.core.models import Tenant
 from apps.core.db import TenantQuerySet  # ✅ 추가
 from apps.support.students.lifecycle_dependencies import (
     inventory_student_ps_metadata_exists,
+    student_inventory_namespace_is_attributable,
     update_inventory_student_ps,
 )
-from apps.support.students.namespace_lock import lock_student_ps_namespaces
+from apps.support.students.namespace_lock import (
+    lock_student_creation_tenant_reference,
+    lock_student_creation_user_reference,
+    lock_student_ps_namespaces,
+)
 
 
 def generate_student_custom_field_key() -> str:
@@ -21,6 +26,10 @@ def generate_student_custom_field_key() -> str:
 
 class StudentInventoryNamespaceConflict(ValueError):
     """A student PS cannot safely claim unattributed legacy inventory metadata."""
+
+
+class StudentInventoryNamespaceChanged(StudentInventoryNamespaceConflict):
+    """The pre-lock predecessor snapshot changed and the claim must retry."""
 
 
 def _student_ps_predecessor_snapshot(*, tenant_id: int, target_ps: str) -> tuple[tuple[int, str], ...]:
@@ -49,7 +58,7 @@ def _prepare_student_ps_inventory_claim(
         target_ps=target_ps,
     )
     if current_predecessors != predecessor_snapshot:
-        raise StudentInventoryNamespaceConflict(
+        raise StudentInventoryNamespaceChanged(
             "student storage namespace changed; retry the identity change"
         )
     competing_claim = Student.objects.filter(
@@ -59,7 +68,9 @@ def _prepare_student_ps_inventory_claim(
     if exclude_student_id is not None:
         competing_claim = competing_claim.exclude(pk=exclude_student_id)
     if competing_claim.exists():
-        return
+        raise StudentInventoryNamespaceConflict(
+            "student storage namespace is already claimed"
+        )
     if not inventory_student_ps_metadata_exists(
         tenant_id=tenant.id,
         ps_number=target_ps,
@@ -281,21 +292,41 @@ class Student(TimestampModel):
     def save(self, *args, **kwargs):
         if not self.pk:
             target_ps = str(self.ps_number or "").strip()
-            predecessor_snapshot = _student_ps_predecessor_snapshot(
-                tenant_id=self.tenant_id,
-                target_ps=target_ps,
+            max_attempts = (
+                1 if transaction.get_connection().in_atomic_block else 3
             )
-            with transaction.atomic():
-                lock_student_ps_namespaces(
-                    tenant_id=self.tenant_id,
-                    ps_numbers=(target_ps, *(row[1] for row in predecessor_snapshot)),
-                )
-                _prepare_student_ps_inventory_claim(
-                    tenant=self.tenant,
-                    target_ps=target_ps,
-                    predecessor_snapshot=predecessor_snapshot,
-                )
-                return super().save(*args, **kwargs)
+            for attempt in range(max_attempts):
+                try:
+                    with transaction.atomic():
+                        # Permanent delete takes Tenant FOR UPDATE before the
+                        # namespace. New Student inserts take the compatible FK
+                        # KEY SHARE gate first so neither side can hold the
+                        # namespace while waiting on the Tenant row.
+                        lock_student_creation_tenant_reference(
+                            tenant_id=self.tenant_id
+                        )
+                        lock_student_creation_user_reference(user_id=self.user_id)
+                        predecessor_snapshot = _student_ps_predecessor_snapshot(
+                            tenant_id=self.tenant_id,
+                            target_ps=target_ps,
+                        )
+                        lock_student_ps_namespaces(
+                            tenant_id=self.tenant_id,
+                            ps_numbers=(
+                                target_ps,
+                                *(row[1] for row in predecessor_snapshot),
+                            ),
+                        )
+                        _prepare_student_ps_inventory_claim(
+                            tenant=self.tenant,
+                            target_ps=target_ps,
+                            predecessor_snapshot=predecessor_snapshot,
+                        )
+                        return super().save(*args, **kwargs)
+                except StudentInventoryNamespaceChanged:
+                    if attempt == max_attempts - 1:
+                        raise
+            raise AssertionError("unreachable student namespace retry state")
 
         update_fields = kwargs.get("update_fields")
         persists_ps_number = update_fields is None or "ps_number" in update_fields
@@ -335,13 +366,27 @@ class Student(TimestampModel):
             )
             old = (
                 Student.objects.select_for_update()
-                .only("ps_number", "user_id", "tenant_id")
+                .only("ps_number", "user_id", "tenant_id", "deleted_at")
                 .get(pk=self.pk)
             )
             if old.user_id != persisted_user_id or self.user_id != old.user_id:
                 raise ValueError("Student account link changed while saving identity.")
             if old.tenant_id != persisted_tenant_id or self.tenant_id != old.tenant_id:
                 raise ValueError("Student tenant changed while saving identity.")
+            if old.ps_number != self.ps_number:
+                from apps.core.models.user import user_internal_username
+
+                new_username = user_internal_username(self.tenant, self.ps_number)
+                if locked_user.username != new_username:
+                    try:
+                        with transaction.atomic():
+                            locked_user.username = new_username
+                            locked_user.save(update_fields=["username"])
+                    except IntegrityError as exc:
+                        raise StudentInventoryNamespaceConflict(
+                            "student identity namespace is already claimed"
+                        ) from exc
+                self.user = locked_user
             predecessor_snapshot = (
                 _student_ps_predecessor_snapshot(
                     tenant_id=persisted_tenant_id,
@@ -360,19 +405,20 @@ class Student(TimestampModel):
             )
 
             if old.ps_number != self.ps_number:
+                if old.deleted_at is None and not student_inventory_namespace_is_attributable(
+                    tenant_id=persisted_tenant_id,
+                    student_id=self.pk,
+                    ps_number=old.ps_number,
+                ):
+                    raise StudentInventoryNamespaceConflict(
+                        "student storage source namespace has ambiguous legacy ownership"
+                    )
                 _prepare_student_ps_inventory_claim(
                     tenant=self.tenant,
                     target_ps=self.ps_number,
                     predecessor_snapshot=predecessor_snapshot,
                     exclude_student_id=self.pk,
                 )
-                from apps.core.models.user import user_internal_username
-
-                new_username = user_internal_username(self.tenant, self.ps_number)
-                if locked_user.username != new_username:
-                    locked_user.username = new_username
-                    locked_user.save(update_fields=["username"])
-                self.user = locked_user
                 # 인벤토리 student_ps 연쇄 업데이트 (ps_number 변경 시 고아 방지)
                 old_ps = old.ps_number
                 new_ps = self.ps_number

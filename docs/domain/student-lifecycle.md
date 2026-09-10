@@ -144,12 +144,18 @@ SSOT: `permanently_delete_students(tenant=..., student_ids=[...])`
 - PostgreSQL에서는 `academy:student-ps-namespace:v1:{tenant_id}:{ps_number}` transaction
   advisory lock이 학생번호 namespace의 생성·변경·Inventory attach·영구삭제 ownership
   판정을 직렬화한다. 기존 학생 identity 경로는 교착을 피하려고 항상
-  `User row -> Student row -> sorted old/new namespace` 순서이고, 영구삭제도
-  `Tenant -> User -> Student -> sorted current/original namespace` 순서다. 신규 Student
-  insert는 target과 발견된 tombstone predecessor namespace를 정렬해 먼저 잠근다. 기존
+  `User row -> Student row -> target User.username reservation -> sorted old/new namespace`
+  순서이고, 영구삭제도 `Tenant -> User -> Student -> sorted current/original namespace`
+  순서다. canonical 신규 생성은 Parent/User login을 먼저 예약하고, Student insert 직전
+  Tenant와 referenced User를 PostgreSQL `FOR KEY SHARE`로 잡은 뒤 target과 발견된
+  tombstone predecessor namespace를 정렬해 잠근다. 따라서 create/restore/rename/
+  soft-delete/permanent-delete가 unique index, FK와 namespace를 역순으로 기다리지 않는다.
+  predecessor snapshot 변화는 top-level 생성 transaction을 최대 3회 다시 시작한다. 기존
   rename도 target claim이므로 같은 snapshot/re-read를 사용한다. exact predecessor가
   하나이면 legacy Inventory metadata를 predecessor tombstone으로 격리하고, 복수/모호한
-  attribution이면 그 identity mutation만 실패한다. upload attach와 student-scope
+  attribution이면 그 identity mutation만 실패한다. active replacement보다 오래된 legacy
+  metadata가 source namespace에 있으면 soft-delete/rename도 오귀속 이동 없이 같은 stable
+  conflict로 rollback한다. upload attach와 student-scope
   folder/file create·move·수정·삭제는 Student row를 잠그지 않고 namespace 뒤 활성 owner와
   최신 metadata scope를 다시 읽는다.
 - 같은 사용자가 다른 테넌트나 같은 테넌트의 비학생 역할로 남아 있으면 User와 해당 멤버십을 보존한다.
@@ -168,6 +174,9 @@ SSOT: `permanently_delete_students(tenant=..., student_ids=[...])`
 - 영구삭제 API 성공 응답은 `deleted`와
   `storage_cleanup: {pending, failed}`를 반환한다. 저장 namespace 불일치 또는 진행 중
   media upload는 `409 storage_cleanup_scope_mismatch`로 전체 mutation을 중단한다.
+- 원래 학생번호에 legacy Inventory가 남고 그 번호의 tombstoned predecessor가 여러 명이면,
+  같은 bulk delete에 모든 predecessor가 포함된 경우만 union cleanup할 수 있다. 하나라도
+  선택 밖에 남으면 `409 student_storage_namespace_conflict`로 DB/R2 mutation 전에 중단한다.
 - `SubmissionMedia.UPLOADING`은 1시간 upload lease 동안 같은 `409`로 보호한다.
   lease가 지난 row는 중단된 업로드로 회수해 durable AI cleanup intent에 넣고 DB
   삭제를 진행한다. 늦게 끝난 PUT의 finalize는 row와 cleanup intent를 다시 잠가
@@ -209,6 +218,10 @@ python manage.py purge_deleted_students
     zero-readback, shared owner 및 재사용 `ps_number` 보존, PS 변경 전 historical key 정리
   - PostgreSQL create/rename과 permanent delete 경쟁에서 namespace 판정 직렬화 및
     신규 owner Inventory/R2 보존
+  - canonical create와 soft-delete/restore/rename/permanent-delete 양 순서, direct create의
+    Tenant/User FK `FOR KEY SHARE` 순서에서 deadlock 없이 단일 identity owner 또는 stable 4xx
+  - 복수 tombstoned predecessor의 legacy original namespace를 선택 일부만 영구삭제할 때
+    `student_storage_namespace_conflict`와 DB/R2 무변경
   - soft delete/restore의 Inventory metadata tombstone 왕복, 재사용 학생과 sibling
     parent/student list·download 격리, 안전한 replacement 신규 파일의 정상 사용
   - 학생 Inventory PUT/attach와 soft/permanent delete 양 순서에서 attach 실패 exact

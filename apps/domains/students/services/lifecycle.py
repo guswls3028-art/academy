@@ -18,6 +18,7 @@ from apps.support.students.lifecycle_dependencies import (
     delete_submission_storage_for_permanent_delete,
     ensure_parent_for_student,
     inventory_file_ids_with_cleanup_intents,
+    inventory_student_ps_metadata_exists,
     lock_student_ps_namespaces,
     restore_enrollments_after_student_restore,
     submission_storage_cleanup_status_counts,
@@ -119,6 +120,23 @@ class StudentPermanentDeleteResult:
     user_ids: tuple[int, ...]
     storage_cleanup_pending_count: int = 0
     storage_cleanup_failed_count: int = 0
+
+
+def _has_unselected_deleted_predecessor(
+    *,
+    tenant,
+    original_ps: str,
+    selected_student_ids: tuple[int, ...],
+) -> bool:
+    candidates = Student.objects.filter(
+        tenant=tenant,
+        deleted_at__isnull=False,
+        ps_number__endswith=f"_{original_ps}",
+    ).exclude(id__in=selected_student_ids)
+    return any(
+        ps_number == f"_del_{student_id}_{original_ps}"
+        for student_id, ps_number in candidates.values_list("id", "ps_number")
+    )
 
 
 def _append_unique(fields: list[str], field: str) -> None:
@@ -493,10 +511,38 @@ def permanently_delete_students(
                 if ps_number
             )
         )
+        selected_original_ps_numbers = tuple(
+            dict.fromkeys(
+                original_ps
+                for student in to_delete
+                if (original_ps := _deleted_ps_original(student.ps_number))
+            )
+        )
         lock_student_ps_namespaces(
             tenant_id=tenant.id,
             ps_numbers=selected_student_ps_numbers,
         )
+        ambiguous_original_ps = next(
+            (
+                original_ps
+                for original_ps in selected_original_ps_numbers
+                if inventory_student_ps_metadata_exists(
+                    tenant_id=tenant.id,
+                    ps_number=original_ps,
+                )
+                and _has_unselected_deleted_predecessor(
+                    tenant=tenant,
+                    original_ps=original_ps,
+                    selected_student_ids=selected_student_ids,
+                )
+            ),
+            None,
+        )
+        if ambiguous_original_ps is not None:
+            raise StudentLifecycleError(
+                "student_storage_namespace_conflict",
+                "이 학생번호의 이전 저장자료 소유권을 확인한 뒤 다시 시도해 주세요.",
+            )
         if active_wrong_note_pdf_exists_for_students(
             tenant=tenant,
             student_ids=selected_student_ids,

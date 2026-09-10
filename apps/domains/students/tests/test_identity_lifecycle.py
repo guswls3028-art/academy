@@ -20,9 +20,15 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 from apps.core.models.tenant import Tenant
 from apps.core.models.tenant_membership import TenantMembership
 from apps.core.models.user import user_internal_username, user_display_username
-from apps.domains.students.models import Student
+from apps.domains.students.models import Student, StudentInventoryNamespaceConflict
 from apps.domains.students.serializers import StudentDetailSerializer
 from apps.domains.students.services import StudentLifecycleError, restore_student, soft_delete_student
+from apps.domains.students.services.creation import create_student_account
+from apps.domains.students.services.identity import StudentIdentityError
+from apps.domains.students.services.profile import (
+    StudentProfileUpdateError,
+    update_student_profile,
+)
 from apps.domains.students.views import StudentViewSet
 
 Parent = apps.get_model("parents", "Parent")
@@ -133,7 +139,7 @@ class TestPsNumberUsernameSyncOnSave(TestCase):
         )
         self.student.ps_number = "TAKEN01"
 
-        with self.assertRaises(IntegrityError):
+        with self.assertRaises(StudentInventoryNamespaceConflict):
             self.student.save(update_fields=["ps_number"])
 
         self.student.refresh_from_db()
@@ -191,16 +197,24 @@ class TestPsNumberUsernameSyncOnSave(TestCase):
         self.assertEqual(lock_order[2][0], "namespace")
         self.assertEqual(set(lock_order[2][2]), {"A12345", "LOCK002"})
 
-    def test_new_student_locks_ps_namespace_before_insert(self):
+    def test_new_student_locks_tenant_reference_then_ps_namespace_before_insert(self):
         user = User.objects.create_user(
             username=user_internal_username(self.tenant, "CREATE01"),
             password="test1234",
             tenant=self.tenant,
         )
 
+        lock_order = []
+
         with patch(
+            "apps.domains.students.models.lock_student_creation_tenant_reference",
+            side_effect=lambda **kwargs: lock_order.append(("tenant", kwargs)),
+        ) as lock_tenant, patch(
+            "apps.domains.students.models.lock_student_creation_user_reference",
+            side_effect=lambda **kwargs: lock_order.append(("user", kwargs)),
+        ) as lock_user, patch(
             "apps.domains.students.models.lock_student_ps_namespaces",
-            return_value=("CREATE01",),
+            side_effect=lambda **kwargs: lock_order.append(("namespace", kwargs)),
         ) as lock_namespace:
             created = Student.objects.create(
                 tenant=self.tenant,
@@ -211,9 +225,15 @@ class TestPsNumberUsernameSyncOnSave(TestCase):
             )
 
         self.assertIsNotNone(created.pk)
+        lock_tenant.assert_called_once_with(tenant_id=self.tenant.id)
+        lock_user.assert_called_once_with(user_id=user.id)
         lock_namespace.assert_called_once_with(
             tenant_id=self.tenant.id,
             ps_numbers=("CREATE01",),
+        )
+        self.assertEqual(
+            [item[0] for item in lock_order],
+            ["tenant", "user", "namespace"],
         )
 
     def test_del_prefix_ps_cascades_inventory_into_tombstone_namespace(self):
@@ -360,6 +380,47 @@ class TestPsNumberUsernameSyncOnSave(TestCase):
         self.assertEqual(self.student.ps_number, target_ps)
         self.assertEqual(legacy_folder.student_ps, tombstone_ps)
 
+    def test_existing_rename_rejects_ambiguous_legacy_source_namespace(self):
+        original_ps = "LEGACY-SOURCE"
+        predecessor = _create_student(
+            self.tenant,
+            original_ps,
+            name="previous owner",
+            phone="01070000112",
+            parent_phone="01080000112",
+        )
+        predecessor_tombstone = f"_del_{predecessor.id}_{original_ps}"
+        Student.objects.filter(pk=predecessor.pk).update(
+            ps_number=predecessor_tombstone,
+            deleted_at=timezone.now(),
+        )
+        User.objects.filter(pk=predecessor.user_id).update(
+            username=user_internal_username(self.tenant, predecessor_tombstone)
+        )
+        legacy_folder = InventoryFolder.objects.create(
+            tenant=self.tenant,
+            scope="student",
+            student_ps=original_ps,
+            name="previous private",
+        )
+        InventoryFolder.objects.filter(pk=legacy_folder.pk).update(
+            created_at=self.student.created_at - timedelta(seconds=1)
+        )
+        Student.objects.filter(pk=self.student.pk).update(ps_number=original_ps)
+        User.objects.filter(pk=self.student.user_id).update(
+            username=user_internal_username(self.tenant, original_ps)
+        )
+        self.student.refresh_from_db()
+
+        self.student.ps_number = "RENAMED"
+        with self.assertRaisesRegex(ValueError, "source namespace"):
+            self.student.save(update_fields=["ps_number"])
+
+        self.student.refresh_from_db()
+        legacy_folder.refresh_from_db()
+        self.assertEqual(self.student.ps_number, original_ps)
+        self.assertEqual(legacy_folder.student_ps, original_ps)
+
     def test_display_username_matches_ps_number(self):
         """user_display_username(user) == ps_number (SSOT)."""
         display = user_display_username(self.student.user)
@@ -379,6 +440,19 @@ class StudentIdentityConcurrencyPostgresTests(TransactionTestCase):
                 "PostgreSQL is required for student identity row-lock verification."
             )
         super().setUpClass()
+
+    def _create_canonical_student(self, *, tenant, ps_number: str, omr_code: str):
+        return create_student_account(
+            tenant=tenant,
+            student_data={
+                "ps_number": ps_number,
+                "name": "concurrent replacement",
+                "phone": f"010{omr_code}",
+                "parent_phone": "",
+                "omr_code": omr_code,
+            },
+            password="test1234",
+        ).student
 
     def test_concurrent_ps_number_changes_keep_all_identity_copies_aligned(self):
         tenant = _create_tenant(name="Identity Race", code="identity-race")
@@ -423,6 +497,78 @@ class StudentIdentityConcurrencyPostgresTests(TransactionTestCase):
         self.assertIn(student.ps_number, {"RACE01", "RACE02"})
         self.assertEqual(user_display_username(student.user), student.ps_number)
         self.assertEqual(folder.student_ps, student.ps_number)
+
+    def test_direct_create_locks_user_reference_before_rename_namespace(self):
+        tenant = _create_tenant(name="Direct Create Lock", code="direct-create-lock")
+        owner = _create_student(tenant, "DIRECT-OLD")
+        direct_locked = threading.Event()
+        release_direct = threading.Event()
+        rename_started = threading.Event()
+        rename_finished = threading.Event()
+        unexpected: list[BaseException] = []
+        direct_conflicts: list[BaseException] = []
+        from apps.domains.students.models import (
+            _prepare_student_ps_inventory_claim as real_prepare_claim,
+        )
+
+        def blocking_prepare(*args, **kwargs):
+            if kwargs.get("exclude_student_id") is None:
+                direct_locked.set()
+                if not release_direct.wait(timeout=10):
+                    raise TimeoutError("direct create release timed out")
+            return real_prepare_claim(*args, **kwargs)
+
+        def direct_create_worker():
+            close_old_connections()
+            try:
+                Student.objects.create(
+                    tenant=tenant,
+                    user_id=owner.user_id,
+                    ps_number="DIRECT-TARGET",
+                    name="invalid duplicate user",
+                    omr_code="98400001",
+                )
+            except IntegrityError as exc:
+                direct_conflicts.append(exc)
+            except BaseException as exc:  # pragma: no cover - asserted below
+                unexpected.append(exc)
+            finally:
+                close_old_connections()
+
+        def rename_worker():
+            close_old_connections()
+            try:
+                rename_started.set()
+                thread_owner = Student.objects.get(pk=owner.pk)
+                thread_owner.ps_number = "DIRECT-TARGET"
+                thread_owner.save(update_fields=["ps_number"])
+                rename_finished.set()
+            except BaseException as exc:  # pragma: no cover - asserted below
+                unexpected.append(exc)
+            finally:
+                close_old_connections()
+
+        with patch(
+            "apps.domains.students.models._prepare_student_ps_inventory_claim",
+            side_effect=blocking_prepare,
+        ):
+            direct_thread = threading.Thread(target=direct_create_worker)
+            direct_thread.start()
+            self.assertTrue(direct_locked.wait(timeout=5))
+            rename_thread = threading.Thread(target=rename_worker)
+            rename_thread.start()
+            self.assertTrue(rename_started.wait(timeout=5))
+            release_direct.set()
+            direct_thread.join(timeout=15)
+            rename_thread.join(timeout=15)
+
+        self.assertFalse(direct_thread.is_alive())
+        self.assertFalse(rename_thread.is_alive())
+        self.assertEqual(unexpected, [])
+        self.assertEqual(len(direct_conflicts), 1)
+        self.assertTrue(rename_finished.is_set())
+        owner.refresh_from_db()
+        self.assertEqual(owner.ps_number, "DIRECT-TARGET")
 
     def test_soft_delete_serializes_reuse_and_quarantines_old_inventory(self):
         tenant = _create_tenant(name="Soft Delete Reuse", code="soft-delete-reuse")
@@ -510,6 +656,379 @@ class StudentIdentityConcurrencyPostgresTests(TransactionTestCase):
         self.assertFalse(
             InventoryFolder.objects.filter(tenant=tenant, student_ps="REUSE01").exists()
         )
+
+    def test_canonical_create_waits_for_soft_delete_without_lock_cycle(self):
+        tenant = _create_tenant(name="Canonical Soft Delete", code="canonical-soft")
+        student = _create_student(tenant, "CANONICAL-SOFT")
+        InventoryFolder.objects.create(
+            tenant=tenant,
+            scope="student",
+            student_ps=student.ps_number,
+            name="private",
+        )
+        soft_delete_locked = threading.Event()
+        release_soft_delete = threading.Event()
+        create_started = threading.Event()
+        errors: list[BaseException] = []
+        created_ids: list[int] = []
+        from apps.support.students.lifecycle_dependencies import (
+            update_inventory_student_ps as real_update_inventory_student_ps,
+        )
+
+        def blocking_update(*args, **kwargs):
+            soft_delete_locked.set()
+            if not release_soft_delete.wait(timeout=10):
+                raise TimeoutError("soft delete release timed out")
+            return real_update_inventory_student_ps(*args, **kwargs)
+
+        def soft_delete_worker():
+            close_old_connections()
+            try:
+                soft_delete_student(Student.objects.get(pk=student.pk), tenant=tenant)
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        def create_worker():
+            close_old_connections()
+            try:
+                create_started.set()
+                replacement = self._create_canonical_student(
+                    tenant=tenant,
+                    ps_number="CANONICAL-SOFT",
+                    omr_code="98100001",
+                )
+                created_ids.append(replacement.id)
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        with patch(
+            "apps.domains.students.models.update_inventory_student_ps",
+            side_effect=blocking_update,
+        ):
+            soft_thread = threading.Thread(target=soft_delete_worker)
+            soft_thread.start()
+            self.assertTrue(soft_delete_locked.wait(timeout=5))
+            create_thread = threading.Thread(target=create_worker)
+            create_thread.start()
+            self.assertTrue(create_started.wait(timeout=5))
+            release_soft_delete.set()
+            soft_thread.join(timeout=15)
+            create_thread.join(timeout=15)
+
+        self.assertFalse(soft_thread.is_alive())
+        self.assertFalse(create_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(created_ids), 1)
+        student.refresh_from_db()
+        self.assertIsNotNone(student.deleted_at)
+        self.assertTrue(
+            Student.objects.filter(
+                pk=created_ids[0],
+                ps_number="CANONICAL-SOFT",
+            ).exists()
+        )
+
+    def test_canonical_create_wins_restore_with_stable_conflict_no_deadlock(self):
+        tenant = _create_tenant(name="Canonical Restore", code="canonical-restore")
+        deleted = _create_student(tenant, "CANONICAL-RESTORE")
+        soft_delete_student(deleted, tenant=tenant)
+        create_reserved = threading.Event()
+        release_create = threading.Event()
+        restore_started = threading.Event()
+        errors: list[BaseException] = []
+        restore_codes: list[str] = []
+        created_ids: list[int] = []
+        from academy.adapters.db.django import repositories_students
+
+        real_student_create = repositories_students.student_create
+
+        def blocking_student_create(*args, **kwargs):
+            create_reserved.set()
+            if not release_create.wait(timeout=10):
+                raise TimeoutError("canonical create release timed out")
+            return real_student_create(*args, **kwargs)
+
+        def create_worker():
+            close_old_connections()
+            try:
+                replacement = self._create_canonical_student(
+                    tenant=tenant,
+                    ps_number="CANONICAL-RESTORE",
+                    omr_code="98200001",
+                )
+                created_ids.append(replacement.id)
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        def restore_worker():
+            close_old_connections()
+            try:
+                restore_started.set()
+                restore_student(Student.objects.get(pk=deleted.pk), tenant=tenant)
+            except StudentLifecycleError as exc:
+                restore_codes.append(exc.code)
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        with patch(
+            "apps.domains.students.services.creation.student_repo.student_create",
+            side_effect=blocking_student_create,
+        ):
+            create_thread = threading.Thread(target=create_worker)
+            create_thread.start()
+            self.assertTrue(create_reserved.wait(timeout=5))
+            restore_thread = threading.Thread(target=restore_worker)
+            restore_thread.start()
+            self.assertTrue(restore_started.wait(timeout=5))
+            release_create.set()
+            create_thread.join(timeout=15)
+            restore_thread.join(timeout=15)
+
+        self.assertFalse(create_thread.is_alive())
+        self.assertFalse(restore_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(created_ids), 1)
+        self.assertEqual(restore_codes, ["student_storage_namespace_conflict"])
+        deleted.refresh_from_db()
+        self.assertIsNotNone(deleted.deleted_at)
+
+    def test_canonical_create_wins_rename_with_stable_conflict_no_deadlock(self):
+        tenant = _create_tenant(name="Canonical Rename", code="canonical-rename")
+        source = _create_student(tenant, "CANONICAL-SOURCE")
+        create_reserved = threading.Event()
+        release_create = threading.Event()
+        rename_started = threading.Event()
+        errors: list[BaseException] = []
+        rename_conflicts: list[dict[str, str] | str] = []
+        created_ids: list[int] = []
+        from academy.adapters.db.django import repositories_students
+
+        real_student_create = repositories_students.student_create
+
+        def blocking_student_create(*args, **kwargs):
+            create_reserved.set()
+            if not release_create.wait(timeout=10):
+                raise TimeoutError("canonical create release timed out")
+            return real_student_create(*args, **kwargs)
+
+        def create_worker():
+            close_old_connections()
+            try:
+                replacement = self._create_canonical_student(
+                    tenant=tenant,
+                    ps_number="CANONICAL-TARGET",
+                    omr_code="98300001",
+                )
+                created_ids.append(replacement.id)
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        def rename_worker():
+            close_old_connections()
+            try:
+                rename_started.set()
+                update_student_profile(
+                    student=Student.objects.select_related("user").get(pk=source.pk),
+                    tenant=tenant,
+                    data={"ps_number": "CANONICAL-TARGET"},
+                    identity_field="ps_number",
+                )
+            except StudentProfileUpdateError as exc:
+                rename_conflicts.append(exc.detail)
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        with patch(
+            "apps.domains.students.services.creation.student_repo.student_create",
+            side_effect=blocking_student_create,
+        ):
+            create_thread = threading.Thread(target=create_worker)
+            create_thread.start()
+            self.assertTrue(create_reserved.wait(timeout=5))
+            rename_thread = threading.Thread(target=rename_worker)
+            rename_thread.start()
+            self.assertTrue(rename_started.wait(timeout=5))
+            release_create.set()
+            create_thread.join(timeout=15)
+            rename_thread.join(timeout=15)
+
+        self.assertFalse(create_thread.is_alive())
+        self.assertFalse(rename_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(created_ids), 1)
+        self.assertEqual(len(rename_conflicts), 1)
+        source.refresh_from_db()
+        self.assertEqual(source.ps_number, "CANONICAL-SOURCE")
+
+    def test_restore_reservation_wins_canonical_create_without_deadlock(self):
+        tenant = _create_tenant(name="Restore Wins Create", code="restore-wins-create")
+        deleted = _create_student(tenant, "RESTORE-WINS")
+        soft_delete_student(deleted, tenant=tenant)
+        restore_reserved = threading.Event()
+        release_restore = threading.Event()
+        create_started = threading.Event()
+        create_finished = threading.Event()
+        errors: list[BaseException] = []
+        create_conflicts: list[dict[str, str] | str] = []
+        restored_ids: list[int] = []
+        from apps.domains.students.models import (
+            lock_student_ps_namespaces as real_lock_student_ps_namespaces,
+        )
+
+        def blocking_namespace_lock(*args, **kwargs):
+            if threading.current_thread().name == "restore-winner":
+                restore_reserved.set()
+                if not release_restore.wait(timeout=10):
+                    raise TimeoutError("restore release timed out")
+            return real_lock_student_ps_namespaces(*args, **kwargs)
+
+        def restore_worker():
+            close_old_connections()
+            try:
+                restored = restore_student(
+                    Student.objects.get(pk=deleted.pk),
+                    tenant=tenant,
+                ).student
+                restored_ids.append(restored.id)
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        def create_worker():
+            close_old_connections()
+            try:
+                create_started.set()
+                self._create_canonical_student(
+                    tenant=tenant,
+                    ps_number="RESTORE-WINS",
+                    omr_code="98500001",
+                )
+            except StudentIdentityError as exc:
+                create_conflicts.append(exc.detail)
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                create_finished.set()
+                close_old_connections()
+
+        with patch(
+            "apps.domains.students.models.lock_student_ps_namespaces",
+            side_effect=blocking_namespace_lock,
+        ):
+            restore_thread = threading.Thread(
+                target=restore_worker,
+                name="restore-winner",
+            )
+            restore_thread.start()
+            self.assertTrue(restore_reserved.wait(timeout=5))
+            create_thread = threading.Thread(target=create_worker)
+            create_thread.start()
+            self.assertTrue(create_started.wait(timeout=5))
+            self.assertFalse(create_finished.wait(timeout=1))
+            release_restore.set()
+            restore_thread.join(timeout=15)
+            create_thread.join(timeout=15)
+
+        self.assertFalse(restore_thread.is_alive())
+        self.assertFalse(create_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(restored_ids, [deleted.id])
+        self.assertEqual(len(create_conflicts), 1)
+        deleted.refresh_from_db()
+        self.assertIsNone(deleted.deleted_at)
+        self.assertEqual(deleted.ps_number, "RESTORE-WINS")
+
+    def test_rename_reservation_wins_canonical_create_without_deadlock(self):
+        tenant = _create_tenant(name="Rename Wins Create", code="rename-wins-create")
+        source = _create_student(tenant, "RENAME-WINS-SOURCE")
+        rename_reserved = threading.Event()
+        release_rename = threading.Event()
+        create_started = threading.Event()
+        create_finished = threading.Event()
+        errors: list[BaseException] = []
+        create_conflicts: list[dict[str, str] | str] = []
+        renamed_ids: list[int] = []
+        from apps.domains.students.models import (
+            lock_student_ps_namespaces as real_lock_student_ps_namespaces,
+        )
+
+        def blocking_namespace_lock(*args, **kwargs):
+            if threading.current_thread().name == "rename-winner":
+                rename_reserved.set()
+                if not release_rename.wait(timeout=10):
+                    raise TimeoutError("rename release timed out")
+            return real_lock_student_ps_namespaces(*args, **kwargs)
+
+        def rename_worker():
+            close_old_connections()
+            try:
+                updated = update_student_profile(
+                    student=Student.objects.select_related("user").get(pk=source.pk),
+                    tenant=tenant,
+                    data={"ps_number": "RENAME-WINS-TARGET"},
+                    identity_field="ps_number",
+                ).student
+                renamed_ids.append(updated.id)
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        def create_worker():
+            close_old_connections()
+            try:
+                create_started.set()
+                self._create_canonical_student(
+                    tenant=tenant,
+                    ps_number="RENAME-WINS-TARGET",
+                    omr_code="98600001",
+                )
+            except StudentIdentityError as exc:
+                create_conflicts.append(exc.detail)
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                create_finished.set()
+                close_old_connections()
+
+        with patch(
+            "apps.domains.students.models.lock_student_ps_namespaces",
+            side_effect=blocking_namespace_lock,
+        ):
+            rename_thread = threading.Thread(
+                target=rename_worker,
+                name="rename-winner",
+            )
+            rename_thread.start()
+            self.assertTrue(rename_reserved.wait(timeout=5))
+            create_thread = threading.Thread(target=create_worker)
+            create_thread.start()
+            self.assertTrue(create_started.wait(timeout=5))
+            self.assertFalse(create_finished.wait(timeout=1))
+            release_rename.set()
+            rename_thread.join(timeout=15)
+            create_thread.join(timeout=15)
+
+        self.assertFalse(rename_thread.is_alive())
+        self.assertFalse(create_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(renamed_ids, [source.id])
+        self.assertEqual(len(create_conflicts), 1)
+        source.refresh_from_db()
+        self.assertEqual(source.ps_number, "RENAME-WINS-TARGET")
 
 
 class TestSoftDeleteSemantics(TestCase):
@@ -625,6 +1144,42 @@ class TestSoftDeleteLifecycleService(TestCase):
         self.assertEqual(self.booked.status, SessionParticipant.Status.CANCELLED)
         self.assertEqual(self.pending.status, SessionParticipant.Status.CANCELLED)
         self.assertEqual(self.attended.status, SessionParticipant.Status.ATTENDED)
+
+    def test_soft_delete_rejects_legacy_source_owned_by_deleted_predecessor(self):
+        predecessor = _create_student(
+            self.tenant,
+            "PREVIOUS",
+            name="previous owner",
+            phone="01071111111",
+            parent_phone="01081111111",
+        )
+        predecessor_tombstone = f"_del_{predecessor.id}_{self.student.ps_number}"
+        Student.objects.filter(pk=predecessor.pk).update(
+            ps_number=predecessor_tombstone,
+            deleted_at=timezone.now(),
+        )
+        User.objects.filter(pk=predecessor.user_id).update(
+            username=user_internal_username(self.tenant, predecessor_tombstone)
+        )
+        legacy_folder = InventoryFolder.objects.create(
+            tenant=self.tenant,
+            scope="student",
+            student_ps=self.student.ps_number,
+            name="previous private",
+        )
+        InventoryFolder.objects.filter(pk=legacy_folder.pk).update(
+            created_at=self.student.created_at - timedelta(seconds=1)
+        )
+
+        with self.assertRaises(StudentLifecycleError) as ctx:
+            soft_delete_student(self.student, tenant=self.tenant)
+
+        self.assertEqual(ctx.exception.code, "student_storage_namespace_conflict")
+        self.student.refresh_from_db()
+        legacy_folder.refresh_from_db()
+        self.assertIsNone(self.student.deleted_at)
+        self.assertEqual(self.student.ps_number, "SD001")
+        self.assertEqual(legacy_folder.student_ps, "SD001")
 
     def test_soft_delete_student_rejects_repeat_delete(self):
         soft_delete_student(self.student, tenant=self.tenant)

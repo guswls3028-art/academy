@@ -53,6 +53,7 @@ from apps.domains.students.services.lifecycle import (
     PERMANENT_DELETE_STUDENT_RELATIONS,
     PERMANENT_DELETE_SUBMISSION_RELATIONS,
 )
+from apps.domains.students.services.creation import create_student_account
 from apps.domains.students.views import StudentViewSet
 from apps.domains.video.models import (
     AccessMode,
@@ -224,11 +225,6 @@ class TestPermanentDeleteInventoryNamespaceConcurrencyPostgres(TransactionTestCa
         target.deleted_at = timezone.now()
         target.save(update_fields=["ps_number", "deleted_at"])
 
-        new_user = User.objects.create_user(
-            username="delete-create-new-owner",
-            password="test1234",
-            tenant=tenant,
-        )
         create_started = threading.Event()
         create_finished = threading.Event()
         create_errors = []
@@ -238,13 +234,17 @@ class TestPermanentDeleteInventoryNamespaceConcurrencyPostgres(TransactionTestCa
             close_old_connections()
             try:
                 create_started.set()
-                created = Student.objects.create(
+                created = create_student_account(
                     tenant=tenant,
-                    user_id=new_user.id,
-                    ps_number="CREATE-RACE",
-                    name="새 학생",
-                    omr_code="92000002",
-                )
+                    student_data={
+                        "ps_number": "CREATE-RACE",
+                        "name": "새 학생",
+                        "phone": "01092000002",
+                        "parent_phone": "",
+                        "omr_code": "92000002",
+                    },
+                    password="test1234",
+                ).student
                 created_ids.append(created.id)
                 create_finished.set()
             except BaseException as exc:  # pragma: no cover - asserted below
@@ -278,6 +278,242 @@ class TestPermanentDeleteInventoryNamespaceConcurrencyPostgres(TransactionTestCa
                 ps_number="CREATE-RACE",
             ).exists()
         )
+
+    @patch("apps.infrastructure.storage.r2.delete_object_r2_storage")
+    def test_delete_waits_for_inflight_rename_claim_and_preserves_new_owner_storage(
+        self,
+        delete_object_r2_storage,
+    ):
+        tenant = Tenant.objects.create(
+            name="Rename First Namespace Race",
+            code="rename-first-namespace-race",
+            is_active=True,
+        )
+        target_user = User.objects.create_user(
+            username="rename-first-target",
+            password="test1234",
+            tenant=tenant,
+        )
+        target = Student.objects.create(
+            tenant=tenant,
+            user=target_user,
+            ps_number="RENAME-FIRST",
+            name="삭제 대상",
+            omr_code="93000001",
+        )
+        TenantMembership.ensure_active(tenant=tenant, user=target_user, role="student")
+        target.deleted_at = timezone.now()
+        target.ps_number = f"_del_{target.id}_RENAME-FIRST"
+        target.save(update_fields=["deleted_at", "ps_number"])
+
+        owner_user = User.objects.create_user(
+            username="rename-first-owner",
+            password="test1234",
+            tenant=tenant,
+        )
+        owner = Student.objects.create(
+            tenant=tenant,
+            user=owner_user,
+            ps_number="RENAME-SOURCE",
+            name="신규 소유자",
+            omr_code="93000002",
+        )
+        inventory_file = InventoryFile.objects.create(
+            tenant=tenant,
+            scope="student",
+            student_ps=owner.ps_number,
+            display_name="preserved.pdf",
+            original_name="preserved.pdf",
+            r2_key=(
+                f"tenants/{tenant.id}/students/{owner.ps_number}/"
+                "inventory/preserved.pdf"
+            ),
+            content_type="application/pdf",
+        )
+        rename_locked = threading.Event()
+        release_rename = threading.Event()
+        delete_started = threading.Event()
+        delete_finished = threading.Event()
+        errors = []
+        from apps.support.students.lifecycle_dependencies import (
+            update_inventory_student_ps as real_update_inventory_student_ps,
+        )
+
+        def blocking_update(*args, **kwargs):
+            rename_locked.set()
+            if not release_rename.wait(timeout=10):
+                raise TimeoutError("rename release timed out")
+            return real_update_inventory_student_ps(*args, **kwargs)
+
+        def rename_worker():
+            close_old_connections()
+            try:
+                thread_owner = Student.objects.get(pk=owner.pk)
+                thread_owner.ps_number = "RENAME-FIRST"
+                thread_owner.save(update_fields=["ps_number"])
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        def delete_worker():
+            close_old_connections()
+            try:
+                delete_started.set()
+                permanently_delete_students(tenant=tenant, student_ids=[target.id])
+                delete_finished.set()
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        with patch(
+            "apps.domains.students.models.update_inventory_student_ps",
+            side_effect=blocking_update,
+        ):
+            rename_thread = threading.Thread(target=rename_worker)
+            rename_thread.start()
+            self.assertTrue(rename_locked.wait(timeout=5))
+            delete_thread = threading.Thread(target=delete_worker)
+            delete_thread.start()
+            self.assertTrue(delete_started.wait(timeout=5))
+            self.assertFalse(delete_finished.wait(timeout=1))
+            release_rename.set()
+            rename_thread.join(timeout=10)
+            delete_thread.join(timeout=10)
+
+        self.assertFalse(rename_thread.is_alive())
+        self.assertFalse(delete_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(delete_finished.is_set())
+        owner.refresh_from_db()
+        inventory_file.refresh_from_db()
+        self.assertEqual(owner.ps_number, "RENAME-FIRST")
+        self.assertEqual(inventory_file.student_ps, "RENAME-FIRST")
+        self.assertFalse(Student.objects.filter(pk=target.pk).exists())
+        self.assertFalse(
+            SubmissionStorageCleanupIntent.objects.filter(
+                object_key=inventory_file.r2_key
+            ).exists()
+        )
+        delete_object_r2_storage.assert_not_called()
+
+    @patch("apps.infrastructure.storage.r2.delete_object_r2_storage")
+    def test_delete_waits_for_inflight_new_claim_and_preserves_replacement_storage(
+        self,
+        delete_object_r2_storage,
+    ):
+        tenant = Tenant.objects.create(
+            name="Create First Namespace Race",
+            code="create-first-namespace-race",
+            is_active=True,
+        )
+        target_user = User.objects.create_user(
+            username="create-first-target",
+            password="test1234",
+            tenant=tenant,
+        )
+        target = Student.objects.create(
+            tenant=tenant,
+            user=target_user,
+            ps_number="CREATE-FIRST",
+            name="삭제 대상",
+            omr_code="94000001",
+        )
+        target.deleted_at = timezone.now()
+        target.ps_number = f"_del_{target.id}_CREATE-FIRST"
+        target.save(update_fields=["deleted_at", "ps_number"])
+        claim_locked = threading.Event()
+        release_claim = threading.Event()
+        delete_started = threading.Event()
+        delete_finished = threading.Event()
+        errors = []
+        created_ids = []
+        from academy.adapters.db.django import repositories_students
+
+        real_student_create = repositories_students.student_create
+
+        def blocking_student_create(*args, **kwargs):
+            claim_locked.set()
+            if not release_claim.wait(timeout=10):
+                raise TimeoutError("claim release timed out")
+            return real_student_create(*args, **kwargs)
+
+        def create_worker():
+            close_old_connections()
+            try:
+                replacement = create_student_account(
+                    tenant=tenant,
+                    student_data={
+                        "ps_number": "CREATE-FIRST",
+                        "name": "새 학생",
+                        "phone": "01094000002",
+                        "parent_phone": "",
+                        "omr_code": "94000002",
+                    },
+                    password="test1234",
+                ).student
+                created_ids.append(replacement.id)
+                InventoryFile.objects.create(
+                    tenant=tenant,
+                    scope="student",
+                    student_ps="CREATE-FIRST",
+                    display_name="replacement.pdf",
+                    original_name="replacement.pdf",
+                    r2_key=(
+                        f"tenants/{tenant.id}/students/CREATE-FIRST/"
+                        "inventory/replacement.pdf"
+                    ),
+                    content_type="application/pdf",
+                )
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        def delete_worker():
+            close_old_connections()
+            try:
+                delete_started.set()
+                permanently_delete_students(tenant=tenant, student_ids=[target.id])
+                delete_finished.set()
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        with patch(
+            "apps.domains.students.services.creation.student_repo.student_create",
+            side_effect=blocking_student_create,
+        ):
+            create_thread = threading.Thread(target=create_worker)
+            create_thread.start()
+            self.assertTrue(claim_locked.wait(timeout=5))
+            delete_thread = threading.Thread(target=delete_worker)
+            delete_thread.start()
+            self.assertTrue(delete_started.wait(timeout=5))
+            self.assertFalse(delete_finished.wait(timeout=1))
+            release_claim.set()
+            create_thread.join(timeout=10)
+            delete_thread.join(timeout=10)
+
+        self.assertFalse(create_thread.is_alive())
+        self.assertFalse(delete_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(delete_finished.is_set())
+        self.assertEqual(len(created_ids), 1)
+        self.assertFalse(Student.objects.filter(pk=target.pk).exists())
+        replacement_file = InventoryFile.objects.get(
+            tenant=tenant,
+            student_ps="CREATE-FIRST",
+        )
+        self.assertTrue(Student.objects.filter(pk=created_ids[0]).exists())
+        self.assertFalse(
+            SubmissionStorageCleanupIntent.objects.filter(
+                object_key=replacement_file.r2_key
+            ).exists()
+        )
+        delete_object_r2_storage.assert_not_called()
 
 
 class TestBulkPermanentDeleteTenantIsolation(TestCase):
@@ -1183,6 +1419,62 @@ class TestBulkPermanentDeleteTenantIsolation(TestCase):
         self.assertTrue(Student.objects.filter(id=replacement.id).exists())
         self.assertTrue(InventoryFile.objects.filter(id=evidence.id).exists())
         self.assertFalse(SubmissionStorageCleanupIntent.objects.filter(object_key=evidence.r2_key).exists())
+        delete_object_r2_storage.assert_not_called()
+
+    @patch("apps.infrastructure.storage.r2.delete_object_r2_storage")
+    def test_permanent_delete_rejects_legacy_inventory_with_unselected_predecessor(
+        self,
+        delete_object_r2_storage,
+    ):
+        original_ps = self.student_a.ps_number
+        selected_tombstone = f"_del_{self.student_a.id}_{original_ps}"
+        self.student_a.ps_number = selected_tombstone
+        self.student_a.save(update_fields=["ps_number"])
+        other_user = User.objects.create_user(
+            username="other-deleted-predecessor",
+            password="test1234",
+            tenant=self.tenant_a,
+        )
+        other = Student.objects.create(
+            tenant=self.tenant_a,
+            user=other_user,
+            ps_number="OTHER-PREVIOUS",
+            name="다른 이전 학생",
+            phone="01077770003",
+            parent_phone="01077770004",
+            omr_code="77770003",
+        )
+        other_tombstone = f"_del_{other.id}_{original_ps}"
+        Student.objects.filter(pk=other.pk).update(
+            ps_number=other_tombstone,
+            deleted_at=timezone.now(),
+        )
+        evidence = InventoryFile.objects.create(
+            tenant=self.tenant_a,
+            scope="student",
+            student_ps=original_ps,
+            display_name="소유자불명.pdf",
+            r2_key=(
+                f"tenants/{self.tenant_a.id}/students/"
+                f"{original_ps}/inventory/ambiguous-predecessor.pdf"
+            ),
+            original_name="ambiguous-predecessor.pdf",
+            size_bytes=47,
+            content_type="application/pdf",
+        )
+
+        response = self._call(self.tenant_a, self.admin_a, [self.student_a.id])
+
+        self.assertEqual(response.status_code, 409, response.data)
+        self.assertEqual(response.data["code"], "student_storage_namespace_conflict")
+        self.assertTrue(Student.objects.filter(pk=self.student_a.pk).exists())
+        self.assertTrue(Student.objects.filter(pk=other.pk).exists())
+        self.assertTrue(InventoryFile.objects.filter(pk=evidence.pk).exists())
+        self.assertFalse(
+            SubmissionStorageCleanupIntent.objects.filter(
+                object_key=evidence.r2_key
+            ).exists()
+        )
         delete_object_r2_storage.assert_not_called()
 
     @patch("apps.infrastructure.storage.r2.delete_object_r2_storage")

@@ -110,6 +110,23 @@ def inventory_student_ps_metadata_exists(*, tenant_id: int, ps_number: str) -> b
     ).exists()
 
 
+def student_inventory_namespace_is_attributable(
+    *,
+    tenant_id: int,
+    student_id: int,
+    ps_number: str,
+) -> bool:
+    from apps.support.inventory.student_dependencies import (
+        student_storage_namespace_has_legacy_conflict,
+    )
+
+    return not student_storage_namespace_has_legacy_conflict(
+        tenant_id=tenant_id,
+        student_id=student_id,
+        ps_number=ps_number,
+    )
+
+
 def delete_submission_storage_for_permanent_delete(
     *,
     tenant_id: int,

@@ -57,17 +57,31 @@ namespace에 공존하는 경우 학생/학부모 list·download는 `409
 student_storage_namespace_conflict`로 차단하되, replacement가 정상 claim 뒤 새로 만든
 자기 파일은 허용한다. 2026-09-10 production/development PII-free read-only audit에서는 이
 legacy conflict 조합이 0건이어서 데이터 migration은 필요하지 않았다.
+active replacement 이전의 legacy metadata가 원래 namespace에 남은 상태에서는 replacement의
+soft delete나 일반 학생번호 변경도 그 metadata를 자기 tombstone/새 번호로 옮기지 않고
+`student_storage_namespace_conflict`로 전체 identity mutation을 되돌린다.
 
 student scope의 folder create/rename/delete, file rename/delete, upload attach와 file/folder
 move 최종 metadata write는 같은 student-PS namespace lock 아래에서 활성 owner와 최신
-row scope를 다시 읽는다. R2 copy/PUT 같은 긴 network 작업은 transaction 밖에서 실행하고,
-최종 attach/move가 소유권 변경에 져서 실패하면 새 exact object만 보상 정리한다. 따라서
-soft delete/reuse와 겹친 오래된 삭제 요청이 tombstone owner의 파일을 지울 수 없다.
+row scope를 다시 읽는다. file/folder move는 student/admin scope 모두 동일 scope의 move를
+직렬화하고 전체 folder parent·file folder/key snapshot 및 현재 target ancestry를 다시
+검사해 stale copy commit과 parent cycle을 거부한다. 모든 이동은 논리 경로가 같아도
+128-bit fresh destination key에 복사하므로 기존 canonical destination이나 source key를
+pre-commit에 덮어쓰지 않는다. 최종 transaction은 exact object-key attachability를 확인한
+뒤 DB ownership만 넘긴다. R2 copy/PUT 같은 긴 network 작업은 transaction 밖에서 실행하고,
+최종 attach/move가 소유권 변경에 져서 실패하면 새 exact object만 owner scan 후 보상
+정리한다. 성공 commit 뒤 old/replaced key 삭제 실패는 이미 성공한 이동을 500으로 바꾸지
+않고 durable cleanup intent로 재시도한다. 따라서 soft delete/reuse와 겹친 오래된 삭제
+요청이 tombstone owner의 파일을 지울 수 없다.
+provider copy 실패는 raw 예외를 노출하지 않고 `502 inventory_storage_copy_failed`, final
+ownership/topology 재검증 충돌은 `409 inventory_move_conflict`, 예상하지 못한 DB 실패는
+`500 inventory_move_commit_failed`로 응답하며 모두 새 detached key 보상 정리를 먼저
+수행한다.
 
 검증은 `apps/domains/inventory/tests/test_hardening.py`,
 `apps/domains/inventory/tests/test_student_upload_lifecycle_concurrency_pg.py`와
 `tests/test_student_reported_scores.py`의 학생·학부모 권한, sibling/tenant·폴더 경계,
 R2 업로드 성공, reload, 128-bit key, 메타데이터 실패 exact-key/durable intent 정리,
 PUT/attach와 soft/permanent delete의 양방향 PostgreSQL 경쟁, soft delete와 오래된 file
-delete 경쟁 회귀를 사용한다. 운영 확인은 개인 파일을 다운로드하지 않고 tenant별 행 수,
+delete 경쟁, move stale-copy/key/path/topology/ancestry/cleanup 회귀를 사용한다. 운영 확인은 개인 파일을 다운로드하지 않고 tenant별 행 수,
 MIME/상태 집계와 R2 HEAD의 존재·크기·content-type 일치만 읽는다.
