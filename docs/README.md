@@ -81,6 +81,7 @@ backend/docs/
 | DB 확장·테넌트 분리 판단 | [infrastructure/database-scaling-and-tenant-isolation.md](infrastructure/database-scaling-and-tenant-isolation.md) |
 | 강사 AI 문제 풀이 (Beta) | [domain/teacher-problem-solver.md](domain/teacher-problem-solver.md) |
 | 선생앱 학생 업무 도우미 (Beta) | [domain/teacher-ops-assistant.md](domain/teacher-ops-assistant.md) |
+| PPT 문제 생성·문항 크롭 | [domain/ppt-question-generator.md](domain/ppt-question-generator.md) |
 | 문제 리뷰 리포트 작성·PDF/PPTX 출력 | [domain/problem-review-report.md](domain/problem-review-report.md) |
 | 타이머 Windows 배포·서명·PWA 대체 경계 | [domain/timer-distribution.md](domain/timer-distribution.md) |
 | 교사 제공 참고자료 인벤토리·보안·품질 경계 | [domain/teacher-provided-source-materials.md](domain/teacher-provided-source-materials.md) |

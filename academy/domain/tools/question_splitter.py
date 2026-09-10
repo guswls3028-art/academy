@@ -1305,16 +1305,119 @@ def _shared_range_uses_answer_instruction(text: str) -> bool:
     )
 
 
+def _expand_singleton_cross_column_shared_range(
+    regions: List[QuestionRegion],
+    text_blocks: List[TextBlock],
+    *,
+    shared_block: TextBlock,
+    start: int,
+    page_width: float,
+    page_height: float,
+    mid_x: float,
+    margin: float,
+) -> bool:
+    """Join a shared range with its same-number question in the other column."""
+    region = next((item for item in regions if item.number == start), None)
+    if region is None:
+        return False
+
+    def _in_left(block: TextBlock) -> bool:
+        return ((block.x0 + block.x1) / 2) < mid_x
+
+    shared_in_left = _in_left(shared_block)
+    body_anchors = [
+        block
+        for block in text_blocks
+        if block is not shared_block
+        and _in_left(block) != shared_in_left
+        and _extract_question_number(block.text) == start
+        and block.y0 < page_height * 0.92
+    ]
+    if not body_anchors:
+        return False
+    body_anchor = min(body_anchors, key=lambda block: (block.y0, block.x0))
+
+    def _content_until_next_anchor(
+        *,
+        in_left: bool,
+        start_y: float,
+        ignored_block: TextBlock,
+    ) -> List[TextBlock]:
+        next_anchor_y = page_height * 0.92
+        for block in text_blocks:
+            if block is ignored_block or _in_left(block) != in_left:
+                continue
+            if block.y0 <= start_y + 1.0:
+                continue
+            if _extract_question_number(block.text) is not None:
+                next_anchor_y = min(next_anchor_y, block.y0 - margin)
+
+        return [
+            block
+            for block in text_blocks
+            if _in_left(block) == in_left
+            and block.y1 >= start_y - margin
+            and block.y0 <= next_anchor_y
+            and not _looks_like_footer_folio(
+                block,
+                page_width=page_width,
+                page_height=page_height,
+            )
+        ]
+
+    shared_content = _content_until_next_anchor(
+        in_left=shared_in_left,
+        start_y=shared_block.y0,
+        ignored_block=shared_block,
+    )
+    body_content = _content_until_next_anchor(
+        in_left=not shared_in_left,
+        start_y=body_anchor.y0,
+        ignored_block=body_anchor,
+    )
+    if not shared_content or not body_content:
+        return False
+
+    pad_x = max(page_width * 0.012, margin * 2)
+    pad_bottom = max(page_height * 0.035, margin * 3)
+    combined_content = [*shared_content, *body_content]
+    combined_bbox = (
+        max(0.0, min(block.x0 for block in combined_content) - pad_x),
+        max(0.0, min(shared_block.y0, body_anchor.y0) - margin),
+        min(page_width, max(block.x1 for block in combined_content) + pad_x),
+        min(page_height, max(block.y1 for block in combined_content) + pad_bottom),
+    )
+    body_bbox = (
+        max(0.0, min(block.x0 for block in body_content) - pad_x),
+        max(0.0, body_anchor.y0 - margin),
+        min(page_width, max(block.x1 for block in body_content) + pad_x),
+        min(page_height, max(block.y1 for block in body_content) + pad_bottom),
+    )
+
+    region.body_bbox = body_bbox
+    region.context_bbox = combined_bbox
+    region.set_display_bbox(combined_bbox)
+    region.audit_bbox = combined_bbox
+    region.semantic_flags = tuple(sorted({
+        *region.semantic_flags,
+        "shared_context",
+        "shared_context_cross_column",
+        "shared_context_first",
+    }))
+    return True
+
+
 def _expand_shared_range_regions(
     regions: List[QuestionRegion],
     text_blocks: List[TextBlock],
     *,
+    page_width: float,
     page_height: float,
     mid_x: float,
     margin: float,
 ) -> None:
     """[9,10] 같은 공통 자료 묶음의 display/body/context 역할을 분리한다."""
-    if len(regions) < 2:
+    if not regions:
         return
 
     for block in text_blocks:
@@ -1324,6 +1427,16 @@ def _expand_shared_range_regions(
         start, end = shared_range
         group = [r for r in regions if start <= r.number <= end]
         if len(group) < 2:
+            _expand_singleton_cross_column_shared_range(
+                regions,
+                text_blocks,
+                shared_block=block,
+                start=start,
+                page_width=page_width,
+                page_height=page_height,
+                mid_x=mid_x,
+                margin=margin,
+            )
             continue
 
         block_in_left = ((block.x0 + block.x1) / 2) < mid_x
@@ -2235,6 +2348,7 @@ def split_questions(
     _expand_shared_range_regions(
         regions,
         sorted_blocks,
+        page_width=page_width,
         page_height=page_height,
         mid_x=mid_x,
         margin=margin,

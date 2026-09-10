@@ -91,30 +91,47 @@ def _fit_image_to_slide(
     if fit_mode == "stretch":
         return 0, 0, slide_w, slide_h
 
+    if fit_mode == "cover":
+        return 0, 0, slide_w, slide_h
+
     if img_w <= 0 or img_h <= 0:
         return 0, 0, slide_w, slide_h
 
     img_ratio = img_w / img_h
     slide_ratio = slide_w / slide_h
 
-    if fit_mode == "cover":
-        if img_ratio > slide_ratio:
-            height = slide_h
-            width = int(height * img_ratio)
-        else:
-            width = slide_w
-            height = int(width / img_ratio)
-    else:  # contain
-        if img_ratio > slide_ratio:
-            width = slide_w
-            height = int(width / img_ratio)
-        else:
-            height = slide_h
-            width = int(height * img_ratio)
+    if img_ratio > slide_ratio:
+        width = slide_w
+        height = int(width / img_ratio)
+    else:
+        height = slide_h
+        width = int(height * img_ratio)
 
     left = (slide_w - width) // 2
     top = (slide_h - height) // 2
     return left, top, width, height
+
+
+def _cover_crop_ratios(
+    img_w: int,
+    img_h: int,
+    slide_w: int,
+    slide_h: int,
+) -> Tuple[float, float, float, float]:
+    """Return centered (left, top, right, bottom) source crop fractions."""
+    if img_w <= 0 or img_h <= 0 or slide_w <= 0 or slide_h <= 0:
+        return 0.0, 0.0, 0.0, 0.0
+
+    img_ratio = img_w / img_h
+    slide_ratio = slide_w / slide_h
+    if img_ratio > slide_ratio:
+        visible_fraction = slide_ratio / img_ratio
+        crop = max(0.0, min(0.5, (1.0 - visible_fraction) / 2.0))
+        return crop, 0.0, crop, 0.0
+
+    visible_fraction = img_ratio / slide_ratio
+    crop = max(0.0, min(0.5, (1.0 - visible_fraction) / 2.0))
+    return 0.0, crop, 0.0, crop
 
 
 def add_slide(
@@ -149,9 +166,21 @@ def add_slide(
         img_w, img_h, prs.slide_width, prs.slide_height, fit_mode=fit_mode,
     )
 
-    # Add picture
+    # Add picture. Cover uses real OOXML crop values so the picture remains
+    # inside the slide when a teacher edits or reuses the generated deck.
     img_stream = io.BytesIO(image_bytes)
-    slide.shapes.add_picture(img_stream, left, top, width, height)
+    picture = slide.shapes.add_picture(img_stream, left, top, width, height)
+    if fit_mode == "cover":
+        crop_left, crop_top, crop_right, crop_bottom = _cover_crop_ratios(
+            img_w,
+            img_h,
+            prs.slide_width,
+            prs.slide_height,
+        )
+        picture.crop_left = crop_left
+        picture.crop_top = crop_top
+        picture.crop_right = crop_right
+        picture.crop_bottom = crop_bottom
 
 
 def save_to_bytes(prs: Presentation) -> bytes:

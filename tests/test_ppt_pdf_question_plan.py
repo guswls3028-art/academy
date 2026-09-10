@@ -210,3 +210,70 @@ def test_ppt_pdf_image_segmentation_fallback_adds_question_slides(tmp_path, monk
     assert len(composer.slides) == 2
     assert all(slide.startswith(b"\x89PNG") for slide in composer.slides)
     assert cleanup_calls == [["seg-tmp"]]
+
+
+def test_ppt_pdf_shared_range_keeps_opposite_column_question_body():
+    """A shared [7~8] context must not replace the actual right-column Q7."""
+    from academy.domain.tools.paper_type import PaperType, PaperTypeResult
+    from academy.domain.tools.question_splitter import TextBlock, split_questions
+
+    page_width, page_height = 595.0, 842.0
+    paper_type = PaperTypeResult(
+        paper_type=PaperType.CLEAN_PDF_DUAL,
+        confidence=0.99,
+        is_dual_column=True,
+        is_quadrant=False,
+        is_handwriting_present=False,
+        has_embedded_text=True,
+        debug={
+            "has_embedded_text": True,
+            "is_dual_text": True,
+            "is_dual_pixel": False,
+        },
+    )
+    blocks = [
+        TextBlock(
+            text="[7~8] 그림은 수소 원자의 중심 입자 A와 주위를 운동하는 입자 B이다.",
+            x0=35.0,
+            y0=44.0,
+            x1=275.0,
+            y1=79.0,
+        ),
+        TextBlock(
+            text="문항 7~8 원자 모형 그림 삽입 위치",
+            x0=37.0,
+            y0=340.0,
+            x1=55.0,
+            y1=567.0,
+        ),
+        TextBlock(
+            text="7. A와 B를 옳게 짝 지은 것은?",
+            x0=308.0,
+            y0=44.0,
+            x1=494.0,
+            y1=61.0,
+        ),
+        TextBlock(
+            text="A B ① 양성자 중성자 ② 중성자 전자 ③ 양성자 전자",
+            x0=338.0,
+            y0=104.0,
+            x1=519.0,
+            y1=247.0,
+        ),
+    ]
+
+    regions = split_questions(
+        blocks,
+        page_width,
+        page_height,
+        page_index=4,
+        paper_type=paper_type,
+        prefer_marginal=True,
+    )
+
+    assert [region.number for region in regions] == [7]
+    region = regions[0]
+    assert region.bbox[0] < page_width * 0.10
+    assert region.bbox[2] > page_width * 0.85
+    assert region.bbox[3] > page_height * 0.65
+    assert "shared_context_cross_column" in region.semantic_flags
