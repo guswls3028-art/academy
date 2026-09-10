@@ -1,4 +1,6 @@
+import json
 from datetime import date, datetime, time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -11,6 +13,7 @@ from rest_framework.test import APIRequestFactory
 from apps.core.models import Tenant, TenantMembership
 from apps.domains.staffs.models import (
     ExpenseRecord,
+    PayrollReferenceDeductionPolicy,
     PayrollSnapshot,
     Staff,
     StaffWorkType,
@@ -72,6 +75,76 @@ class StaffOperationsContractTests(TestCase):
             name=name,
             phone="",
         )
+
+    def test_reference_deduction_uses_legacy_won_rounding_and_reconciles_components(self):
+        reference = PayrollReferenceDeductionPolicy.calculate(313_250)
+
+        self.assertEqual(reference["business_income_tax"], 9_398)
+        self.assertEqual(reference["local_income_tax"], 939)
+        self.assertEqual(reference["deduction_total"], 10_337)
+        self.assertEqual(reference["net_work_amount"], 302_913)
+        self.assertEqual(
+            reference["business_income_tax"] + reference["local_income_tax"],
+            reference["deduction_total"],
+        )
+
+    def test_work_record_amount_uses_exact_paid_minutes_before_display_hour_rounding(self):
+        staff = self._staff("분단위 정본 직원")
+        work_type = WorkType.objects.create(
+            tenant=self.tenant,
+            name="분단위 근무",
+            base_hourly_wage=15_000,
+        )
+
+        record = WorkRecord.objects.create(
+            tenant=self.tenant,
+            staff=staff,
+            work_type=work_type,
+            date=date(2026, 8, 15),
+            start_time=time(15, 36),
+            end_time=time(19, 28),
+        )
+
+        self.assertEqual(str(record.work_hours), "3.87")
+        self.assertEqual(record.amount, 58_000)
+
+    def test_memo_only_patch_preserves_existing_canonical_payroll_amount(self):
+        staff = self._staff("기존 정산 보존 직원")
+        work_type = WorkType.objects.create(
+            tenant=self.tenant,
+            name="기존 분단위 근무",
+            base_hourly_wage=15_000,
+        )
+        record = WorkRecord.objects.create(
+            tenant=self.tenant,
+            staff=staff,
+            work_type=work_type,
+            date=date(2026, 8, 15),
+            start_time=time(15, 36),
+            end_time=time(19, 28),
+            work_hours="3.87",
+            amount=58_050,
+            resolved_hourly_wage=15_000,
+            is_manually_edited=True,
+        )
+        WorkRecord.objects.filter(pk=record.pk).update(
+            is_manually_edited=False,
+        )
+
+        response = WorkRecordViewSet.as_view({"patch": "partial_update"})(
+            self._request(
+                "patch",
+                f"/staffs/work-records/{record.id}/",
+                {"memo": "확인 메모만 변경"},
+            ),
+            pk=record.id,
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        record.refresh_from_db()
+        self.assertEqual(record.memo, "확인 메모만 변경")
+        self.assertEqual(str(record.work_hours), "3.87")
+        self.assertEqual(record.amount, 58_050)
 
     def test_payroll_list_applies_staff_year_month_filters(self):
         selected = self._staff("선택 직원")
@@ -398,6 +471,56 @@ class StaffOperationsContractTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertFalse(WorkRecord.objects.filter(staff=staff).exists())
 
+    def test_staff_summary_allows_self_and_denies_other_staff(self):
+        user = User.objects.create_user(
+            username="self-payroll-summary-user",
+            password="1234",
+        )
+        TenantMembership.objects.create(
+            tenant=self.tenant,
+            user=user,
+            role="staff",
+            is_active=True,
+        )
+        staff = Staff.objects.create(
+            tenant=self.tenant,
+            user=user,
+            name="본인 급여 조교",
+        )
+        other = self._staff("다른 조교")
+        WorkRecord.objects.create(
+            tenant=self.tenant,
+            staff=staff,
+            work_type=self.work_type,
+            date=date(2026, 8, 3),
+            start_time=time(9, 0),
+            end_time=time(10, 0),
+        )
+        ExpenseRecord.objects.create(
+            tenant=self.tenant,
+            staff=staff,
+            date=date(2026, 8, 4),
+            title="교통비",
+            amount=3_000,
+            status="APPROVED",
+        )
+
+        def request_for(target):
+            request = self.factory.get(
+                f"/staffs/{target.id}/summary/",
+                {"date_from": "2026-08-01", "date_to": "2026-08-31"},
+            )
+            request.tenant = self.tenant
+            request.user = user
+            return StaffViewSet.as_view({"get": "summary"})(request, pk=target.id)
+
+        own_response = request_for(staff)
+        self.assertEqual(own_response.status_code, 200, own_response.data)
+        self.assertEqual(own_response.data["work_amount"], 12_000)
+        self.assertEqual(own_response.data["reference_deduction_total"], 396)
+        self.assertEqual(own_response.data["reference_transfer_amount"], 14_604)
+        self.assertEqual(request_for(other).status_code, 403)
+
     def test_self_end_work_rejects_adjustment_amount(self):
         user = User.objects.create_user(
             username="self-adjust-user",
@@ -699,7 +822,7 @@ class StaffOperationsContractTests(TestCase):
         self.work_type.base_hourly_wage = 20_000
         self.work_type.save(update_fields=["base_hourly_wage"])
         record.end_time = time(10, 0)
-        record.save()
+        record.save(recalculate_payroll=True)
 
         self.assertEqual(record.resolved_hourly_wage, 12_000)
         self.assertEqual(record.amount, 12_000)
@@ -934,6 +1057,26 @@ class StaffOperationsContractTests(TestCase):
             start_time=time(9, 0),
             end_time=time(10, 0),
         )
+        WorkRecord.objects.create(
+            tenant=self.tenant,
+            staff=ready,
+            work_type=self.work_type,
+            date=date(2026, 8, 3),
+            start_time=time(9, 0),
+            end_time=time(10, 0),
+            work_hours=1,
+            amount=12_000,
+            resolved_hourly_wage=12_000,
+            is_manually_edited=True,
+        )
+        WorkRecord.objects.create(
+            tenant=self.tenant,
+            staff=ready,
+            work_type=self.work_type,
+            date=date(2026, 8, 6),
+            start_time=time(8, 0),
+            end_time=time(21, 0),
+        )
         ExpenseRecord.objects.create(
             tenant=self.tenant,
             staff=ready,
@@ -979,17 +1122,36 @@ class StaffOperationsContractTests(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         rows = {row["staff_id"]: row for row in response.data["rows"]}
         self.assertEqual(set(rows), {ready.id, review.id})
-        self.assertEqual(rows[ready.id]["work_hours"], 1.0)
-        self.assertEqual(rows[ready.id]["work_amount"], 12_000)
+        self.assertEqual(rows[ready.id]["work_hours"], 15.0)
+        self.assertEqual(rows[ready.id]["work_amount"], 180_000)
         self.assertEqual(rows[ready.id]["approved_expense_amount"], 3_000)
-        self.assertEqual(rows[ready.id]["total_amount"], 15_000)
+        self.assertEqual(rows[ready.id]["total_amount"], 183_000)
+        self.assertEqual(rows[ready.id]["reference_deduction_total"], 5_940)
+        self.assertEqual(rows[ready.id]["reference_net_work_amount"], 174_060)
+        self.assertEqual(rows[ready.id]["reference_transfer_amount"], 177_060)
+        self.assertEqual(rows[ready.id]["duplicate_work_record_count"], 2)
+        self.assertEqual(rows[ready.id]["abnormal_long_work_record_count"], 1)
+        self.assertEqual(rows[ready.id]["manually_edited_work_record_count"], 1)
+        self.assertEqual(
+            rows[ready.id]["work_type_breakdown"],
+            [{
+                "work_type_id": self.work_type.id,
+                "work_type_name": "조교 근무",
+                "color": "#4CAF50",
+                "record_count": 3,
+                "work_hours": 15.0,
+                "work_amount": 180_000,
+            }],
+        )
         self.assertEqual(rows[ready.id]["settlement_status"], "OPEN")
         self.assertTrue(rows[ready.id]["can_close"])
         self.assertEqual(rows[review.id]["pending_expense_count"], 1)
         self.assertEqual(rows[review.id]["pending_expense_amount"], 2_000)
         self.assertEqual(rows[review.id]["settlement_status"], "NEEDS_REVIEW")
         self.assertFalse(rows[review.id]["can_close"])
-        self.assertEqual(response.data["totals"]["total_amount"], 15_000)
+        self.assertEqual(response.data["totals"]["total_amount"], 183_000)
+        self.assertEqual(response.data["totals"]["advisory_issue_count"], 4)
+        self.assertEqual(response.data["totals"]["reference_transfer_amount"], 177_060)
         self.assertEqual(response.data["totals"]["needs_review_count"], 1)
 
         WorkMonthLock.objects.create(
@@ -1041,3 +1203,28 @@ class StaffOperationsContractTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
+
+    def test_payroll_overview_openapi_contract_declares_query_and_response(self):
+        schema_path = Path(__file__).resolve().parents[4] / "schema" / "openapi.json"
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        operation = schema["paths"]["/api/v1/staffs/payroll-overview/"]["get"]
+
+        required_query = {
+            parameter["name"]
+            for parameter in operation["parameters"]
+            if parameter["in"] == "query" and parameter.get("required")
+        }
+        self.assertEqual(required_query, {"year", "month"})
+        response_schema = operation["responses"]["200"]["content"][
+            "application/json"
+        ]["schema"]
+        self.assertEqual(
+            response_schema["$ref"],
+            "#/components/schemas/StaffPayrollOverview",
+        )
+        row_properties = schema["components"]["schemas"][
+            "StaffPayrollOverviewRow"
+        ]["properties"]
+        self.assertIn("reference_transfer_amount", row_properties)
+        self.assertIn("work_type_breakdown", row_properties)
+        self.assertIn("advisory_issue_count", row_properties)

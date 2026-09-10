@@ -194,5 +194,5 @@ def end_work_record(
 
         # WorkRecord.save() freezes the resolved wage and calculates the
         # canonical work_hours/amount when end_time is present.
-        locked_record.save()
+        locked_record.save(recalculate_payroll=True)
         return locked_record

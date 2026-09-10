@@ -70,11 +70,84 @@ class StaffWorkSummarySerializer(serializers.Serializer):
     work_amount = serializers.IntegerField()
     expense_amount = serializers.IntegerField()
     total_amount = serializers.IntegerField()
+    reference_business_income_tax = serializers.IntegerField()
+    reference_local_income_tax = serializers.IntegerField()
+    reference_deduction_total = serializers.IntegerField()
+    reference_net_work_amount = serializers.IntegerField()
+    reference_transfer_amount = serializers.IntegerField()
 
 
 class StaffPayrollOverviewQuerySerializer(serializers.Serializer):
     year = serializers.IntegerField(min_value=2020, max_value=2100)
     month = serializers.IntegerField(min_value=1, max_value=12)
+
+
+class StaffPayrollWorkTypeBreakdownSerializer(serializers.Serializer):
+    work_type_id = serializers.IntegerField(allow_null=True)
+    work_type_name = serializers.CharField(allow_null=True)
+    color = serializers.CharField(allow_null=True)
+    record_count = serializers.IntegerField()
+    work_hours = serializers.FloatField()
+    work_amount = serializers.IntegerField()
+
+
+class StaffPayrollOverviewRowSerializer(serializers.Serializer):
+    staff_id = serializers.IntegerField()
+    name = serializers.CharField()
+    position = serializers.CharField()
+    position_label = serializers.CharField()
+    account_role = serializers.CharField()
+    is_active = serializers.BooleanField()
+    can_manage_staff = serializers.BooleanField()
+    pay_type = serializers.CharField()
+    work_hours = serializers.FloatField()
+    work_amount = serializers.IntegerField()
+    approved_expense_amount = serializers.IntegerField()
+    pending_expense_amount = serializers.IntegerField()
+    pending_expense_count = serializers.IntegerField()
+    total_amount = serializers.IntegerField()
+    reference_business_income_tax = serializers.IntegerField()
+    reference_local_income_tax = serializers.IntegerField()
+    reference_deduction_total = serializers.IntegerField()
+    reference_net_work_amount = serializers.IntegerField()
+    reference_transfer_amount = serializers.IntegerField()
+    work_type_breakdown = StaffPayrollWorkTypeBreakdownSerializer(many=True)
+    open_work_record_count = serializers.IntegerField()
+    incomplete_work_record_count = serializers.IntegerField()
+    duplicate_work_record_count = serializers.IntegerField()
+    abnormal_long_work_record_count = serializers.IntegerField()
+    manually_edited_work_record_count = serializers.IntegerField()
+    advisory_issue_count = serializers.IntegerField()
+    assigned_work_type_count = serializers.IntegerField()
+    settlement_status = serializers.CharField()
+    can_close = serializers.BooleanField()
+
+
+class StaffPayrollOverviewTotalsSerializer(serializers.Serializer):
+    staff_count = serializers.IntegerField()
+    work_hours = serializers.FloatField()
+    work_amount = serializers.IntegerField()
+    approved_expense_amount = serializers.IntegerField()
+    pending_expense_amount = serializers.IntegerField()
+    total_amount = serializers.IntegerField()
+    reference_business_income_tax = serializers.IntegerField()
+    reference_local_income_tax = serializers.IntegerField()
+    reference_deduction_total = serializers.IntegerField()
+    reference_net_work_amount = serializers.IntegerField()
+    reference_transfer_amount = serializers.IntegerField()
+    advisory_issue_count = serializers.IntegerField()
+    needs_review_count = serializers.IntegerField()
+    closed_count = serializers.IntegerField()
+    work_type_breakdown = StaffPayrollWorkTypeBreakdownSerializer(many=True)
+
+
+class StaffPayrollOverviewSerializer(serializers.Serializer):
+    year = serializers.IntegerField()
+    month = serializers.IntegerField()
+    date_from = serializers.DateField()
+    date_to = serializers.DateField()
+    totals = StaffPayrollOverviewTotalsSerializer()
+    rows = StaffPayrollOverviewRowSerializer(many=True)
 
 
 # ---------------------------

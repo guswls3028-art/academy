@@ -13445,6 +13445,275 @@
         ],
         "type": "object"
       },
+      "StaffPayrollOverview": {
+        "properties": {
+          "date_from": {
+            "format": "date",
+            "type": "string"
+          },
+          "date_to": {
+            "format": "date",
+            "type": "string"
+          },
+          "month": {
+            "type": "integer"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/StaffPayrollOverviewRow"
+            },
+            "type": "array"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/StaffPayrollOverviewTotals"
+          },
+          "year": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "date_from",
+          "date_to",
+          "month",
+          "rows",
+          "totals",
+          "year"
+        ],
+        "type": "object"
+      },
+      "StaffPayrollOverviewRow": {
+        "properties": {
+          "abnormal_long_work_record_count": {
+            "type": "integer"
+          },
+          "account_role": {
+            "type": "string"
+          },
+          "advisory_issue_count": {
+            "type": "integer"
+          },
+          "approved_expense_amount": {
+            "type": "integer"
+          },
+          "assigned_work_type_count": {
+            "type": "integer"
+          },
+          "can_close": {
+            "type": "boolean"
+          },
+          "can_manage_staff": {
+            "type": "boolean"
+          },
+          "duplicate_work_record_count": {
+            "type": "integer"
+          },
+          "incomplete_work_record_count": {
+            "type": "integer"
+          },
+          "is_active": {
+            "type": "boolean"
+          },
+          "manually_edited_work_record_count": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "open_work_record_count": {
+            "type": "integer"
+          },
+          "pay_type": {
+            "type": "string"
+          },
+          "pending_expense_amount": {
+            "type": "integer"
+          },
+          "pending_expense_count": {
+            "type": "integer"
+          },
+          "position": {
+            "type": "string"
+          },
+          "position_label": {
+            "type": "string"
+          },
+          "reference_business_income_tax": {
+            "type": "integer"
+          },
+          "reference_deduction_total": {
+            "type": "integer"
+          },
+          "reference_local_income_tax": {
+            "type": "integer"
+          },
+          "reference_net_work_amount": {
+            "type": "integer"
+          },
+          "reference_transfer_amount": {
+            "type": "integer"
+          },
+          "settlement_status": {
+            "type": "string"
+          },
+          "staff_id": {
+            "type": "integer"
+          },
+          "total_amount": {
+            "type": "integer"
+          },
+          "work_amount": {
+            "type": "integer"
+          },
+          "work_hours": {
+            "format": "double",
+            "type": "number"
+          },
+          "work_type_breakdown": {
+            "items": {
+              "$ref": "#/components/schemas/StaffPayrollWorkTypeBreakdown"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "abnormal_long_work_record_count",
+          "account_role",
+          "advisory_issue_count",
+          "approved_expense_amount",
+          "assigned_work_type_count",
+          "can_close",
+          "can_manage_staff",
+          "duplicate_work_record_count",
+          "incomplete_work_record_count",
+          "is_active",
+          "manually_edited_work_record_count",
+          "name",
+          "open_work_record_count",
+          "pay_type",
+          "pending_expense_amount",
+          "pending_expense_count",
+          "position",
+          "position_label",
+          "reference_business_income_tax",
+          "reference_deduction_total",
+          "reference_local_income_tax",
+          "reference_net_work_amount",
+          "reference_transfer_amount",
+          "settlement_status",
+          "staff_id",
+          "total_amount",
+          "work_amount",
+          "work_hours",
+          "work_type_breakdown"
+        ],
+        "type": "object"
+      },
+      "StaffPayrollOverviewTotals": {
+        "properties": {
+          "advisory_issue_count": {
+            "type": "integer"
+          },
+          "approved_expense_amount": {
+            "type": "integer"
+          },
+          "closed_count": {
+            "type": "integer"
+          },
+          "needs_review_count": {
+            "type": "integer"
+          },
+          "pending_expense_amount": {
+            "type": "integer"
+          },
+          "reference_business_income_tax": {
+            "type": "integer"
+          },
+          "reference_deduction_total": {
+            "type": "integer"
+          },
+          "reference_local_income_tax": {
+            "type": "integer"
+          },
+          "reference_net_work_amount": {
+            "type": "integer"
+          },
+          "reference_transfer_amount": {
+            "type": "integer"
+          },
+          "staff_count": {
+            "type": "integer"
+          },
+          "total_amount": {
+            "type": "integer"
+          },
+          "work_amount": {
+            "type": "integer"
+          },
+          "work_hours": {
+            "format": "double",
+            "type": "number"
+          },
+          "work_type_breakdown": {
+            "items": {
+              "$ref": "#/components/schemas/StaffPayrollWorkTypeBreakdown"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "advisory_issue_count",
+          "approved_expense_amount",
+          "closed_count",
+          "needs_review_count",
+          "pending_expense_amount",
+          "reference_business_income_tax",
+          "reference_deduction_total",
+          "reference_local_income_tax",
+          "reference_net_work_amount",
+          "reference_transfer_amount",
+          "staff_count",
+          "total_amount",
+          "work_amount",
+          "work_hours",
+          "work_type_breakdown"
+        ],
+        "type": "object"
+      },
+      "StaffPayrollWorkTypeBreakdown": {
+        "properties": {
+          "color": {
+            "nullable": true,
+            "type": "string"
+          },
+          "record_count": {
+            "type": "integer"
+          },
+          "work_amount": {
+            "type": "integer"
+          },
+          "work_hours": {
+            "format": "double",
+            "type": "number"
+          },
+          "work_type_id": {
+            "nullable": true,
+            "type": "integer"
+          },
+          "work_type_name": {
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "color",
+          "record_count",
+          "work_amount",
+          "work_hours",
+          "work_type_id",
+          "work_type_name"
+        ],
+        "type": "object"
+      },
       "StaffWorkCurrentStatus": {
         "properties": {
           "break_minutes": {
@@ -13685,6 +13954,21 @@
           "expense_amount": {
             "type": "integer"
           },
+          "reference_business_income_tax": {
+            "type": "integer"
+          },
+          "reference_deduction_total": {
+            "type": "integer"
+          },
+          "reference_local_income_tax": {
+            "type": "integer"
+          },
+          "reference_net_work_amount": {
+            "type": "integer"
+          },
+          "reference_transfer_amount": {
+            "type": "integer"
+          },
           "staff_id": {
             "type": "integer"
           },
@@ -13701,6 +13985,11 @@
         },
         "required": [
           "expense_amount",
+          "reference_business_income_tax",
+          "reference_deduction_total",
+          "reference_local_income_tax",
+          "reference_net_work_amount",
+          "reference_transfer_amount",
           "staff_id",
           "total_amount",
           "work_amount",
@@ -41643,12 +41932,34 @@
       "get": {
         "description": "전 직원 월 정산 현황. 금액·블로커·마감 상태를 한 번에 반환한다.",
         "operationId": "staffs_payroll_overview_retrieve",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "month",
+            "required": true,
+            "schema": {
+              "maximum": 12,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "year",
+            "required": true,
+            "schema": {
+              "maximum": 2100,
+              "minimum": 2020,
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/StaffWrite"
+                  "$ref": "#/components/schemas/StaffPayrollOverview"
                 }
               }
             },
