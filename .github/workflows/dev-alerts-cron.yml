@@ -20,7 +20,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Slack 전송 생략 (평가만)"
+        description: "Slack 전송 생략 (평가만, user incident 발견 시 실패)"
         required: false
         default: "false"
       full_rules:

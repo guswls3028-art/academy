@@ -31,7 +31,8 @@ payload에 `delivery_status=not_configured`를 남긴다. 그러나 `user_incide
 `scripts/v1/set-dev-alerts-webhook.ps1`로 URL과 required 상태를 함께 바꾼다.
 `DEV_ALERTS_WEBHOOK_REQUIRED=true`인데 URL이 없으면 명령은 실패 종료한다.
 수신처 없이 평가만 하는 명시적 `--dry-run`은 허용하지만 외부 알림 정상 동작의
-증거가 아니다. SMS/LMS 설정, 실발송 테스트,
+증거가 아니다. dry-run에서 `user_incidents`가 발견되면 발송하거나 fingerprint를
+소비하지 않되, 수신 미확인 실행이므로 종료 코드 1과 실패 감사를 남긴다. SMS/LMS 설정, 실발송 테스트,
 CloudWatch transition 문자 발송 예외는 모두 제거되었다. 운영 장애용으로 승인된 공용
 카카오 템플릿이 없으므로 이 경로를 임의의 알림톡으로 대체하지 않고 fail-closed한다.
 
@@ -47,7 +48,7 @@ fingerprint를 소비하지 않는다. 폐기 전 SMS가 남긴
 실패해도 나머지 정상 평가된 경고의 전송은 시도하며, 수락된 사용자 오류만
 fingerprint를 소비한다. 실패한 전체 검사를 `All clear`로 출력하지 않는다.
 `--silent`는 정상 무경고 출력만 억제하며 실패를 성공으로 바꾸지 않는다.
-`--dry-run`도 검사 오류는 실패한다. 감사 기록 자체를 저장할 수 없어도 명령은
+`--dry-run`도 검사 오류나 미발송 사용자 민원이 있으면 실패한다. 감사 기록 자체를 저장할 수 없어도 명령은
 실패 종료하며, 예외 원문·webhook URL 대신 고정 사유와 예외 종류만 남긴다.
 `audit_failed_24h`는 `cron.check_dev_alerts` 자체의 실패를 제외한다. 크론 실패는
 GitHub 실행과 해당 감사 로그에서 직접 관측하고, 그 실패가 다시 같은 크론의 실패
