@@ -199,7 +199,7 @@ def apply_omr_ai_result(payload: Dict[str, Any]) -> Optional[int]:
     }
     submission.meta = meta
 
-    if status == "FAILED":
+    if status in {"FAILED", "REJECTED_BAD_INPUT", "FALLBACK_TO_GPU"} or error:
         fail_submission_in_memory(
             submission,
             error_message=error or "AI worker failed",

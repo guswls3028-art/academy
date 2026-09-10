@@ -3,10 +3,14 @@ AI Job Repository — Django ORM 구현 (메서드 내부에서만 apps.domains.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Optional
 
 from academy.domain.ai.entities import AIJob, AIJobStatus  # noqa: F401
+
+
+logger = logging.getLogger(__name__)
 
 
 def _persistent_job_result(
@@ -36,6 +40,24 @@ def _public_job_result(
         stored_payload,
         include_credentials=include_excel_credentials,
     )
+
+
+def cache_terminal_job_status(job, *, result_payload: Optional[dict] = None) -> None:
+    """Publish the committed DB terminal state through the shared Redis facade."""
+    try:
+        from apps.domains.ai.redis_status_cache import cache_job_status
+
+        cache_job_status(
+            tenant_id=str(job.tenant_id or ""),
+            job_id=job.job_id,
+            status=job.status,
+            job_type=job.job_type,
+            error_message=job.error_message or None,
+            result=_public_job_result(job.job_type, result_payload),
+            ttl=None,
+        )
+    except Exception as e:
+        logger.warning("Failed to cache terminal AI job in Redis: %s", e)
 
 
 def _scrub_terminal_job_payload(job) -> bool:
@@ -241,69 +263,117 @@ class DjangoAIJobRepository:
     def mark_done(self, job_id: str, now: datetime, result_payload: Optional[dict] = None) -> bool:
         from django.db import transaction
         from apps.domains.ai.models import AIJobModel, AIResultModel
-        job = AIJobModel.objects.select_for_update().filter(job_id=job_id).first()
-        if not job:
+        with transaction.atomic():
+            job = AIJobModel.objects.filter(job_id=job_id).first()
+            if not job:
+                return False
+            if job.status == "DONE":
+                return self._recover_done_job(
+                    job,
+                    now=now,
+                    result_payload=result_payload,
+                )
+            if job.status != "RUNNING":
+                logger.warning(
+                    "AI_JOB_TERMINAL_TRANSITION_REJECTED | job_id=%s from=%s to=DONE",
+                    job_id,
+                    job.status,
+                )
+                return False
+
+            persistent_result = _persistent_job_result(
+                job.job_type,
+                result_payload,
+                now=now,
+            )
+            payload_scrubbed = _scrub_terminal_job_payload(job)
+            updates = {
+                "status": "DONE",
+                "error_message": "",
+                "last_error": "",
+                "locked_by": None,
+                "locked_at": None,
+                "lease_expires_at": None,
+                "completed_at": now,
+                "updated_at": now,
+            }
+            if payload_scrubbed:
+                updates["payload"] = job.payload
+            updated = AIJobModel.objects.filter(
+                pk=job.pk,
+                status="RUNNING",
+            ).update(**updates)
+            if updated != 1:
+                current = AIJobModel.objects.filter(pk=job.pk).first()
+                if current and current.status == "DONE":
+                    return self._recover_done_job(
+                        current,
+                        now=now,
+                        result_payload=result_payload,
+                    )
+                return False
+
+            job.status = "DONE"
+            job.error_message = ""
+            job.last_error = ""
+            job.locked_by = None
+            job.locked_at = None
+            job.lease_expires_at = None
+            job.completed_at = now
+            stored_result = None
+            if persistent_result is not None:
+                result, _ = AIResultModel.objects.get_or_create(
+                    job=job,
+                    defaults={"payload": persistent_result},
+                )
+                stored_result = result.payload
+            transaction.on_commit(
+                lambda: cache_terminal_job_status(job, result_payload=stored_result)
+            )
+            return True
+
+    def _recover_done_job(
+        self,
+        job,
+        *,
+        now: datetime,
+        result_payload: Optional[dict],
+    ) -> bool:
+        """Repair an interrupted DONE write without accepting an opposite outcome."""
+        from django.db import transaction
+        from apps.domains.ai.models import AIJobModel, AIResultModel
+
+        if job.error_message or job.last_error:
             return False
         persistent_result = _persistent_job_result(
             job.job_type,
             result_payload,
             now=now,
         )
-        payload_scrubbed = _scrub_terminal_job_payload(job)
-        if job.status == "DONE":
-            if job.completed_at is None:
-                job.completed_at = now
-                update_fields = ["completed_at", "updated_at"]
-                if payload_scrubbed:
-                    update_fields.append("payload")
-                job.save(update_fields=update_fields)
-            elif payload_scrubbed:
-                job.save(update_fields=["payload", "updated_at"])
-            if persistent_result is not None:
-                res, _ = AIResultModel.objects.get_or_create(job=job, defaults={"payload": persistent_result})
-                if res.payload != persistent_result:
-                    res.payload = persistent_result
-                    res.save(update_fields=["payload"])
-            transaction.on_commit(
-                lambda: self._cache_done_status(job, persistent_result)
-            )
-            return True
-        job.status = "DONE"
-        job.locked_by = None
-        job.locked_at = None
-        job.lease_expires_at = None
-        job.completed_at = now
-        update_fields = ["status", "locked_by", "locked_at", "lease_expires_at", "completed_at", "updated_at"]
-        if payload_scrubbed:
-            update_fields.append("payload")
-        job.save(update_fields=update_fields)
+        updates = {}
+        if job.completed_at is None:
+            updates["completed_at"] = now
+        if _scrub_terminal_job_payload(job):
+            updates["payload"] = job.payload
+        if updates:
+            updates["updated_at"] = now
+            AIJobModel.objects.filter(pk=job.pk, status="DONE").update(**updates)
+        stored_result = None
         if persistent_result is not None:
-            res, _ = AIResultModel.objects.get_or_create(job=job, defaults={"payload": persistent_result})
-            if res.payload != persistent_result:
-                res.payload = persistent_result
-                res.save(update_fields=["payload"])
+            result, _ = AIResultModel.objects.get_or_create(
+                job=job,
+                defaults={"payload": persistent_result},
+            )
+            stored_result = result.payload
+        else:
+            stored_result = AIResultModel.objects.filter(job=job).values_list(
+                "payload",
+                flat=True,
+            ).first()
         transaction.on_commit(
-            lambda: self._cache_done_status(job, persistent_result)
+            lambda: cache_terminal_job_status(job, result_payload=stored_result)
         )
         return True
-
-    @staticmethod
-    def _cache_done_status(job, persistent_result: Optional[dict]) -> None:
-        # Redis에는 공개 결과만 캐시한다. 랜덤 비밀번호는 암호화된 DB 결과에서
-        # staff-only 상태 조회 시 한 시간 동안만 복호화한다.
-        try:
-            from apps.domains.ai.redis_status_cache import cache_job_status
-            cache_job_status(
-                tenant_id=str(job.tenant_id or ""),
-                job_id=job.job_id,
-                status="DONE",
-                job_type=job.job_type,
-                result=_public_job_result(job.job_type, persistent_result),
-                ttl=None,
-            )
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning("Failed to cache DONE in Redis: %s", e)
 
     def mark_failed(
         self,
@@ -312,49 +382,81 @@ class DjangoAIJobRepository:
         tier: str,
         now: datetime,
     ) -> bool:
+        from django.db import transaction
         from apps.domains.ai.models import AIJobModel
         from apps.domains.ai.services.status_resolver import status_for_exception
-        job = AIJobModel.objects.select_for_update().filter(job_id=job_id).first()
-        if not job:
-            return False
-        final_str, _ = status_for_exception(tier or job.tier or "basic", job.job_type)
-        payload_scrubbed = _scrub_terminal_job_payload(job)
-        if job.status == final_str:
-            if job.completed_at is None:
-                job.completed_at = now
-                update_fields = ["completed_at", "updated_at"]
-                if payload_scrubbed:
-                    update_fields.append("payload")
-                job.save(update_fields=update_fields)
-            elif payload_scrubbed:
-                job.save(update_fields=["payload", "updated_at"])
-            return True
-        err = (error_message or "")[:2000]
-        job.status = final_str
-        job.error_message = err
-        job.last_error = err
-        job.locked_by = None
-        job.locked_at = None
-        job.lease_expires_at = None
-        job.completed_at = now
-        update_fields = ["status", "error_message", "last_error", "locked_by", "locked_at", "lease_expires_at", "completed_at", "updated_at"]
-        if payload_scrubbed:
-            update_fields.append("payload")
-        job.save(update_fields=update_fields)
-        # ✅ 실패 시 Redis에 최종 상태 기록 (진행 상황 위젯 폴링용)
-        try:
-            from apps.domains.ai.redis_status_cache import cache_job_status
-            cache_job_status(
-                tenant_id=str(job.tenant_id or ""),
-                job_id=job.job_id,
-                status=final_str,
-                job_type=job.job_type,
-                error_message=err,
-                ttl=None,
+        with transaction.atomic():
+            job = AIJobModel.objects.filter(job_id=job_id).first()
+            if not job:
+                return False
+            final_str, _ = status_for_exception(
+                tier or job.tier or "basic",
+                job.job_type,
             )
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning("Failed to cache FAILED in Redis: %s", e)
+            if job.status == final_str:
+                return self._recover_failed_job(job, now=now)
+            allowed_statuses = ("PENDING", "RETRYING", "RUNNING")
+            if job.status not in allowed_statuses:
+                logger.warning(
+                    "AI_JOB_TERMINAL_TRANSITION_REJECTED | job_id=%s from=%s to=%s",
+                    job_id,
+                    job.status,
+                    final_str,
+                )
+                return False
+
+            err = (error_message or "")[:2000]
+            payload_scrubbed = _scrub_terminal_job_payload(job)
+            updates = {
+                "status": final_str,
+                "error_message": err,
+                "last_error": err,
+                "locked_by": None,
+                "locked_at": None,
+                "lease_expires_at": None,
+                "completed_at": now,
+                "updated_at": now,
+            }
+            if payload_scrubbed:
+                updates["payload"] = job.payload
+            updated = AIJobModel.objects.filter(
+                pk=job.pk,
+                status__in=allowed_statuses,
+            ).update(**updates)
+            if updated != 1:
+                current = AIJobModel.objects.filter(pk=job.pk).first()
+                if current and current.status == final_str:
+                    return self._recover_failed_job(current, now=now)
+                return False
+
+            job.status = final_str
+            job.error_message = err
+            job.last_error = err
+            job.locked_by = None
+            job.locked_at = None
+            job.lease_expires_at = None
+            job.completed_at = now
+            transaction.on_commit(lambda: cache_terminal_job_status(job))
+            return True
+
+    def _recover_failed_job(self, job, *, now: datetime) -> bool:
+        """Repair metadata/cache for the same failure outcome only."""
+        from django.db import transaction
+        from apps.domains.ai.models import AIJobModel
+
+        # Basic/lite failures intentionally resolve to DONE with an error. A clean
+        # DONE row belongs to a successful completion and is an opposite winner.
+        if job.status == "DONE" and not (job.error_message or job.last_error):
+            return False
+        updates = {}
+        if job.completed_at is None:
+            updates["completed_at"] = now
+        if _scrub_terminal_job_payload(job):
+            updates["payload"] = job.payload
+        if updates:
+            updates["updated_at"] = now
+            AIJobModel.objects.filter(pk=job.pk, status=job.status).update(**updates)
+        transaction.on_commit(lambda: cache_terminal_job_status(job))
         return True
 
     def get_job_model_for_status(self, job_id: str, tenant_id: str, job_type: Optional[str] = None):

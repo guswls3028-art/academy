@@ -689,14 +689,55 @@ rejected → {} (종단)
 #### 허용 전이 (실제 사용되는 것만)
 
 ```
-PENDING → {RUNNING}
+PENDING/RETRYING → {RUNNING, fail-closed terminal}
 RUNNING → {DONE, FAILED}
 ```
 
 #### 불변조건
 
-1. **종단 상태 불변:** DONE, FAILED, REJECTED_BAD_INPUT에 도달한 job은 상태 변경 불가
-2. **하트비트:** RUNNING 상태에서 lease 만료 감지
+1. **종단 상태 불변:** DONE, FAILED, REJECTED_BAD_INPUT에 도달한 job은 상태 변경 불가.
+   `mark_done`은 `status=RUNNING`, `mark_failed`는 `status∈{PENDING, RETRYING,
+   RUNNING}`인 행 한 건만 조건부 갱신한다. 시작 전 실패 전이는 tenant/message 검증이
+   거부된 작업을 열린 상태로 남기지 않기 위한 fail-closed 경계다.
+   complete/fail 경합에서 먼저 성공한 한 전이만 `True`를 반환하고 반대 결과의 loser는
+   종단 행, 오류, 결과 payload를 바꾸지 않는다.
+2. **같은 결과의 멱등 복구:** 동일한 완료 호출은 누락된 `completed_at`, 결과 행과
+   Redis 상태를 복구할 수 있지만 최초 결과 payload를 다른 payload로 교체하지 않는다.
+   동일한 실패 호출도 누락된 완료 시각과 cache만 복구하며 최초 오류를 덮지 않는다.
+   Lite/Basic 실패 정책으로 오류가 있는 `DONE`과 오류 없는 성공 `DONE`은 서로 다른
+   결과이므로 complete/fail loser가 같은 문자열 상태라는 이유만으로 성공하지 않는다.
+3. **DB가 종단 상태의 정본:** Redis 종단 상태는 DB transaction commit 뒤에만 기록한다.
+   worker의 최초 처리와 SQS 재배달 callback 모두 저장된 DB status/error/result를 다시
+   읽어 그대로 전달한다. 성공 전이는 이전 시도의 `error_message`와 `last_error`를 지운다.
+4. **하트비트:** RUNNING 상태에서 lease 만료를 감지한다.
+
+#### 만료 RUNNING 정합화
+
+`reconcile_stale_ai_jobs`는 관계를 증명할 수 있는 만료된 matchup 작업만 다룬다. 기본은
+항상 dry-run이며 후보마다 tenant/job/source, 현재 `RUNNING`, lock/lease,
+`updated_at`, 판정 사유와 예정 action을 정렬된 JSON 한 줄로 출력한다. 실행은 dry-run에
+나온 단일 `job_id`와 exact `updated_at`을 모두 다시 입력해야 한다.
+
+```powershell
+python manage.py reconcile_stale_ai_jobs --older-than-hours 24 --job-id <job-id>
+python manage.py reconcile_stale_ai_jobs --older-than-hours 24 --job-id <job-id> --expected-updated-at <iso-8601> --execute
+```
+
+실행 transaction은 job의 tenant/type/source/status/lock/lease/`updated_at`과 source의
+tenant/status/current job snapshot이 전부 동일할 때만 전이한다. 사이에 heartbeat나
+소유권 변경이 있으면 오류로 닫아 새 dry-run을 요구한다. tenant 관계가 없거나 다르면
+`manual_review`로만 출력하며 실행하지 않는다. `--execute`만으로 bulk 정합화할 수 없고,
+명령은 SQS 메시지, 운영 source 파일이나 결과 payload를 삭제하지 않는다. processing
+source의 재시도는 별도 `--include-processing-source`를 명시하고 같은 exact-target
+규칙을 따른다. 실제 전이가 commit된 뒤에는 일반 worker와 같은 공용 Redis cache 경계로
+저장된 종단 status/error/result를 게시한다.
+
+집중 검증은 실제 PostgreSQL에서 수행한다.
+
+```powershell
+$env:DJANGO_SETTINGS_MODULE = "apps.api.config.settings.test_pg"
+python -m pytest tests/test_ai_job_terminal_transitions_pg.py apps/core/tests/test_reconcile_stale_ai_jobs.py apps/domains/ai/tests/test_ai_sqs_worker_callback.py -q --tb=short
+```
 
 ---
 
@@ -1024,6 +1065,7 @@ true`가 필요하며 수강등록 비활성화, 자동 수납 비활성화, 시
   - Submission: DONE, SUPERSEDED
   - ExamResult: FINAL
   - VideoTranscodeJob: SUCCEEDED, FAILED, DEAD, CANCELLED
+  - AIJobModel: DONE, FAILED, REJECTED_BAD_INPUT, FALLBACK_TO_GPU, REVIEW_REQUIRED
   - ExamAttempt: done
   - VideoPlaybackSession: ENDED, REVOKED, EXPIRED
 

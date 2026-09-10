@@ -254,7 +254,6 @@ def _dispatch_terminal_callback_from_message(job_id: str, message: dict, tier_fr
         result_row = AIResultModel.objects.filter(job=job).first()
         result_payload = result_row.payload if result_row and isinstance(result_row.payload, dict) else {}
         error = job.error_message or job.last_error or None
-        callback_status = "FAILED" if error else job.status
         prepared = PreparedJob(
             job_id=job.job_id,
             job_type=job.job_type,
@@ -267,7 +266,7 @@ def _dispatch_terminal_callback_from_message(job_id: str, message: dict, tier_fr
         )
         return _dispatch_domain_callback(
             prepared,
-            status=callback_status,
+            status=job.status,
             result_payload=result_payload,
             error=error,
         )
@@ -534,15 +533,17 @@ def run_ai_sqs_worker(
                         ok = fail_ai_job(uow_factory(), job_id, "inference_timeout_60min", tier_from_msg)
                         if not ok:
                             logger.error(
-                                "AI_JOB_STATE_TRANSITION_FAILED | step=fail_timeout | job_id=%s | "
-                                "DB still RUNNING — manual cleanup required", job_id,
+                                "AI_JOB_STATE_TRANSITION_REJECTED | step=fail_timeout | job_id=%s | "
+                                "state changed or missing; persisted state wins",
+                                job_id,
                             )
                         callback_ok = False
                         if ok:
                             _cleanup_terminal_artifacts(prepared)
-                            callback_ok = _dispatch_domain_callback(
-                                prepared, status="FAILED", result_payload=None,
-                                error="inference_timeout_60min",
+                            callback_ok = _dispatch_terminal_callback_from_message(
+                                job_id,
+                                message,
+                                tier_from_msg,
                             )
                         try:
                             if ok and callback_ok and not queue.delete(receipt_handle, tier_from_msg):
@@ -563,15 +564,17 @@ def run_ai_sqs_worker(
                         ok = fail_ai_job(uow_factory(), job_id, "inference_error_no_result", tier_from_msg)
                         if not ok:
                             logger.error(
-                                "AI_JOB_STATE_TRANSITION_FAILED | step=fail | job_id=%s | "
-                                "DB still RUNNING — manual cleanup required", job_id,
+                                "AI_JOB_STATE_TRANSITION_REJECTED | step=fail | job_id=%s | "
+                                "state changed or missing; message retained for readback",
+                                job_id,
                             )
                             consecutive_errors += 1
                             continue
                         _cleanup_terminal_artifacts(prepared)
-                        callback_ok = _dispatch_domain_callback(
-                            prepared, status="FAILED", result_payload=None,
-                            error="inference_error_no_result",
+                        callback_ok = _dispatch_terminal_callback_from_message(
+                            job_id,
+                            message,
+                            tier_from_msg,
                         )
                         if not callback_ok:
                             logger.error(
@@ -591,16 +594,17 @@ def run_ai_sqs_worker(
                         ok = complete_ai_job(uow_factory(), job_id, result.result)
                         if not ok:
                             logger.error(
-                                "AI_JOB_STATE_TRANSITION_FAILED | step=complete | job_id=%s | "
-                                "DB still RUNNING — manual cleanup required", job_id,
+                                "AI_JOB_STATE_TRANSITION_REJECTED | step=complete | job_id=%s | "
+                                "state changed or missing; message retained for readback",
+                                job_id,
                             )
                             consecutive_errors += 1
                             continue
                         _cleanup_terminal_artifacts(prepared)
-                        callback_ok = _dispatch_domain_callback(
-                            prepared, status="DONE",
-                            result_payload=result.result if isinstance(result.result, dict) else {},
-                            error=None,
+                        callback_ok = _dispatch_terminal_callback_from_message(
+                            job_id,
+                            message,
+                            tier_from_msg,
                         )
                         if not callback_ok:
                             logger.error(
@@ -621,15 +625,17 @@ def run_ai_sqs_worker(
                         ok = fail_ai_job(uow_factory(), job_id, result.error or "failed", tier_from_msg)
                         if not ok:
                             logger.error(
-                                "AI_JOB_STATE_TRANSITION_FAILED | step=fail | job_id=%s | "
-                                "DB still RUNNING — manual cleanup required", job_id,
+                                "AI_JOB_STATE_TRANSITION_REJECTED | step=fail | job_id=%s | "
+                                "state changed or missing; message retained for readback",
+                                job_id,
                             )
                             consecutive_errors += 1
                             continue
                         _cleanup_terminal_artifacts(prepared)
-                        callback_ok = _dispatch_domain_callback(
-                            prepared, status="FAILED", result_payload=None,
-                            error=result.error or "failed",
+                        callback_ok = _dispatch_terminal_callback_from_message(
+                            job_id,
+                            message,
+                            tier_from_msg,
                         )
                         if not callback_ok:
                             logger.error(
