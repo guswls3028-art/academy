@@ -30,10 +30,10 @@ Boundary rule for the structure reform:
 |---|---|
 | Owned data | `Parent`, parent `User`, parent membership linkage |
 | External references | Students, core auth, account recovery, messaging |
-| Public interface candidate | `parents.services.ensure_parent_for_student`, `parents.selectors.get_parent_children(tenant, parent)` |
+| Public interface candidate | `parents.services.ensure_parent_account_for_student` for explicit creation, `find_parent_account` for lookup, `parents.selectors.get_parent_children(tenant, parent)` for child reads |
 | Forbidden dependency | Student views deciding parent password/message semantics independently |
 | Tenant rule | Parent phone lookup must include tenant |
-| Current risk | Parent initial password meaning differs between parent service and welcome/registration messaging |
+| Current risk | Existing malformed or login-identifier-colliding legacy rows require exact staff repair; runtime creation and relink paths fail closed |
 
 ## Lectures / Classes / Sessions
 

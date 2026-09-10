@@ -111,6 +111,8 @@ def send_parent_account_credentials_notice(
     parent_password: str | None = None,
     student_password: str | None = None,
     to: str | None = None,
+    origin_type: str = "system_account",
+    origin_id: str | None = None,
 ) -> bool:
     """Send parent login information, including the linked student account ID."""
 
@@ -137,6 +139,8 @@ def send_parent_account_credentials_notice(
         replacements=replacements,
         log_target_id=_parent_target_id(student),
         log_target_name=student.name or "",
+        origin_type=origin_type,
+        origin_id=origin_id,
     )
 
 

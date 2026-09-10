@@ -65,10 +65,9 @@ def protect_excel_initial_password(initial_password: str) -> dict[str, str]:
 
 def recover_excel_initial_password(payload: dict[str, Any]) -> str:
     encrypted = payload.get(EXCEL_INITIAL_PASSWORD_SECRET_FIELD)
-    if encrypted:
-        return decrypt_excel_job_secret(str(encrypted)).strip()
-    # Rolling compatibility for jobs dispatched before encrypted payloads shipped.
-    return str(payload.get("initial_password") or "").strip()
+    if not encrypted:
+        return ""
+    return decrypt_excel_job_secret(str(encrypted)).strip()
 
 
 def secure_excel_result(

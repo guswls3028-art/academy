@@ -14,7 +14,6 @@ def bulk_create_students_from_excel_rows(
     students_data: list[dict],
     initial_password: str,
     password_mode: str = "fixed",
-    send_welcome_message: bool = True,
     on_row_progress: Callable[[int, int], None] | None = None,
 ) -> dict:
     return import_students_from_rows(
@@ -22,6 +21,5 @@ def bulk_create_students_from_excel_rows(
         students_data=students_data,
         initial_password=initial_password,
         password_mode=password_mode,
-        send_welcome_message=send_welcome_message,
         on_row_progress=on_row_progress,
     )

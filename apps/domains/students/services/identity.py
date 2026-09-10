@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 from django.contrib.auth import get_user_model
 from django.db.models import Q
 
 from apps.core.models.user import user_display_username, user_internal_username
+from apps.core.services.login_identifier import normalize_login_identifier
 from apps.domains.students.models import Student
 from apps.domains.students.ps_number import _generate_unique_ps_number
 
@@ -83,7 +84,7 @@ def student_login_id_taken(
     exclude_student_id: int | None = None,
     exclude_user_id: int | None = None,
 ) -> bool:
-    username = str(display_username or "").strip()
+    username = normalize_login_identifier(display_username)
     if not username:
         return False
 
@@ -118,19 +119,15 @@ def student_login_id_taken(
     )
 
 
-RequestedConflictPolicy = Literal["error", "fallback"]
-
-
 def resolve_student_login_id(
     *,
     tenant,
     requested_id: Any = "",
     phone: Any = "",
-    requested_conflict: RequestedConflictPolicy = "error",
     exclude_student_id: int | None = None,
     exclude_user_id: int | None = None,
 ) -> str:
-    requested = str(requested_id or "").strip()
+    requested = normalize_login_identifier(requested_id)
     if requested:
         if not student_login_id_taken(
             tenant=tenant,
@@ -139,17 +136,20 @@ def resolve_student_login_id(
             exclude_user_id=exclude_user_id,
         ):
             return requested
-        if requested_conflict == "error":
-            raise StudentIdentityError({"ps_number": "이미 사용 중인 아이디입니다."})
+        raise StudentIdentityError({"ps_number": "이미 사용 중인 아이디입니다."})
 
     phone_id = normalize_student_phone(phone, required=False, field_name="phone", field_label="학생 전화번호")
-    if phone_id and not student_login_id_taken(
-        tenant=tenant,
-        display_username=phone_id,
-        exclude_student_id=exclude_student_id,
-        exclude_user_id=exclude_user_id,
-    ):
-        return phone_id
+    if phone_id:
+        if not student_login_id_taken(
+            tenant=tenant,
+            display_username=phone_id,
+            exclude_student_id=exclude_student_id,
+            exclude_user_id=exclude_user_id,
+        ):
+            return phone_id
+        raise StudentIdentityError(
+            {"ps_number": "학생 전화번호가 다른 계정의 로그인 아이디로 사용 중입니다."}
+        )
 
     try:
         return _generate_unique_ps_number(tenant=tenant)

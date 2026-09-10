@@ -869,7 +869,7 @@ class RegistrationApprovalIdentityTests(TestCase):
         self.assertIsNone(registration.student_id)
         self.assertFalse(Student.objects.filter(tenant=self.tenant).exists())
 
-    def test_new_approval_notice_uses_persisted_shared_phone_identity(self):
+    def test_new_approval_rejects_explicit_parent_phone_student_login_id(self):
         shared_phone = "01074445555"
         registration = self._registration(
             name="공유번호신규",
@@ -878,20 +878,35 @@ class RegistrationApprovalIdentityTests(TestCase):
             parent_phone=shared_phone,
         )
 
-        result = approve_registration_request(
-            tenant=self.tenant,
-            registration_id=registration.id,
-        )
+        with self.assertRaises(RegistrationApprovalError) as ctx:
+            approve_registration_request(
+                tenant=self.tenant,
+                registration_id=registration.id,
+            )
 
-        result.student.refresh_from_db()
-        result.student.user.refresh_from_db()
-        self.assertIsNone(result.student.phone)
-        self.assertEqual(result.student.user.phone, "")
-        self.assertTrue(result.student.uses_identifier)
-        self.assertNotEqual(result.student.ps_number, shared_phone)
-        self.assertEqual(result.notice.student_phone, "")
-        self.assertEqual(result.notice.student_id, result.student.ps_number)
-        self.assertEqual(result.notice.parent_phone, shared_phone)
+        self.assertEqual(ctx.exception.status_code, 400)
+        registration.refresh_from_db()
+        self.assertEqual(registration.status, StudentRegistrationRequest.PENDING)
+        self.assertIsNone(registration.student_id)
+        self.assertFalse(Student.objects.filter(tenant=self.tenant).exists())
+
+    def test_public_signup_rejects_parent_phone_as_student_login_id(self):
+        payload = self._signup_payload()
+        payload["username"] = "010-7111-2222"
+        request = self.factory.post(
+            "/api/v1/students/registration_requests/",
+            payload,
+            format="json",
+        )
+        request.tenant = self.tenant
+
+        response = RegistrationRequestViewSet.as_view({"post": "create"})(request)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("username", response.data)
+        self.assertFalse(
+            StudentRegistrationRequest.objects.filter(tenant=self.tenant).exists()
+        )
 
     def test_disabled_tenants_reject_public_signup_and_pending_approval(self):
         for code in ("godmin", "tchul"):

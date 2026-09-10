@@ -1535,7 +1535,7 @@ class IdentifierMatcherTests(TestCase):
                     "omr_code": code,
                     "school_type": "HIGH",
                 },
-                password="x",
+                password="test-password",
             )
             enr = Enrollment.objects.create(
                 tenant=tenant,
@@ -1632,7 +1632,7 @@ class IdentifierMatcherTests(TestCase):
                 "omr_code": "99887766",
                 "school_type": "HIGH",
             },
-            password="x",
+            password="test-password",
         )
         enr = Enrollment.objects.create(
             tenant=tenant, student=sr.student, lecture=lecture, status="ACTIVE"

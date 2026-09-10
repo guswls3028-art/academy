@@ -110,7 +110,7 @@ preview→confirm 경로에서 선생이 명시적으로 확인한 경우에만 
 7. **멱등성 키** — business_idempotency_key (trigger + student_id + 날짜)
 8. **일반 강의 출결 수동 발송 경계** — 출결 상태 PATCH·일괄 출석·차시 명단 생성은 자동 outbox를 만들지 않는다. 입실·결석 안내는 `NotificationPreviewToken`을 사용하는 출결 알림 preview→confirm 경로만 허용한다.
 9. **계정 알림 event metadata** — `registration_approved_*`, `password_*` 발송은 큐 payload에 원 trigger를 `event_type`으로 싣는다. `NotificationLog.message_body` 보안 마스킹과 운영 추적은 이 값에 의존한다.
-   신규 학생 계정 생성 시 초기 안내값은 암호화해 대기시키고, 첫 ACTIVE 수강 확정 후 계정 안내 outbox가 모두 확보되면 즉시 제거한다. 학생/학부모 계정 안내, 아이디 변경, 비밀번호 변경, 학생 전화번호 최초 등록은 SYSTEM_AUTO이며 legacy `send_welcome_message`/`skip_notify` 입력으로 끄지 않는다.
+   신규 학생 계정 생성 시 초기 안내값은 암호화해 대기시키고, 첫 ACTIVE 수강 확정 후 계정 안내 outbox가 모두 확보되면 즉시 제거한다. 학생/학부모 계정 안내, 아이디 변경, 비밀번호 변경, 학생 전화번호 최초 등록은 SYSTEM_AUTO이며 발송 opt-out 입력은 제공하지 않는다.
    `registration_approved_student|parent`의 첫 수강 계정 안내는 legacy `AutoSendConfig.enabled` 값으로 끌 수 없다. 공용 owner의 exact APPROVED 템플릿이 없을 때만 fail-closed하며, 학생과 학부모의 유효 수신번호가 다르면 각 계정 안내 outbox를 모두 확보해야 한다.
 10. **DB dispatch/outbox** — 수동·시스템·영상·매치업·커뮤니티의 즉시 발송과 `AutoSendConfig.delay_mode` 예약 발송은 모두 `ScheduledNotification`을 먼저 저장한다. product producer의 `enqueue_alimtalk()` 직접 호출은 금지한다. `dispatch_key`에서 안정 occurrence key를 만들고 `pending → dispatching → sent(SQS 접수)`로 전이한다.
 11. **SQS enqueue 복구** — transient enqueue 실패는 30초 지수 백오프, 최대 8회 재시도한다. `dispatching` 5분 stale claim도 같은 dispatch key로 회수한다. 입력 오류와 일반 알림의 업무 tenant 전체 발송 중지는 SQS 호출·재시도 없이 즉시 terminal `failed`로 전이해 payload를 제거하며, transient 재시도 소진도 terminal `failed`다. 첫 수강 계정 안내 2종은 운영 중지 중 15분 간격 `pending`으로 보류해 일회용 비밀번호를 잃지 않는다.

@@ -20,7 +20,7 @@ from apps.core.services.password import generate_temp_password
 from apps.domains.students.models import Student
 from apps.support.students.account_recovery_dependencies import (
     account_recovery_delivery_disabled,
-    ensure_parent_recovery_account,
+    find_parent_recovery_account,
     send_account_recovery_alimtalk,
 )
 
@@ -114,12 +114,9 @@ def resolve_recovery_account(*, tenant, target: str, name: str, phone: str) -> R
     if not student:
         return None
 
-    # Existing production behavior: if a legacy student has no Parent account yet,
-    # create/link it after the caller proves student name + parent phone.
-    parent = ensure_parent_recovery_account(
+    parent = find_parent_recovery_account(
         tenant=tenant,
         parent_phone=phone,
-        student_name=student.name,
     )
     if not parent or not getattr(parent, "user_id", None):
         return None
@@ -356,10 +353,9 @@ def resolve_staff_account_for_student(*, student: Student, target: str) -> Recov
     parent_phone = normalize_recovery_phone(student.parent_phone)
     if not parent_phone:
         raise AccountRecoveryValidationError("등록된 학부모 휴대번호가 없어 발송할 수 없습니다.")
-    parent = ensure_parent_recovery_account(
+    parent = find_parent_recovery_account(
         tenant=student.tenant,
         parent_phone=parent_phone,
-        student_name=student.name,
     )
     if not parent or not getattr(parent, "user_id", None):
         raise AccountRecoveryValidationError("학부모 로그인 계정이 없어 안내할 수 없습니다.")
@@ -376,12 +372,11 @@ def resolve_staff_account_for_student(*, student: Student, target: str) -> Recov
 def reset_staff_password(
     account: RecoveryAccount,
     *,
-    temp_password: str | None = None,
-    skip_notify: bool = False,
+    temp_password: str,
 ) -> str:
-    password = (temp_password or "").strip() or generate_temp_password()
+    password = str(temp_password or "").strip()
     if len(password) < 4:
-        raise AccountRecoveryValidationError("임시 비밀번호는 최소 4자 이상이어야 합니다.")
+        raise AccountRecoveryValidationError("설정할 임시 비밀번호를 4자 이상 입력해 주세요.")
 
     from django.contrib.auth import get_user_model
     from django.db import transaction
@@ -393,11 +388,6 @@ def reset_staff_password(
         user = User.objects.select_for_update().get(pk=account.user.pk)
         force_reset_password(user, password)
         clear_pending_password_reset(user)
-
-        if skip_notify:
-            # Student/parent credential notices are system-required. Keep the
-            # argument for API compatibility, but never suppress delivery here.
-            pass
 
         if _account_recovery_delivery_disabled(account.student.tenant_id):
             message = "임시 비밀번호가 발송되었습니다. (테스트 환경에서는 실제 발송이 생략됩니다.)"

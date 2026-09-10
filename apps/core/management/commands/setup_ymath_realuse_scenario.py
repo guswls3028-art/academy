@@ -592,6 +592,7 @@ class Command(BaseCommand):
                         tenant=tenant,
                         parent_phone=f"01099{index:06d}",
                         student_name=f"검증학생 {index:02d}",
+                        initial_password=password,
                     )
                     parent = parent_result.parent
                     change_password(parent.user, password)

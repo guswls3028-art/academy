@@ -16,7 +16,7 @@ from apps.support.students.lifecycle_dependencies import (
     cancel_active_participants_for_student,
     deactivate_enrollments_for_student,
     delete_submission_storage_for_permanent_delete,
-    ensure_parent_for_student,
+    ensure_parent_account_for_student,
     restore_enrollments_after_student_restore,
     submission_storage_cleanup_status_counts,
 )
@@ -106,6 +106,8 @@ class StudentRestoreResult:
     changed_fields: tuple[str, ...]
     user_reactivated: bool
     parent_relinked: bool
+    parent_credentials_initialized: bool
+    parent_password_for_notice: str
     enrollment_count: int
     active_enrollment_count: int
     pending_enrollment_count: int
@@ -345,6 +347,7 @@ def restore_student(
     *,
     tenant,
     profile_data: dict[str, Any] | None = None,
+    parent_initial_password: str | None = None,
 ) -> StudentRestoreResult:
     with transaction.atomic():
         if not tenant or student.tenant_id != tenant.id:
@@ -394,13 +397,38 @@ def restore_student(
             reconcile_user_tenant_access(student.user)
 
         parent_relinked = False
+        parent_credentials_initialized = False
+        parent_password_for_notice = ""
         if student.parent_phone:
-            parent = ensure_parent_for_student(
-                tenant=tenant,
-                parent_phone=student.parent_phone,
-                student_name=student.name,
+            try:
+                parent_result = ensure_parent_account_for_student(
+                    tenant=tenant,
+                    parent_phone=student.parent_phone,
+                    student_name=student.name,
+                    initial_password=parent_initial_password,
+                )
+            except ValueError as exc:
+                detail = str(exc)
+                password_required = (
+                    not str(parent_initial_password or "").strip()
+                    and "비밀번호" in detail
+                )
+                raise StudentLifecycleError(
+                    (
+                        "parent_account_password_required"
+                        if password_required
+                        else "parent_account_invalid"
+                    ),
+                    detail,
+                ) from exc
+            parent = parent_result.parent
+            parent_credentials_initialized = parent_result.credentials_initialized
+            parent_password_for_notice = (
+                parent_result.password_for_notice
+                if parent_credentials_initialized
+                else ""
             )
-            if parent and student.parent_id != parent.id:
+            if student.parent_id != parent.id:
                 student.parent = parent
                 student.save(update_fields=["parent"])
                 parent_relinked = True
@@ -416,6 +444,8 @@ def restore_student(
             changed_fields=tuple(changed),
             user_reactivated=user_reactivated,
             parent_relinked=parent_relinked,
+            parent_credentials_initialized=parent_credentials_initialized,
+            parent_password_for_notice=parent_password_for_notice,
             enrollment_count=enrollment_restore.processed_count,
             active_enrollment_count=enrollment_restore.active_count,
             pending_enrollment_count=enrollment_restore.pending_count,

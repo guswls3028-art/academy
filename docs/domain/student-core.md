@@ -84,10 +84,14 @@ Required invariants:
 - active student means `Student.deleted_at IS NULL`.
 - `Student.user` is required.
 - `Student.ps_number` is tenant-unique and is the student login display ID.
+- When a student phone is supplied, it is the requested login ID and any collision
+  fails explicitly. A generated ID is used only when both the explicit ID and
+  student phone are absent; a collision never silently changes the saved ID.
 - A student login display ID must also be unique across every active login
   identity in the tenant, including parent accounts. If a no-phone student's
-  requested ID equals the parent phone, creation assigns a generated student
-  ID instead; profile changes reject the collision. This prevents a shared
+  requested ID equals the parent phone, creation and profile changes reject the
+  collision instead of silently assigning another ID. A generated student ID is
+  used only when the caller leaves the ID empty. This prevents a shared
   initial password from matching both the student and parent account and
   making login ambiguous.
 - `Student.ps_number` and the inventory copies that scope student files use the
@@ -133,7 +137,7 @@ Current canonical entry points:
 | Excel/worker import | `ExcelParsingService` -> `import_students_from_rows()` |
 | lecture/enrollment Excel import | `resolve_student_import_row()` |
 | signup approval | `approve_registration_request()` -> reuse exact active identity or `create_student_account(password_hash=...)` |
-| admin/student profile write | `update_student_profile()` |
+| admin/student profile write | `update_student_profile()`; student self-service cannot change `parent_phone`/Parent linkage |
 | deleted conflict restore/delete | `restore_student()` / `permanently_delete_students()` through import conflict resolver |
 
 New-student JSON/Excel import resolves each row inside the requested tenant in
@@ -302,8 +306,8 @@ Current rules:
 - staff/teacher password reset through `/students/password_reset_send/` is a
   privileged path:
   - authenticated active owner/admin/teacher/staff membership is required for
-    `temp_password`; `skip_notify` is accepted only as legacy input and does
-    not suppress SYSTEM_AUTO account notices;
+    `temp_password`; account-notice opt-out parameters are not part of the
+    contract and cannot suppress SYSTEM_AUTO account notices;
   - student target may resolve by `student_ps_number` or verified student phone;
   - parent target resolves by student name + parent phone;
   - password changes immediately;

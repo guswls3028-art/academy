@@ -115,7 +115,14 @@ class TeacherOpsAssistantApiTests(TestCase):
         ):
             return TeacherOpsAnalyzeView.as_view()(request)
 
-    def _confirm(self, analyze_response, *, teacher=None, tenant=None):
+    def _confirm(
+        self,
+        analyze_response,
+        *,
+        teacher=None,
+        tenant=None,
+        initial_password="teacher-choice-0982",
+    ):
         rows = []
         for row in analyze_response.data["rows"]:
             rows.append(
@@ -125,6 +132,7 @@ class TeacherOpsAssistantApiTests(TestCase):
                     "name": row["name"],
                     "student_phone": row["student_phone"],
                     "parent_phone": row["parent_phone"],
+                    "initial_password": initial_password,
                     "school": row["school"],
                     "school_type": row["school_type"],
                     "grade": row["grade"],
@@ -161,6 +169,9 @@ class TeacherOpsAssistantApiTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         student = Student.objects.get(tenant=self.tenant, name="가온별")
+        self.assertTrue(student.user.check_password("teacher-choice-0982"))
+        self.assertTrue(student.parent.user.check_password("teacher-choice-0982"))
+        self.assertFalse(student.user.check_password("4444"))
         enrollment = Enrollment.objects.get(tenant=self.tenant, student=student, lecture=self.lecture)
         attendance = Attendance.objects.get(enrollment=enrollment, session=self.session)
         self.assertEqual(attendance.status, "ONLINE")
@@ -169,6 +180,7 @@ class TeacherOpsAssistantApiTests(TestCase):
         self.assertFalse(VideoAccess.objects.filter(video=self.video, enrollment=enrollment).exists())
         result_row = response.data["rows"][0]
         self.assertEqual(result_row["account_creation"], "created")
+        self.assertEqual(result_row["student_login_id"], student.ps_number)
         self.assertEqual(result_row["attendance"]["status"], "ONLINE")
         self.assertTrue(result_row["video_access"][0]["monitoring"])
         self.assertEqual(TeacherOpsExecution.objects.count(), 1)
@@ -178,6 +190,37 @@ class TeacherOpsAssistantApiTests(TestCase):
         self.assertTrue(replay.data["idempotent_replay"])
         self.assertEqual(Student.objects.filter(tenant=self.tenant, name="가온별").count(), 1)
         self.assertEqual(Enrollment.objects.filter(student=student, lecture=self.lecture).count(), 1)
+
+    def test_confirm_requires_explicit_password_for_new_account(self):
+        analyze_response = self._analyze()
+
+        response = self._confirm(analyze_response, initial_password="")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["code"], "initial_password_required")
+        self.assertFalse(Student.objects.filter(tenant=self.tenant, name="가온별").exists())
+
+    def test_new_student_without_phone_gets_explicit_auto_login_id(self):
+        parent_only_ocr = """새학생/해솔고1
+010-1111-2222(모)
+해솔고1 과학반
+1회차 영상신청함
+"""
+        analyze_response = self._analyze(ocr=parent_only_ocr)
+
+        self.assertEqual(analyze_response.status_code, 200)
+        row = analyze_response.data["rows"][0]
+        self.assertEqual(row["student_match"]["status"], "new")
+        self.assertFalse(any(issue["code"] == "new_student_phone_required" for issue in row["issues"]))
+        self.assertTrue(row["can_confirm"])
+
+        response = self._confirm(analyze_response)
+
+        self.assertEqual(response.status_code, 200)
+        student = Student.objects.get(tenant=self.tenant, name="새학생")
+        self.assertFalse(student.phone)
+        self.assertTrue(student.uses_identifier)
+        self.assertEqual(response.data["rows"][0]["student_login_id"], student.ps_number)
 
     def test_existing_student_missing_phone_is_linked_without_duplicate(self):
         created = create_student_account(
@@ -208,6 +251,66 @@ class TeacherOpsAssistantApiTests(TestCase):
         self.assertEqual(created.user.phone, "01033334444")
         self.assertEqual(Student.objects.filter(tenant=self.tenant, name="가온별").count(), 1)
         self.assertEqual(confirmed.data["rows"][0]["account_creation"], "not_created")
+
+    @patch(
+        "apps.domains.students.services.account_notifications._send_owner_account_notice",
+        return_value=True,
+    )
+    def test_existing_student_missing_parent_account_requires_password_and_notifies_only_parent(
+        self,
+        send_mock,
+    ):
+        student_user = User.objects.create_user(
+            username="teacher-ops-existing-student",
+            password="student-existing-password",
+            tenant=self.tenant,
+            phone="01033334444",
+            name="가온별",
+        )
+        TenantMembership.ensure_active(
+            tenant=self.tenant,
+            user=student_user,
+            role="student",
+        )
+        student = Student.objects.create(
+            tenant=self.tenant,
+            user=student_user,
+            ps_number="TEACHER-OPS-EXISTING",
+            name="가온별",
+            phone="01033334444",
+            parent_phone="01011112222",
+            omr_code="33334444",
+            school_type="HIGH",
+            high_school="해솔고",
+            grade=1,
+        )
+
+        analyze_response = self._analyze()
+        row = analyze_response.data["rows"][0]
+        self.assertEqual(row["student_match"]["status"], "existing")
+        self.assertTrue(row["initial_password_required"])
+        self.assertIn("parent.link", row["profile_changes"])
+
+        confirmed = self._confirm(
+            analyze_response,
+            initial_password="parent-explicit-0982",
+        )
+
+        self.assertEqual(confirmed.status_code, 200)
+        student.refresh_from_db()
+        self.assertTrue(student.parent.user.check_password("parent-explicit-0982"))
+        self.assertTrue(student.user.check_password("student-existing-password"))
+        self.assertEqual(send_mock.call_count, 1)
+        self.assertEqual(send_mock.call_args.kwargs["trigger"], "registration_approved_parent")
+        self.assertEqual(confirmed.data["rows"][0]["account_notice"]["state"], "queued")
+        self.assertEqual(
+            confirmed.data["rows"][0]["account_notice"]["origin_id"],
+            confirmed.data["execution_id"],
+        )
+        self.assertEqual(
+            confirmed.data["rows"][0]["account_notice"]["expected_recipients"],
+            1,
+        )
 
     def test_parent_phone_match_allows_sibling_with_same_parent_and_blank_phone(self):
         target = create_student_account(

@@ -38,8 +38,9 @@ class ParentAccountCreationConcurrencyPostgresTests(TransactionTestCase):
                     tenant=thread_tenant,
                     parent_phone="01098765432",
                     student_name=student_name,
+                    initial_password="explicit-password",
                 )
-                outcomes.append((result.parent.id, result.user_created))
+                outcomes.append((result.parent.id, result.credentials_initialized))
             except Exception as exc:
                 errors.append(exc)
             finally:

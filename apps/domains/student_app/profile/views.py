@@ -140,6 +140,7 @@ class StudentProfileView(APIView):
                     data=dict(data),
                     identity_field="username",
                     ignore_blank_name=True,
+                    allow_parent_phone_change=False,
                 )
                 student = result.student
 

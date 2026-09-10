@@ -17,26 +17,6 @@ from academy.application.ports.storage import IObjectStorage
 logger = logging.getLogger(__name__)
 
 
-def _payload_bool(value: Any, *, default: bool) -> bool:
-    """Parse worker payload booleans without importing HTTP/DRF parsing concerns."""
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int):
-        if value in (0, 1):
-            return bool(value)
-        raise ValueError("boolean payload must be 0 or 1")
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "t", "yes", "y", "on"}:
-            return True
-        if normalized in {"0", "false", "f", "no", "n", "off"}:
-            return False
-        raise ValueError("boolean payload must be true/false")
-    raise ValueError("boolean payload must be bool/int/str")
-
-
 class ExcelValidationError(ValueError):
     """
     학부모 전화 필수 검증 등 엑셀 파싱 검증 실패 시.
@@ -776,9 +756,8 @@ class ExcelParsingService:
           - file_key: str (R2 객체 키)
           - bucket: str (선택)
           - tenant_id: int (필수)
-          - password_mode: str (학생 등록에서 fixed | phone_last4 | random, 기본 fixed)
+          - password_mode: str (학생 등록에서 fixed | random, 기본 fixed)
           - initial_password_secret: str (학생 등록 fixed 방식의 암호화 비밀번호)
-          - initial_password: str (학생 등록의 배포 전 legacy job 호환)
           - lecture_id: int (선택) — 있으면 수강등록, 없으면 학생만 일괄 생성
           - session_id: int (선택, lecture_id 있을 때만)
           - student_match_mode: existing_only (수강등록 명시 표식)
@@ -878,10 +857,6 @@ class ExcelParsingService:
                     students_data=rows,
                     initial_password=password_policy.fixed_password,
                     password_mode=password_policy.mode,
-                    send_welcome_message=_payload_bool(
-                        payload.get("send_welcome_message"),
-                        default=True,
-                    ),
                     on_row_progress=_row_progress if on_progress else None,
                     source_job_id=str(job_id),
                 )

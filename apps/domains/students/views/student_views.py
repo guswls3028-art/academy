@@ -58,6 +58,7 @@ from ..services import (
     soft_delete_student,
     update_student_profile,
 )
+from ..services.account_notifications import send_parent_account_credentials_notice
 from ..serializers import (
     StudentListSerializer,
     StudentDetailSerializer,
@@ -261,7 +262,6 @@ class StudentViewSet(ModelViewSet):
         serializer.is_valid(raise_exception=True)
 
         data = serializer.validated_data
-        data.pop("send_welcome_message", None)
 
         password = data.pop("initial_password")
 
@@ -313,7 +313,11 @@ class StudentViewSet(ModelViewSet):
             if not send_student_account_credentials_notice(student=student, to=new_phone):
                 raise AccountNoticeDeliveryFailed()
 
-        if (student.parent_phone or "") != old_parent_phone:
+        if (
+            (student.parent_phone or "") != old_parent_phone
+            or result.parent_relinked
+            or result.parent_credentials_initialized
+        ):
             if not send_parent_account_credentials_notice(
                 student=student,
                 parent=getattr(student, "parent", None),
@@ -452,10 +456,6 @@ class StudentViewSet(ModelViewSet):
         upload_file = request.FILES.get("file")
         initial_password = (request.data.get("initial_password") or "").strip()
         password_mode = (request.data.get("password_mode") or "fixed").strip()
-        send_welcome = parse_bool(
-            request.data.get("send_welcome_message", True),
-            field_name="send_welcome_message",
-        )
         if not upload_file:
             raise ValidationError({"detail": "file(엑셀)은 필수입니다."})
         try:
@@ -491,7 +491,6 @@ class StudentViewSet(ModelViewSet):
                 "tenant_id": tenant.id,
                 "password_mode": password_policy.mode,
                 **protect_excel_initial_password(password_policy.fixed_password),
-                "send_welcome_message": send_welcome,
             }
             try:
                 out = dispatch_job(
@@ -581,14 +580,12 @@ class StudentViewSet(ModelViewSet):
                 {"detail": "최대 200건까지 일괄 처리할 수 있습니다."},
                 status=400,
             )
-        send_welcome = True
         tenant = request.tenant
 
         result = import_students_from_rows(
             tenant_id=tenant.id,
             students_data=students_data,
             initial_password=password,
-            send_welcome_message=send_welcome,
         )
         return Response(result, status=201)
 
@@ -602,14 +599,12 @@ class StudentViewSet(ModelViewSet):
         충돌 해결 후 재시도 — 삭제된 학생과 번호 충돌 시 복원 또는 영구 삭제 후 재등록
         POST body: {
           "initial_password": "...",
-          "send_welcome_message": false,
           "resolutions": [ { "row": 1, "student_id": 123, "action": "restore"|"delete", "student_data": {...} } ]
         }
         """
         password = request.data.get("initial_password") or ""
         if len(str(password)) < 4:
             return Response({"detail": "초기 비밀번호는 4자 이상이어야 합니다."}, status=400)
-        send_welcome = True
         resolutions = request.data.get("resolutions") or []
         if not isinstance(resolutions, (list, tuple)):
             return Response({"detail": "resolutions는 배열이어야 합니다."}, status=400)
@@ -618,10 +613,6 @@ class StudentViewSet(ModelViewSet):
             tenant=request.tenant,
             resolutions=resolutions,
             initial_password=password,
-            send_welcome_message=parse_bool(
-                send_welcome,
-                field_name="send_welcome_message",
-            ),
         )
         return Response(result, status=200)
 
@@ -660,7 +651,10 @@ class StudentViewSet(ModelViewSet):
     def bulk_restore(self, request):
         """
         삭제된 학생 일괄 복원
-        POST body: { "ids": [1, 2, 3, ...] }
+        POST body: { "ids": [1, 2, 3, ...], "parent_initial_password": "optional" }
+
+        정상 학부모 계정의 비밀번호는 변경하지 않는다. 과거 데이터의 학부모
+        계정이 없거나 비밀번호를 쓸 수 없을 때만 명시된 초기 비밀번호를 사용한다.
         """
         ids = request.data.get("ids") or []
         if not isinstance(ids, (list, tuple)):
@@ -670,12 +664,38 @@ class StudentViewSet(ModelViewSet):
             return Response({"detail": "복원할 ID가 없습니다."}, status=400)
 
         tenant = request.tenant
+        parent_initial_password = str(
+            request.data.get("parent_initial_password") or ""
+        ).strip()
+        if parent_initial_password and len(parent_initial_password) < 4:
+            return Response(
+                {"parent_initial_password": "학부모 초기 비밀번호는 4자 이상이어야 합니다."},
+                status=400,
+            )
         to_restore = list(student_repo.student_filter_tenant_ids_deleted(tenant, ids))
         restored = []
         skipped = []
         for student in to_restore:
             try:
-                restore_student(student, tenant=tenant)
+                with transaction.atomic():
+                    result = restore_student(
+                        student,
+                        tenant=tenant,
+                        parent_initial_password=parent_initial_password,
+                    )
+                    if result.parent_credentials_initialized:
+                        delivered = send_parent_account_credentials_notice(
+                            student=result.student,
+                            parent=result.student.parent,
+                            parent_password=result.parent_password_for_notice,
+                            origin_type="student_bulk_restore",
+                            origin_id=str(result.student.id),
+                        )
+                        if not delivered:
+                            raise StudentLifecycleError(
+                                "parent_account_notice_failed",
+                                "학부모 계정 안내 알림톡을 보내지 못해 복원을 취소했습니다.",
+                            )
             except StudentLifecycleError as exc:
                 skipped.append({"id": student.id, "code": exc.code, "reason": exc.detail})
                 continue
@@ -916,6 +936,7 @@ class StudentViewSet(ModelViewSet):
                     tenant=tenant,
                     data=dict(data),
                     ignore_blank_name=True,
+                    allow_parent_phone_change=False,
                 )
                 student = result.student
             except StudentProfileUpdateError as e:

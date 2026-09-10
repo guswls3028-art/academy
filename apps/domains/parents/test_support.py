@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from apps.domains.parents.services import ensure_parent_account_for_student
+from apps.domains.parents.models import Parent
 
 
 def create_parent_account_fixture(
@@ -20,4 +21,8 @@ def create_parent_account_fixture(
     )
 
 
-__all__ = ["create_parent_account_fixture"]
+def parent_account_fixture_exists(*, tenant, parent_phone: str) -> bool:
+    return Parent.objects.filter(tenant=tenant, phone=parent_phone).exists()
+
+
+__all__ = ["create_parent_account_fixture", "parent_account_fixture_exists"]

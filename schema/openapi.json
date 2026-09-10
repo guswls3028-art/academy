@@ -9440,6 +9440,19 @@
             "nullable": true,
             "type": "string"
           },
+          "parent_initial_password": {
+            "oneOf": [
+              {
+                "minLength": 4,
+                "type": "string"
+              },
+              {
+                "maxLength": 0,
+                "type": "string"
+              }
+            ],
+            "writeOnly": true
+          },
           "parent_phone": {
             "description": "정규화된 전화번호 (하이픈 제거, 예: 01012345678)",
             "maxLength": 20,
@@ -14864,11 +14877,6 @@
           "school_type": {
             "$ref": "#/components/schemas/SchoolTypeEnum"
           },
-          "send_welcome_message": {
-            "default": true,
-            "type": "boolean",
-            "writeOnly": true
-          },
           "uses_identifier": {
             "description": "True면 학생 전화 없음, 식별자(010+8자리)로 가입. 표시 시 '식별자 XXXX-XXXX'",
             "type": "boolean"
@@ -16339,6 +16347,19 @@
             "nullable": true,
             "type": "string"
           },
+          "parent_initial_password": {
+            "oneOf": [
+              {
+                "minLength": 4,
+                "type": "string"
+              },
+              {
+                "maxLength": 0,
+                "type": "string"
+              }
+            ],
+            "writeOnly": true
+          },
           "parent_phone": {
             "description": "정규화된 전화번호 (하이픈 제거, 예: 01012345678)",
             "maxLength": 20,
@@ -17055,6 +17076,20 @@
           "grade": {
             "maxLength": 20,
             "type": "string"
+          },
+          "initial_password": {
+            "oneOf": [
+              {
+                "maxLength": 128,
+                "minLength": 4,
+                "type": "string"
+              },
+              {
+                "maxLength": 0,
+                "type": "string"
+              }
+            ],
+            "writeOnly": true
           },
           "name": {
             "maxLength": 100,
@@ -45062,7 +45097,7 @@
     },
     "/api/v1/students/bulk_resolve_conflicts/": {
       "post": {
-        "description": "충돌 해결 후 재시도 — 삭제된 학생과 번호 충돌 시 복원 또는 영구 삭제 후 재등록\nPOST body: {\n  \"initial_password\": \"...\",\n  \"send_welcome_message\": false,\n  \"resolutions\": [ { \"row\": 1, \"student_id\": 123, \"action\": \"restore\"|\"delete\", \"student_data\": {...} } ]\n}",
+        "description": "충돌 해결 후 재시도 — 삭제된 학생과 번호 충돌 시 복원 또는 영구 삭제 후 재등록\nPOST body: {\n  \"initial_password\": \"...\",\n  \"resolutions\": [ { \"row\": 1, \"student_id\": 123, \"action\": \"restore\"|\"delete\", \"student_data\": {...} } ]\n}",
         "operationId": "students_bulk_resolve_conflicts_create",
         "requestBody": {
           "content": {
@@ -45111,7 +45146,7 @@
     },
     "/api/v1/students/bulk_restore/": {
       "post": {
-        "description": "삭제된 학생 일괄 복원\nPOST body: { \"ids\": [1, 2, 3, ...] }",
+        "description": "삭제된 학생 일괄 복원\nPOST body: { \"ids\": [1, 2, 3, ...], \"parent_initial_password\": \"optional\" }\n\n정상 학부모 계정의 비밀번호는 변경하지 않는다. 과거 데이터의 학부모\n계정이 없거나 비밀번호를 쓸 수 없을 때만 명시된 초기 비밀번호를 사용한다.",
         "operationId": "students_bulk_restore_create",
         "requestBody": {
           "content": {

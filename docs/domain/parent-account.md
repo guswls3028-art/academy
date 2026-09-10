@@ -1,7 +1,7 @@
 # 학부모 계정 SSOT
 
 **상태:** Active
-**최종 점검:** 2026-09-07
+**최종 점검:** 2026-09-10
 **코드 기준:** `apps/domains/parents/services/__init__.py`, `apps/domains/parents/models.py`, `apps/domains/student_app/permissions.py`, `apps/domains/submissions/views/homework_submission_media_view.py`, `apps/api/common/auth_jwt.py`
 
 ## 1. 계정 생성 규칙
@@ -10,25 +10,28 @@
 |------|-----------|
 | 내부 username | `p_{tenant_id}_{parent_phone}` |
 | 로그인 입력값 | 학부모 전화번호 |
-| 초기 비밀번호 | 직원이 학생 등록에 입력한 초기 비밀번호. 독립 ensure/복구는 학부모 전화번호 숫자 기준 마지막 4자리 |
+| 초기 비밀번호 | 직원이 직접 입력했거나 `random`을 명시 선택해 생성된 학생 초기 비밀번호. 가입 신청은 학생이 제출한 검증된 password hash |
 | 변경 권장 | `must_change_password=True`; 로그인·API 사용은 차단하지 않음 |
 | 이름 | 기존 Parent 이름 우선, 없으면 `{학생이름} 학부모` |
 | 역할 | `TenantMembership.role = "parent"` |
-| 생성 시점 | 학생 생성 SSOT 또는 계정복구 중 parent ensure 호출 |
+| 생성 시점 | 학생 생성 SSOT에서 명시적 비밀번호/hash가 전달된 경우만 |
 
-`PARENT_DEFAULT_PASSWORD = "0000"` 상수는 외부 import 호환용 deprecated 값이다. 신규 코드에서 초기 비밀번호로 사용하지 않는다.
 입력은 하이픈/공백을 제거한 뒤 `010` 11자리여야 하며, 짧거나 잘못된 번호를
-`0000` 또는 다른 공용 비밀번호로 보정하지 않고 요청을 실패시킨다.
+전화번호 일부나 공용 비밀번호로 보정하지 않고 요청을 실패시킨다.
+동일 테넌트의 학생·직원 등 다른 활성 계정이 그 학부모 번호를 로그인
+아이디로 이미 사용하면 Parent/User를 새로 만들거나 연결하지 않고 충돌을
+명시적으로 반환한다. 서로 다른 내부 username으로 저장된다는 이유로 복수
+공개 로그인 후보를 만들지 않는다.
 
 ## 2. 생성/연결 플로우
 
 ```
-학생 등록 또는 legacy 학부모 계정 복구
-  -> ensure_parent_account_for_student(tenant, parent_phone, student_name, initial_password?)
+학생 등록
+  -> ensure_parent_account_for_student(tenant, parent_phone, student_name, initial_password | initial_password_hash)
     -> Parent(tenant + phone) 조회
     -> Parent 없음:
          User(username=p_{tenant_id}_{phone}, phone=phone, tenant=tenant) 생성
-         password=입력된 학생 초기 비밀번호 또는 parent_initial_password(phone)
+         password=호출자가 명시한 초기 비밀번호 또는 검증된 가입 password hash
          must_change_password=True
          Parent 생성
          TenantMembership(parent) 활성화
@@ -46,9 +49,20 @@
 
 학생을 단건·JSON·Excel로 직접 등록하면서 4자 이상의 초기 비밀번호를 입력하면,
 새 학생 계정과 새 학부모 계정에 같은 값을 설정하고 각각의 첫 수강 안내에도 같은
-값을 staging한다. 가입 신청 승인은 학생이 제출한 hash만 보유하므로 학부모 평문을
-재사용하지 않고 전화번호 뒤 4자리 fallback을 적용한다. 기존 학부모 계정의
-비밀번호는 새 자녀를 등록해도 변경하지 않는다.
+값을 staging한다. 가입 신청 승인은 학생이 제출한 검증된 hash를 새 학생과 새
+학부모 계정에 동일하게 적용하고 안내에는 `가입 신청 시 입력한 비밀번호`라고
+표시한다. 기존 학부모 계정의 비밀번호는 새 자녀를 등록해도 변경하지 않는다.
+
+직원이 학생 수정에서 학부모 번호를 바꾸면 기존 학부모 계정은 비밀번호 변경 없이
+연결한다. 해당 번호의 계정이 없다면 `parent_initial_password` 4자 이상이 있어야
+새 계정을 만들며, 없으면 학생 수정 전체를 rollback한다.
+번호가 바뀌지 않았더라도 Parent/User 또는 학생 연결이 누락된 경우에는 같은 직원
+수정 화면에서 해당 번호와 명시적 초기 비밀번호를 다시 제출해 한 계정만 복구한다.
+비밀번호가 없는 미완성 User만 그 입력으로 자격증명을 초기화한다. 이미 사용 가능한
+비밀번호가 있는 User는 프로필 연결만 복구하고 입력값으로 비밀번호를 덮어쓰지 않는다.
+학생 본인 프로필에서는 학부모 번호와 Parent 연결을 바꿀 수 없다.
+잘못된 연결이 성적·출결·영상 권한으로 이어지지 않도록 직원이 exact 학생을
+확인한 뒤 관리자/교사 학생 수정 흐름에서만 변경한다.
 
 학생 전화번호가 학부모 전화번호와 정확히 같으면 그 값은 학부모 연락처로만
 취급한다. 학생 계정 그래프는 별도 `ps_number`로 유지하되 `Student.phone`과
@@ -89,9 +103,11 @@ ID를 남긴다. 학생이 먼저 만든 기존 과제 제출에 학부모가 �
 비밀번호 변경은 학부모 자신의 계정에만 적용한다. 학생 비밀번호·아이디·프로필 및
 관리자 설정은 위임 범위가 아니다.
 
-`ensure_parent_for_student()`는 기존 호출부 호환용 facade다. 알림톡·운영 안내처럼
-비밀번호 안내 문구가 필요한 신규 경로는 반드시 `ensure_parent_account_for_student()`
-결과의 `password_for_notice`를 사용한다.
+계정 생성은 `ensure_parent_account_for_student()` 한 경로만 사용한다. 공개 계정 복구는
+`find_parent_account()`로 조회만 하며 계정을 만들지 않는다. 교직원의 삭제 학생 복원은
+정상 계정을 그대로 연결하고, 누락·사용불가 계정에 한해서만 화면에서 받은 명시적 초기
+비밀번호로 같은 생성 경로를 호출한다. 임의 비밀번호를 만들거나 전화번호 뒤 4자리를
+사용하지 않는다.
 
 ## 3. 로그인
 
@@ -109,7 +125,7 @@ Body: { "username": "{학부모전화번호}", "password": "{비밀번호}" }
 
 - 학부모 아이디 찾기: 학생 이름 + 등록 학부모 전화번호가 유일하게 일치할 때 전화번호로 아이디 안내를 보낸다.
 - 학부모 비밀번호 찾기: 동일 검증 후 6자리 숫자 임시 비밀번호를 pending reset으로 발급한다. 실제 비밀번호 변경과 `must_change_password=True` 적용은 학부모가 임시 비밀번호로 로그인할 때 수행한다.
-- legacy Parent row에 user가 없으면, 복구 과정에서 `ensure_parent_for_student()`로 계정을 생성/연결한다.
+- Parent/User 계정이 없거나 연결이 불완전하면 공개 복구에서 생성하지 않고 generic 성공 응답으로 닫는다. 직원이 exact 학생을 확인한 뒤 명시적 초기 비밀번호로 별도 복구해야 한다.
 
 ## 5. 첫 수강 확정 계정 안내 알림톡
 
@@ -119,7 +135,7 @@ Body: { "username": "{학부모전화번호}", "password": "{비밀번호}" }
 | 변수 | 값 |
 |------|----|
 | `#{학부모아이디}` | 학부모 전화번호 |
-| `#{학부모비밀번호}` | 직접 학생 등록 시 입력한 초기 비밀번호, 독립 생성 시 전화번호 뒤 4자리, 아이디 찾기 시 `변경되지 않음` |
+| `#{학부모비밀번호}` | 직접 입력/명시 생성된 임시 비밀번호, 가입 신청 시 입력값 안내 문구, 아이디 찾기·기존 계정 연결 시 `변경되지 않음` |
 | `#{학생아이디}` | 학생 `ps_number` |
 | `#{학생비밀번호}` | 가입 승인/학생 안내 값 또는 `변경되지 않음` |
 | `#{비밀번호안내}` | 상황별 안내 문구 |
@@ -131,38 +147,19 @@ Body: { "username": "{학부모전화번호}", "password": "{비밀번호}" }
 `NotificationLog.message_body` 보안 마스킹의 기준이므로 신규 가입 안내 발송 경로에서
 생략하면 안 된다. 학생/학부모 비밀번호 안내값은 수강 전까지 별도 암호문으로 보관하며, 유효 수신자 전체의 durable outbox가 확보되면 즉시 제거한다.
 
-## 6. 유지보수 명령
+## 6. 운영 복구
 
-누락된 legacy Parent/User 계정은 다음 명령으로 테넌트 하나씩 복구한다. 기본은
-dry-run이며 실제 실행은 같은 tenant code를 두 번 명시해야 한다. 유효한 010 11자리
-학부모 번호의 누락 계정만 `ensure_parent_account_for_student()`로 생성하고, 이미
-연결된 학부모 User의 비밀번호는 절대 바꾸지 않는다.
-
-```
-python manage.py ensure_parent_accounts_for_students --tenant <code>
-python manage.py ensure_parent_accounts_for_students --tenant <code> --execute --confirm <code>
-```
-
-`apps/domains/parents/management/commands/reset_all_parent_passwords.py`는 legacy 일괄 정비용 명령이다.
-전체 테넌트 대상 실행은 금지하며, 대상 학원과 dry-run row 수를 먼저 고정해야 한다.
-
-```
-python manage.py reset_all_parent_passwords --tenant-code <code>
-python manage.py reset_all_parent_passwords --tenant-code <code> --apply --confirm-count <count>
-```
-
-`--apply`가 없으면 항상 dry-run이다. 실제 실행은 현재 대상 수가
-`--confirm-count`와 정확히 일치할 때만 진행한다. 출력은 초기 비밀번호와 동일한
-전화번호 끝 네 자리를 노출하지 않는다. 실행된 계정은 `token_version` 증가,
-`must_change_password=True` 변경 권장 상태, 기존 pending reset 폐기를 함께 적용한다. 신규 초기
-비밀번호 정책은 이 명령이 아니라 `parent_initial_password()`가 SSOT다.
+전화번호에서 비밀번호를 파생하거나 누락 계정을 일괄 생성·초기화하는 management
+command는 제공하지 않는다. 누락된 legacy Parent/User는 tenant, 학생, 학부모 번호,
+기존 연결을 exact하게 확인한 뒤 한 계정씩 명시적 초기 비밀번호로 복구하고, 계정
+안내 알림톡과 실제 로그인을 확인한다. 기존 계정이면 비밀번호를 추측해 덮어쓰지
+않고 직원 비밀번호 재설정 화면에서 입력한 값으로만 변경한다.
 
 집중 검증:
 
 ```powershell
 python manage.py test apps.domains.parents.tests.test_account_creation
 python manage.py test apps.domains.parents.tests.test_account_creation_concurrency_pg
-python manage.py test apps.domains.parents.tests.test_password_reset_command
 ```
 
 두 번째 테스트는 PostgreSQL row/unique-lock 동작을 검증하므로 SQLite에서는

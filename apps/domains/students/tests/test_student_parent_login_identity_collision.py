@@ -4,6 +4,7 @@ from academy.adapters.db.django import repositories_core as core_repo
 from apps.core.models import Tenant
 from apps.core.models.user import user_display_username
 from apps.domains.students.services.creation import create_student_account
+from apps.domains.students.services.identity import StudentIdentityError
 from apps.domains.students.services.profile import (
     StudentProfileUpdateError,
     update_student_profile,
@@ -37,27 +38,23 @@ class StudentParentLoginIdentityCollisionTests(TestCase):
     def test_pre_normalized_shared_phone_cannot_become_student_login_id(self):
         parent_phone = "01071112222"
 
-        student = create_student_account(
-            tenant=self.tenant,
-            password="initial-password",
-            student_data={
-                "name": "사전 정규화 학생",
-                "phone": None,
-                "parent_phone": parent_phone,
-                "ps_number": parent_phone,
-                "omr_code": parent_phone[-8:],
-                "uses_identifier": True,
-                "school_type": "HIGH",
-                "grade": 1,
-            },
-        ).student
+        with self.assertRaises(StudentIdentityError):
+            create_student_account(
+                tenant=self.tenant,
+                password="initial-password",
+                student_data={
+                    "name": "사전 정규화 학생",
+                    "phone": None,
+                    "parent_phone": parent_phone,
+                    "ps_number": "010-7111-2222",
+                    "omr_code": parent_phone[-8:],
+                    "uses_identifier": True,
+                    "school_type": "HIGH",
+                    "grade": 1,
+                },
+            )
 
-        self.assertNotEqual(student.ps_number, parent_phone)
-        candidates = core_repo.user_list_by_tenant_login_identifier(
-            self.tenant,
-            student.ps_number,
-        )
-        self.assertEqual([candidate.id for candidate in candidates], [student.user_id])
+        self.assertFalse(core_repo.user_list_by_tenant_login_identifier(self.tenant, parent_phone))
 
     def test_profile_login_id_cannot_collide_with_parent_phone_account(self):
         parent_phone = "01073334444"

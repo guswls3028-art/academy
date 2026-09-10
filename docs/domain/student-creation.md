@@ -1,7 +1,7 @@
 # 학생 생성 SSOT
 
 **상태:** Active  
-**최종 점검:** 2026-08-23
+**최종 점검:** 2026-09-10
 **코드 기준:** `apps/domains/students/services/creation.py`, `apps/domains/students/services/registration_approval.py`, `apps/domains/students/services/import_students.py`, `apps/domains/students/services/import_passwords.py`, `apps/domains/students/services/custom_fields.py`, `apps/domains/students/views/student_views.py`, `apps/domains/students/views/registration_views.py`, `apps/domains/students/services/lecture_enroll.py`, `apps/domains/students/services/bulk_from_excel.py`
 
 ## 1. 책임 경계
@@ -31,7 +31,21 @@
 
 학생 등록 Excel/import/JSON bulk row orchestration SSOT는 `import_students_from_rows()`, `resolve_student_import_row()`, `resolve_student_import_conflicts()`다. 이 서비스는 학생 등록 행의 중복/복원/생성 판단, school_level_mode 검증, 계정 그래프 호출, 첫 수강용 계정 안내 staging, delete-and-recreate conflict resolution을 소유한다. R2 업로드, AI job dispatch, HTTP 응답 모양은 여전히 view/worker compatibility boundary다. 강의/차시 Excel 수강등록은 이 생성 경계를 호출하지 않고 `lecture_enroll_from_excel_rows()`가 같은 테넌트의 활성 학생만 조회한다. 학생번호가 있으면 같은 tenant의 exact `ps_number`를 최우선 사용하며, 공란일 때만 exact 이름과 숫자로 정규화한 학부모 전화번호 조합을 사용한다. `김지우a/b/1/2` 같은 이름 suffix는 서로 다른 이름이고, 형제·쌍둥이가 학부모 전화번호만 공유하는 것은 중복이 아니다. 학생 전화번호는 이 매칭 조건이 아니다. 후보 행을 잠근 상태에서 정확히 한 명일 때만 등록하며 같은 fallback 식별자의 활성 학생이 복수이면 임의 선택하지 않는다. 학생-only Excel과 강의/차시 Excel 파일은 dispatch 직전에 tenant별 R2 Excel key로 업로드한다. Dispatch가 동기적으로 거절되거나 예외로 끝나면 각 view는 자신이 방금 업로드한 exact key를 즉시 삭제하고, cleanup 자체가 실패해도 원래 dispatch 실패를 성공으로 바꾸지 않는다. DB commit 뒤 SQS publish가 거절되어 최초 HTTP 응답이 이미 수락된 경우에도 gateway가 `source_domain=enrollment`, 일치하는 tenant/bucket, `excel/<tenant>/<32자 hex>.xlsx` 생성 규칙을 모두 만족하는 exact key만 삭제한다. 다른 Excel job이나 임의 key는 이 보상을 적용하지 않는다. 정상 publish가 수락된 파일의 후속 삭제는 worker lifecycle이 계속 소유한다.
 
-Excel 신규 학생 초기 비밀번호 정책 SSOT는 `build_student_import_password_policy()`다. 이 정책은 학생 등록 Excel에만 적용한다. `fixed`는 공통 4자 이상 비밀번호, `phone_last4`는 실제 학생 전화번호 뒤 4자리, `random`은 학생별 4자리 랜덤 비밀번호를 사용한다. 학생-only Excel 등록에서 `phone_last4`를 선택했는데 학생 전화번호가 없거나 자동 식별자를 사용한 행은 그 행만 실패 처리하고 나머지 정상 행은 계속 등록한다. 강의/차시 Excel 수강등록은 비밀번호 입력을 받거나 job payload에서 복구하지 않는다. 모든 Excel 신규 계정은 첫 로그인에서 비밀번호 변경을 권장하되 원래 화면과 API 사용을 막지 않는다. `fixed` 입력값과 `random` 결과는 서버 비밀키로 암호화해 AI job/result DB에 저장하고, 작업 종료 시 입력값은 제거한다. 랜덤 결과는 스태프 전용 tenant-scoped 상태 조회에서 완료 후 한 시간 동안만 복호화하며 Redis에는 평문을 캐시하지 않는다. 학생 생성과 암호화된 작업 완료 결과는 같은 DB 트랜잭션으로 커밋한다.
+Excel 신규 학생 초기 비밀번호 정책 SSOT는 `build_student_import_password_policy()`다. 이 정책은 학생 등록 Excel에만 적용한다. 선택지는 `fixed`(공통 4자 이상 직접 입력)와 `random`(학생별 6자리 임시 비밀번호)뿐이다. 전화번호에서 비밀번호를 파생하는 방식은 API와 worker 모두 거절한다. 강의/차시 Excel 수강등록은 비밀번호 입력을 받거나 job payload에서 복구하지 않는다. 모든 Excel 신규 계정은 첫 로그인에서 비밀번호 변경을 권장하되 원래 화면과 API 사용을 막지 않는다. `fixed` 입력값과 `random` 결과는 서버 비밀키로 암호화해 AI job/result DB에 저장하고, 작업 종료 시 입력값은 제거한다. 평문 legacy job payload는 복구하지 않는다. 랜덤 결과는 스태프 전용 tenant-scoped 상태 조회에서 완료 후 한 시간 동안만 복호화하며 Redis에는 평문을 캐시하지 않는다. 학생 생성과 암호화된 작업 완료 결과는 같은 DB 트랜잭션으로 커밋한다.
+
+Excel 충돌 검토에서 삭제 학생을 복원할 때 Parent/User가 누락됐다면, 같은 확인
+요청에 이미 포함된 명시적 초기 비밀번호로만 한 계정을 원자적으로 복구한다. 복원
+실패 시 계정 생성도 rollback한다. 새 Parent/User가 생기면 해당 학부모 계정 안내만
+같은 작업에서 발송하며, 발송 실패도 복원과 계정 생성을 모두 rollback한다. 일반
+일괄 복원은 비밀번호를 추측하거나 계정을 만들지 않는다.
+충돌 검토의 `delete` 선택은 기존 학생 영구삭제와 새 계정 생성을 한 트랜잭션으로
+묶고, 새 계정은 검토 화면의 명시적 로그인 ID와 초기 비밀번호를 그대로 사용한다.
+응답은 생성·복원된 exact 학생 ID와 상태를 `resolved`에 반환해 클라이언트가 다시
+읽어 확인할 수 있게 한다.
+
+교사 사진 업무 도우미의 신규 학생 확정도 검토 행마다 직원이 4자 이상 초기
+비밀번호를 직접 입력해야 한다. 사진·OCR·학생/학부모 전화번호에서 비밀번호를
+만들지 않으며, 비밀번호는 서명된 분석 proposal이나 실행 감사 로그에 넣지 않는다.
 
 Excel 파서의 학생 행 판별은 유효한 학부모/학생 전화번호가 있으면 이름 50자까지 허용한다. 긴 이름을 무조건 비학생 행으로 버리면 실제 외국 이름, 관리 접두어, QA 태그가 있는 정상 행이 `등록할 학생 데이터가 없습니다.`로 실패할 수 있다.
 
@@ -76,15 +90,18 @@ Excel 파서는 active sheet에 고정하지 않고 표지/안내 시트를 건�
 - `password`와 `password_hash` 중 정확히 하나만 전달한다.
 - 학생 전화번호가 비어 있어도 학생 `User`와 `TenantMembership(student)`는 생성된다. 학부모 계정과 공유 계정이 되는 것이 아니다.
 - raw 초기 비밀번호를 받는 직접/Excel 생성에서 학부모가 새로 생성되면 학생과 같은 초기 비밀번호를 설정·안내한다.
-- 가입 신청처럼 학생 비밀번호 hash만 전달되는 생성에서 새 학부모 비밀번호는 `parent_initial_password(parent_phone)` fallback이다.
+- 가입 신청처럼 password hash가 전달되는 생성은 검증된 같은 hash를 새 학생·새 학부모 계정에 적용한다.
 - 기존 학부모 계정이면 안내 문구는 `변경되지 않음`이다.
 - 학생 마스터 생성, 가입 승인, 학생-only Excel/JSON 등록은 알림톡을 발송하지 않는다.
 - 신규 학생 생성 시 학생 초기 비밀번호 안내값과 `parent_password_for_notice`를 서로 다른 암호문으로 staging한다. 평문 비밀번호는 DB에 저장하지 않는다.
-- 첫 ACTIVE 수강 확정 후 계정 안내는 SYSTEM_AUTO다. legacy `send_welcome_message=false` 입력은 호환용으로만 받으며 이 발송을 끄지 않는다.
+- 첫 ACTIVE 수강 확정 후 계정 안내는 SYSTEM_AUTO다. 생성 API와 작업 payload에는 발송 여부 옵션이 없으며 발송 시점을 호출자가 바꿀 수 없다.
 - 첫 수강 outbox가 완전하지 않으면 암호문을 보존해 동일 수강 요청에서 재시도한다. outbox가 모두 확보되면 암호문을 즉시 지우므로 같은 수강 재시도와 이후 추가 수강은 조용하다.
 - 마이그레이션 기본값은 빈 값이므로 배포 전부터 있던 학생은 새 수강을 추가해도 과거 가입 안내를 받지 않는다.
 - 학생 전화번호를 나중에 최초 등록하면 기존 학생 계정의 아이디 안내를 새 학생 번호로 발송한다. 비밀번호 변수는 `변경되지 않음`이다.
-- 복원은 생성이 아니므로 비밀번호를 재발급하지 않고 welcome 알림톡도 새 비밀번호처럼 보내지 않는다.
+- 정상 학부모 계정의 복원은 비밀번호를 재발급하지 않고 계정 안내도 다시 보내지 않는다.
+- 공개 계정복구는 누락 학부모 계정을 생성하지 않고 generic 응답으로 닫는다. 교직원 삭제
+  학생 복원은 누락·사용불가 학부모 계정에만 명시 입력한 초기 비밀번호를 적용하고
+  알림톡을 예약한다. 비밀번호 미입력이나 알림톡 예약 실패는 해당 복원 전체를 rollback한다.
 - Excel 비밀번호 방식이 학생별로 달라지는 경우 학생별 암호문에 해당 값을 staging한다.
 - 강의/차시 Excel 수강등록은 기존 학생의 `User.username`, 비밀번호 hash, `token_version`, 학생번호와 pending credential 암호문을 변경하지 않는다. 다른 테넌트·삭제 학생·미등록 학생도 생성하거나 복원하지 않는다.
 - 첫 수강 계정 안내 실패는 이미 커밋된 학생/수강 생성을 API 실패로 되돌리지 않는다. 암호문을 보존하고 재시도한다.
@@ -93,8 +110,8 @@ Excel 파서는 active sheet에 고정하지 않고 표지/안내 시트를 건�
 
 - 학생 생성 API 호출은 `src/shared/api/contracts/students.ts`의 `createStudent()`가 canonical mapper다.
 - teacher 모바일 생성 시트는 role-local raw `/students/` POST를 쓰지 않고 shared contract를 호출한다.
-- admin/teacher Excel 업로드의 `sendWelcomeMessage`/`send_welcome_message` 값은 legacy compatibility 입력이다. 학생-only 등록에서는 발송하지 않고 첫 수강 확정 시 SYSTEM_AUTO 계정 안내가 발송된다.
-- admin/teacher Excel 업로드는 `phone_last4`를 기본으로 표시하고 `fixed`, `random`을 선택할 수 있다.
+- admin/teacher Excel 업로드에는 계정 안내 on/off 옵션이 없다. 학생-only 등록에서는 발송하지 않고 첫 수강 확정 시 SYSTEM_AUTO 계정 안내가 발송된다.
+- admin/teacher Excel 업로드는 빈 `fixed` 직접 입력을 기본으로 표시하고, 사용자가 `fixed` 또는 `random`을 명시 선택해야 등록할 수 있다.
 - teacher 모바일 Excel 업로드도 파일 선택 직후 즉시 업로드하지 않는다. `StudentListPage`의 Excel import bottom sheet에서 초기 비밀번호 방식을 명시 확정한 뒤 shared upload contract를 호출한다.
 - 학생-only Excel 업로드는 일부 행에 오류가 있어도 등록 버튼을 허용한다. 완료 작업에는 신규/복원/중복/실패 수와 실패한 실제 Excel 행 번호·이름·사유를 표시한다.
 - `random` 작업 완료 시 작업박스에서 비밀번호 목록을 자동 다운로드하며, 완료 항목의 `비밀번호 목록` 버튼으로 다시 받을 수 있다.

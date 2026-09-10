@@ -147,7 +147,7 @@ class ExcelJobAtomicCompletionTests(TestCase):
             student.pending_account_notice_origin_id,
             self.job.job_id,
         )
-        self.assertEqual(result["credentials"][0]["password"], "0042")
+        self.assertEqual(result["credentials"][0]["password"], "000042")
         stored = DjangoAIJobRepository().get_result_payload_for_job(
             self.job,
             include_excel_credentials=True,
@@ -174,7 +174,8 @@ class ExcelJobAtomicCompletionTests(TestCase):
                     "file_key": "excel/test.xlsx",
                     "bucket": "academy-excel",
                     "tenant_id": self.tenant.id,
-                    "password_mode": "phone_last4",
+                    "password_mode": "fixed",
+                    "initial_password_secret": encrypt_excel_job_secret("selected-password"),
                 },
             )
 
@@ -200,7 +201,8 @@ class ExcelJobAtomicCompletionTests(TestCase):
                 "file_key": "excel/partial.xlsx",
                 "bucket": "academy-excel",
                 "tenant_id": self.tenant.id,
-                "password_mode": "phone_last4",
+                "password_mode": "fixed",
+                "initial_password_secret": encrypt_excel_job_secret("selected-password"),
             },
         )
 

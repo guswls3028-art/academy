@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from django.contrib.auth.hashers import check_password, identify_hasher, make_password
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import TestCase
 from rest_framework.test import APIRequestFactory, force_authenticate
 
@@ -23,6 +24,7 @@ User = get_user_model()
 
 class RegistrationPasswordSafetyTests(TestCase):
     def setUp(self):
+        cache.clear()
         self.factory = APIRequestFactory()
         self.tenant = Tenant.objects.create(name="가입보안학원", code="regsafe", is_active=True)
         self.admin = User.objects.create_user(
@@ -138,7 +140,7 @@ class RegistrationPasswordSafetyTests(TestCase):
             _decrypt(
                 reg.student.pending_account_notice_parent_password_ciphertext
             ),
-            "6666",
+            "가입 신청 시 입력한 비밀번호",
         )
         reg.refresh_from_db()
         self.assertEqual(reg.initial_password_plain, "")
@@ -148,6 +150,7 @@ class RegistrationPasswordSafetyTests(TestCase):
             tenant=self.tenant,
             parent_phone="01055556666",
             student_name="기존학생",
+            initial_password="existing-parent-password",
         )
         reg = StudentRegistrationRequest.objects.create(
             tenant=self.tenant,
@@ -275,7 +278,6 @@ class RegistrationPasswordSafetyTests(TestCase):
                 "phone": "01077778891",
                 "school_type": "HIGH",
                 "grade": 1,
-                "send_welcome_message": True,
             },
             format="json",
         )
@@ -337,6 +339,7 @@ class RegistrationPasswordSafetyTests(TestCase):
             tenant=self.tenant,
             parent_phone="01055556666",
             student_name="기존학생",
+            initial_password="existing-parent-password",
         )
         request = self.factory.post(
             "/api/v1/students/",
@@ -348,7 +351,6 @@ class RegistrationPasswordSafetyTests(TestCase):
                 "phone": "01077778892",
                 "school_type": "HIGH",
                 "grade": 1,
-                "send_welcome_message": True,
             },
             format="json",
         )
@@ -394,7 +396,7 @@ class RegistrationPasswordSafetyTests(TestCase):
         )
 
     @patch("apps.domains.messaging.services.send_welcome_messages")
-    def test_student_excel_legacy_flag_cannot_send_before_enrollment(self, send_mock):
+    def test_student_excel_stages_notice_until_enrollment(self, send_mock):
         from apps.domains.students.services.bulk_from_excel import (
             bulk_create_students_from_excel_rows,
         )
@@ -411,7 +413,6 @@ class RegistrationPasswordSafetyTests(TestCase):
                 }
             ],
             initial_password="stud1234",
-            send_welcome_message=False,
         )
 
         self.assertEqual(result["created"], 1)
@@ -536,7 +537,6 @@ class RegistrationPasswordSafetyTests(TestCase):
             "/api/v1/students/bulk_create/",
             {
                 "initial_password": "stud1234",
-                "send_welcome_message": True,
                 "students": [
                     {
                         "name": "JSON중복학생",
@@ -592,7 +592,6 @@ class RegistrationPasswordSafetyTests(TestCase):
             "/api/v1/students/bulk_resolve_conflicts/",
             {
                 "initial_password": "newpass123",
-                "send_welcome_message": True,
                 "resolutions": [
                     {
                         "row": 1,
@@ -689,10 +688,3 @@ class RegistrationPasswordSafetyTests(TestCase):
         old_student.refresh_from_db()
         self.assertIsNotNone(old_student.deleted_at)
         self.assertTrue(Student.objects.filter(id=old_student.id).exists())
-
-    def test_excel_worker_payload_bool_parses_string_false(self):
-        from academy.application.services.excel_parsing_service import _payload_bool
-
-        self.assertFalse(_payload_bool("false", default=True))
-        self.assertFalse(_payload_bool("0", default=True))
-        self.assertTrue(_payload_bool(None, default=True))

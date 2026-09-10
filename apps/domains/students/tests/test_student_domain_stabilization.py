@@ -638,7 +638,10 @@ class TestB4OmrCodePhoneSync(TestCase):
 
         request = self.factory.patch(
             f"/api/v1/students/{student.id}/",
-            data={"parent_phone": "01055554444"}, format="json",
+            data={
+                "parent_phone": "01055554444",
+                "parent_initial_password": "chosen4444",
+            }, format="json",
         )
         force_authenticate(request, user=self.admin)
         request.tenant = self.tenant
@@ -740,7 +743,12 @@ class TestB10BulkResolveConflictsAtomicity(TestCase):
         self.student2.deleted_at = timezone.now()
         self.student2.save(update_fields=["deleted_at"])
 
-    def test_restore_success_within_atomic(self):
+    @patch(
+        "apps.domains.students.services.import_students."
+        "send_parent_account_credentials_notice",
+        return_value=True,
+    )
+    def test_restore_success_within_atomic(self, send_parent_notice):
         """restore action은 학생을 복원하고 deleted_at을 None으로."""
         request = self.factory.post(
             "/api/v1/students/bulk_resolve_conflicts/",
@@ -760,11 +768,21 @@ class TestB10BulkResolveConflictsAtomicity(TestCase):
 
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data.get("restored"), 1)
+        self.assertEqual(
+            resp.data.get("resolved"),
+            [{"row": 1, "student_id": self.student1.id, "state": "restored"}],
+        )
         self.student1.refresh_from_db()
         self.assertIsNone(self.student1.deleted_at)
         self.assertEqual(self.student1.name, "복원됨")
+        send_parent_notice.assert_called_once()
 
-    def test_individual_failure_does_not_rollback_others(self):
+    @patch(
+        "apps.domains.students.services.import_students."
+        "send_parent_account_credentials_notice",
+        return_value=True,
+    )
+    def test_individual_failure_does_not_rollback_others(self, send_parent_notice):
         """하나의 resolution이 실패해도 다른 것은 성공."""
         request = self.factory.post(
             "/api/v1/students/bulk_resolve_conflicts/",
@@ -789,6 +807,48 @@ class TestB10BulkResolveConflictsAtomicity(TestCase):
         self.assertEqual(len(resp.data.get("failed", [])), 1)
         self.student1.refresh_from_db()
         self.assertIsNone(self.student1.deleted_at, "성공한 복원이 실패한 것에 의해 롤백됨!")
+        send_parent_notice.assert_called_once()
+
+    def test_delete_and_reregister_is_atomic_and_preserves_requested_login_id(self):
+        request = self.factory.post(
+            "/api/v1/students/bulk_resolve_conflicts/",
+            data={
+                "initial_password": "chosen-new-password",
+                "resolutions": [
+                    {
+                        "row": 2,
+                        "student_id": self.student2.id,
+                        "action": "delete",
+                        "student_data": {
+                            "name": "새등록학생",
+                            "psNumber": "CHOSEN-LOGIN-ID",
+                            "studentPhone": "01044440002",
+                            "parentPhone": "01098765432",
+                            "schoolType": "HIGH",
+                        },
+                    }
+                ],
+            },
+            format="json",
+        )
+        force_authenticate(request, user=self.admin)
+        request.tenant = self.tenant
+
+        response = StudentViewSet.as_view(
+            {"post": "bulk_resolve_conflicts"}
+        )(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["created"], 1)
+        resolved = response.data["resolved"]
+        self.assertEqual(resolved[0]["state"], "created")
+        replacement = Student.objects.get(pk=resolved[0]["student_id"])
+        self.assertEqual(replacement.ps_number, "CHOSEN-LOGIN-ID")
+        self.assertTrue(replacement.user.check_password("chosen-new-password"))
+        self.assertTrue(
+            replacement.parent.user.check_password("chosen-new-password")
+        )
+        self.assertFalse(Student.objects.filter(pk=self.student2.id).exists())
 
     def test_cross_tenant_resolution_rejected(self):
         """타 테넌트 학생 ID로 resolve 시도 → 실패."""

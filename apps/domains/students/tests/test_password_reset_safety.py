@@ -10,6 +10,7 @@ from rest_framework_simplejwt.tokens import AccessToken
 from apps.core.models import PendingPasswordReset, Tenant, TenantMembership
 from apps.core.models.user import user_internal_username
 from apps.core.services.password import generate_temp_password
+from apps.domains.parents.test_support import create_parent_account_fixture
 from apps.domains.students.models import Student
 from apps.domains.students.views.credential_views import SendExistingCredentialsView
 from apps.domains.students.views.password_views import (
@@ -98,6 +99,30 @@ class StudentPasswordResetSafetyTests(TestCase):
         self.assertEqual(self.user.token_version, 1)
         self.assertFalse(PendingPasswordReset.objects.filter(user=self.user).exists())
         self.assertEqual(send_mock.call_args.kwargs["trigger"], "password_reset_student")
+
+    @override_settings(
+        ALLOWED_HOSTS=["api.hakwonplus.com", "testserver"],
+        TENANT_HEADER_CODE_ALLOWED_HOSTS=("api.hakwonplus.com",),
+    )
+    @patch("apps.domains.messaging.policy.send_alimtalk_via_owner", return_value=True)
+    def test_teacher_reset_requires_explicit_password_without_mutation(self, send_mock):
+        response = APIClient().post(
+            "/api/v1/students/password_reset_send/",
+            {
+                "target": "student",
+                "student_name": self.student.name,
+                "student_ps_number": self.student.ps_number,
+            },
+            format="json",
+            **self._staff_auth_headers(role="teacher"),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password("oldpw123"))
+        self.assertFalse(self.user.must_change_password)
+        self.assertEqual(self.user.token_version, 0)
+        send_mock.assert_not_called()
 
     @override_settings(
         ALLOWED_HOSTS=["api.hakwonplus.com", "testserver"],
@@ -294,24 +319,6 @@ class StudentPasswordResetSafetyTests(TestCase):
         self.assertTrue(self.user.check_password("oldpw123"))
         self.assertFalse(self.user.must_change_password)
         self.assertFalse(PendingPasswordReset.objects.filter(user=self.user).exists())
-
-    def test_invalid_skip_notify_does_not_change_password(self):
-        response = self._post(
-            StudentPasswordResetSendView,
-            "/api/v1/students/password_reset_send/",
-            {
-                "target": "student",
-                "student_name": self.student.name,
-                "student_phone": self.student.phone,
-                "skip_notify": "maybe",
-            },
-        )
-
-        self.assertEqual(response.status_code, 400)
-        self.user.refresh_from_db()
-        self.assertTrue(self.user.check_password("oldpw123"))
-        self.assertFalse(self.user.must_change_password)
-        self.assertEqual(self.user.token_version, 0)
 
     @patch("apps.domains.messaging.policy.send_alimtalk_via_owner", return_value=False)
     def test_public_password_reset_send_failure_keeps_current_password_state(self, _send):
@@ -543,6 +550,12 @@ class StudentPasswordResetSafetyTests(TestCase):
     )
     @patch("apps.domains.messaging.policy.send_alimtalk_via_owner", return_value=True)
     def test_staff_parent_username_guidance_uses_parent_account(self, send_mock):
+        create_parent_account_fixture(
+            tenant=self.tenant,
+            parent_phone=self.student.parent_phone,
+            student_name=self.student.name,
+            initial_password="existing-parent-password",
+        )
         response = APIClient().post(
             f"/api/v1/students/{self.student.id}/account-notifications/",
             {"target": "parent"},

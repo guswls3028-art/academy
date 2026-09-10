@@ -5,18 +5,16 @@ from __future__ import annotations
 from typing import Any
 
 
-def ensure_parent_for_student(
+def find_parent_account(
     *,
     tenant: Any,
     parent_phone: str,
-    student_name: str,
 ) -> Any | None:
-    from apps.domains.parents.services import ensure_parent_for_student as _ensure_parent
+    from apps.domains.parents.services import find_parent_account as _find_parent
 
-    return _ensure_parent(
+    return _find_parent(
         tenant=tenant,
         parent_phone=parent_phone,
-        student_name=student_name,
     )
 
 
@@ -26,6 +24,8 @@ def ensure_parent_account_for_student(
     parent_phone: str,
     student_name: str,
     initial_password: str | None = None,
+    initial_password_hash: str | None = None,
+    initial_password_notice: str | None = None,
 ) -> Any:
     from apps.domains.parents.services import ensure_parent_account_for_student as _ensure_parent_account
 
@@ -34,6 +34,8 @@ def ensure_parent_account_for_student(
         parent_phone=parent_phone,
         student_name=student_name,
         initial_password=initial_password,
+        initial_password_hash=initial_password_hash,
+        initial_password_notice=initial_password_notice,
     )
 
 

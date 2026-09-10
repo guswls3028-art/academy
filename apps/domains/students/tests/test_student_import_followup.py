@@ -77,7 +77,6 @@ class StudentImportResultContractTests(TestCase):
                 "grade": 1,
             }],
             initial_password="test-password",
-            send_welcome_message=False,
         )
 
         created = Student.objects.get(tenant=self.tenant, name="합성학생A")
@@ -102,7 +101,6 @@ class StudentImportResultContractTests(TestCase):
                 "phone": "01080000002",
             }],
             initial_password="test-password",
-            send_welcome_message=False,
         )
 
         self.assertEqual(result["failed"], [{

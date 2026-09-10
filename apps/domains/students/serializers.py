@@ -4,6 +4,7 @@ from rest_framework import serializers
 from drf_spectacular.utils import extend_schema_field
 
 from apps.core.models import TenantMembership
+from apps.core.services.login_identifier import normalize_login_identifier
 from apps.domains.students.models import (
     Student,
     StudentCustomFieldDefinition,
@@ -23,6 +24,7 @@ from apps.domains.students.services.identity import (
     canonical_student_phone,
     derive_student_omr_code,
     normalize_student_phone,
+    phone_digits,
     resolve_student_login_id,
     student_login_id_taken,
 )
@@ -375,7 +377,6 @@ class StudentBulkItemSerializer(serializers.Serializer):
 class StudentBulkCreateSerializer(serializers.Serializer):
     initial_password = serializers.CharField(min_length=4, write_only=True)
     students = StudentBulkItemSerializer(many=True)
-    send_welcome_message = serializers.BooleanField(required=False, default=True)
 
 
 class StudentCreateSerializer(serializers.ModelSerializer):
@@ -384,11 +385,6 @@ class StudentCreateSerializer(serializers.ModelSerializer):
         write_only=True,
         required=True,
         min_length=4,
-    )
-    send_welcome_message = serializers.BooleanField(
-        write_only=True,
-        required=False,
-        default=True,
     )
     no_phone = serializers.BooleanField(
         write_only=True,
@@ -483,8 +479,11 @@ class StudentCreateSerializer(serializers.ModelSerializer):
                 tenant=tenant,
                 requested_id=ps_number_raw,
                 phone=phone_str,
-                requested_conflict="error",
             )
+            if ps_number == phone_digits(parent_phone):
+                raise StudentIdentityError(
+                    {"ps_number": "학부모 전화번호는 학생 로그인 아이디로 사용할 수 없습니다."}
+                )
         except StudentIdentityError as exc:
             raise serializers.ValidationError(exc.detail) from exc
 
@@ -532,6 +531,12 @@ class StudentCreateSerializer(serializers.ModelSerializer):
 
 class StudentUpdateSerializer(serializers.ModelSerializer):
     custom_fields = serializers.DictField(required=False)
+    parent_initial_password = serializers.CharField(
+        write_only=True,
+        required=False,
+        allow_blank=True,
+        min_length=4,
+    )
 
     class Meta:
         model = Student
@@ -545,6 +550,7 @@ class StudentUpdateSerializer(serializers.ModelSerializer):
             "school_type",
             "phone",
             "parent_phone",
+            "parent_initial_password",
             "uses_identifier",
             "elementary_school",
             "high_school",
@@ -709,6 +715,11 @@ class RegistrationRequestCreateSerializer(serializers.Serializer):
         attrs.pop("password_confirmation", None)
         attrs["parent_phone"] = attrs["parent_phone"]
         attrs["phone"] = attrs.get("phone") or None
+        attrs["username"] = normalize_login_identifier(attrs.get("username"))
+        if attrs["username"] and attrs["username"] == attrs["parent_phone"]:
+            raise serializers.ValidationError(
+                {"username": "학부모 전화번호는 학생 로그인 아이디로 사용할 수 없습니다."}
+            )
         # null → 빈 문자열로 통일 (모델은 null 허용이지만 저장 시 빈 문자열도 허용)
         for key in ("username", "elementary_school", "high_school", "middle_school", "high_school_class", "major", "gender", "memo", "address", "origin_middle_school"):
             if attrs.get(key) is None:

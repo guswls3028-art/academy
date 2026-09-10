@@ -8,7 +8,7 @@ from typing import Any
 def get_request_student(request: Any) -> Any | None:
     from apps.domains.student_app.permissions import get_request_student as _get_request_student
 
-    return _get_request_student(request, require_explicit_parent_child=False)
+    return _get_request_student(request)
 
 
 def active_lecture_ids_for_student(*, tenant: Any, student: Any):

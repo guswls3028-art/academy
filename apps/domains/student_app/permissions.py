@@ -49,12 +49,11 @@ def is_request_parent(request) -> bool:
     return get_authorized_tenant_role(user, tenant) == "parent"
 
 
-def get_request_student(request, *, require_explicit_parent_child: bool = True):
+def get_request_student(request):
     """
     요청자에 해당하는 Student 반환
     - 학생: request.tenant 기준 active Student
-    - 학부모: 학습 화면은 X-Student-Id로 명시한 활성 연결 자녀만 허용
-    - 커뮤니티의 기존 읽기 전용 호환 경로만 헤더 누락 시 결정적인 첫 자녀를 사용
+    - 학부모: X-Student-Id로 명시한 활성 연결 자녀만 허용
     - 명시된 헤더가 비정상/미소유면 다른 자녀로 대체하지 않고 PermissionDenied
     """
     user = request.user
@@ -72,10 +71,8 @@ def get_request_student(request, *, require_explicit_parent_child: bool = True):
     if not parent or getattr(parent, "tenant_id", None) != tenant.id:
         raise PermissionDenied("선택한 자녀 정보를 확인할 수 없습니다.")
     active_students = active_students_for_parent(tenant, parent)
-    if not has_explicit_child and require_explicit_parent_child:
-        raise PermissionDenied("자녀를 선택한 뒤 다시 시도해 주세요.")
     if not has_explicit_child:
-        return active_students.order_by("-id").first()
+        raise PermissionDenied("자녀를 선택한 뒤 다시 시도해 주세요.")
     header_id = request.META.get("HTTP_X_STUDENT_ID")
     try:
         sid = int(header_id)

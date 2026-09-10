@@ -12,14 +12,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from django.db import transaction
+
 from apps.core.models import Program
 from apps.core.models.user import user_display_username
+from apps.core.services.login_identifier import normalize_login_identifier
 from apps.domains.students.models import Student
 from apps.domains.students.services.identity import (
     StudentIdentityError,
     canonical_student_phone,
     derive_student_omr_code,
     normalize_student_phone,
+    phone_digits,
     student_login_id_taken,
 )
 from apps.domains.students.services.school import (
@@ -43,7 +47,7 @@ class StudentProfileUpdateResult:
     changed_fields: tuple[str, ...]
     parent_relinked: bool = False
     parent_password_for_notice: str = ""
-    parent_user_created: bool = False
+    parent_credentials_initialized: bool = False
 
 
 PHONE_FIELDS = {"phone", "parent_phone"}
@@ -151,10 +155,20 @@ def _normalize_string_field(field: str, value: Any) -> Any:
     return value[:limit] if limit else (value or None)
 
 
-def _validate_identity(student: Student, tenant, display_username: str) -> str:
-    username = str(display_username or "").strip()
+def _validate_identity(
+    student: Student,
+    tenant,
+    display_username: str,
+    *,
+    parent_phone: Any = None,
+) -> str:
+    username = normalize_login_identifier(display_username)
     if not username:
         return ""
+    if username == phone_digits(parent_phone if parent_phone is not None else student.parent_phone):
+        raise StudentProfileUpdateError(
+            {"ps_number": "학부모 전화번호는 학생 로그인 아이디로 사용할 수 없습니다."}
+        )
     if student_login_id_taken(
         tenant=tenant,
         display_username=username,
@@ -171,6 +185,7 @@ def _append_unique(fields: list[str], items: Iterable[str]) -> None:
             fields.append(item)
 
 
+@transaction.atomic
 def update_student_profile(
     *,
     student: Student,
@@ -179,6 +194,7 @@ def update_student_profile(
     identity_field: str | None = None,
     strict_school_validation: bool = True,
     ignore_blank_name: bool = False,
+    allow_parent_phone_change: bool = True,
 ) -> StudentProfileUpdateResult:
     """
     Update student profile fields through one invariant path.
@@ -193,10 +209,20 @@ def update_student_profile(
 
     changed: list[str] = []
     data = dict(data)
+    parent_initial_password = str(data.pop("parent_initial_password", "") or "").strip()
     old_phone = student.phone or ""
     old_parent_phone = student.parent_phone or ""
     old_ps_number = student.ps_number or ""
     old_uses_identifier = bool(student.uses_identifier)
+
+    if (
+        not allow_parent_phone_change
+        and "parent_phone" in data
+        and phone_digits(data.get("parent_phone")) != phone_digits(old_parent_phone)
+    ):
+        raise StudentProfileUpdateError(
+            {"parent_phone": "학부모 계정 연결 변경은 학원에 요청해 주세요."}
+        )
 
     if any(field in data for field in PHONE_FIELDS):
         try:
@@ -211,7 +237,12 @@ def update_student_profile(
     requested_identity_changed = False
 
     if identity_field and identity_field in data:
-        new_username = _validate_identity(student, tenant, data.get(identity_field))
+        new_username = _validate_identity(
+            student,
+            tenant,
+            data.get(identity_field),
+            parent_phone=data.get("parent_phone", student.parent_phone),
+        )
         if new_username and student.user_id and new_username != user_display_username(student.user):
             student.ps_number = new_username
             _append_unique(changed, ["ps_number"])
@@ -294,18 +325,34 @@ def update_student_profile(
 
     parent_relinked = False
     parent_password_for_notice = ""
-    parent_user_created = False
+    parent_credentials_initialized = False
     if "parent_phone" in data:
         new_parent_phone = student.parent_phone or ""
-        if new_parent_phone and new_parent_phone != old_parent_phone:
-            parent_result = ensure_parent_account_for_student(
-                tenant=tenant,
-                parent_phone=new_parent_phone,
-                student_name=student.name,
+        linked_parent = student.parent if student.parent_id else None
+        parent_link_needs_sync = bool(
+            new_parent_phone
+            and (
+                new_parent_phone != old_parent_phone
+                or linked_parent is None
+                or phone_digits(linked_parent.phone) != phone_digits(new_parent_phone)
+                or linked_parent.user_id is None
             )
+        )
+        if parent_link_needs_sync:
+            try:
+                parent_result = ensure_parent_account_for_student(
+                    tenant=tenant,
+                    parent_phone=new_parent_phone,
+                    student_name=student.name,
+                    initial_password=parent_initial_password,
+                )
+            except ValueError as exc:
+                raise StudentProfileUpdateError(
+                    {"parent_initial_password": str(exc)}
+                ) from exc
             parent = parent_result.parent
             parent_password_for_notice = parent_result.password_for_notice
-            parent_user_created = parent_result.user_created
+            parent_credentials_initialized = parent_result.credentials_initialized
             if parent and student.parent_id != parent.id:
                 student.parent = parent
                 student.save(update_fields=["parent_id", "updated_at"])
@@ -316,5 +363,5 @@ def update_student_profile(
         changed_fields=tuple(changed),
         parent_relinked=parent_relinked,
         parent_password_for_notice=parent_password_for_notice,
-        parent_user_created=parent_user_created,
+        parent_credentials_initialized=parent_credentials_initialized,
     )

@@ -32,8 +32,10 @@ from apps.support.teacher_app.ops_assistant_dependencies import (
     get_auto_send_config,
     get_owner_tenant_id,
     normalize_student_phone,
+    parent_account_needs_password,
     resolve_access_mode,
     resolve_student_import_row,
+    send_parent_account_credentials_notice,
     update_student_profile,
 )
 
@@ -161,7 +163,10 @@ def _student_match(*, tenant, row: dict) -> tuple[dict, list[dict], list[str]]:
             )
         )
 
-    active = Student.objects.filter(tenant=tenant, deleted_at__isnull=True).select_related("user")
+    active = Student.objects.filter(
+        tenant=tenant,
+        deleted_at__isnull=True,
+    ).select_related("user", "parent__user")
     has_phone_evidence = bool(student_phone or parent_phone)
     phone_query = Q()
     if student_phone:
@@ -206,8 +211,17 @@ def _student_match(*, tenant, row: dict) -> tuple[dict, list[dict], list[str]]:
             issues.append(_issue("parent_phone_conflict", "기존 학부모 전화번호와 사진의 번호가 다릅니다."))
         if not student.phone and student_phone:
             profile_changes.extend(["student.phone", "student.ps_number", "user.phone"])
-        if not student.parent_phone and parent_phone:
-            profile_changes.extend(["student.parent_phone", "parent.link"])
+        if parent_phone:
+            linked_parent = student.parent if student.parent_id else None
+            parent_link_valid = bool(
+                linked_parent
+                and linked_parent.user_id
+                and linked_parent.phone == parent_phone
+            )
+            if not student.parent_phone:
+                profile_changes.append("student.parent_phone")
+            if not parent_link_valid:
+                profile_changes.append("parent.link")
         basis = ["name"]
         if student_phone and student.phone == student_phone:
             basis.append("student_phone")
@@ -230,8 +244,6 @@ def _student_match(*, tenant, row: dict) -> tuple[dict, list[dict], list[str]]:
 
     if not row.get("register_student"):
         issues.append(_issue("student_not_found", "기존 학생을 찾지 못했습니다. 신규 등록 여부를 확인해 주세요."))
-    if not student_phone:
-        issues.append(_issue("new_student_phone_required", "신규 등록에는 학생 전화번호가 필요합니다."))
     return {"status": "new", "id": None, "basis": ["no_existing_match"]}, issues, profile_changes
 
 
@@ -278,6 +290,26 @@ def _correction_options(*, tenant, student_id: int | None, selected_lecture_id: 
         impact = assess_disposable_enrollment(tenant=tenant, enrollment=enrollment).as_dict()
         options.append({"enrollment_id": enrollment.id, "lecture_title": enrollment.lecture.title, "impact": impact})
     return options
+
+
+def _initial_password_required(
+    *,
+    tenant,
+    row: dict,
+    student_match: dict,
+    profile_changes: list[str],
+) -> bool:
+    if student_match.get("status") == "new":
+        return True
+    if "parent.link" not in profile_changes:
+        return False
+    try:
+        return parent_account_needs_password(
+            tenant=tenant,
+            parent_phone=str(row.get("parent_phone") or ""),
+        )
+    except ValueError:
+        return False
 
 
 def build_preview_row(*, tenant, source_row: dict, override: dict | None = None) -> dict:
@@ -347,6 +379,13 @@ def build_preview_row(*, tenant, source_row: dict, override: dict | None = None)
                     )
                 )
 
+    initial_password_required = _initial_password_required(
+        tenant=tenant,
+        row=row,
+        student_match=student_match,
+        profile_changes=profile_changes,
+    )
+
     return {
         "row_id": row["row_id"],
         "name": str(row.get("name") or "").strip(),
@@ -367,6 +406,7 @@ def build_preview_row(*, tenant, source_row: dict, override: dict | None = None)
             "correct_enrollment": bool(row.get("correct_enrollment")),
         },
         "student_match": student_match,
+        "initial_password_required": initial_password_required,
         "profile_changes": profile_changes,
         "lecture_candidates": candidates,
         "session_target": session_target,
@@ -452,6 +492,16 @@ def _assert_confirmed_row(*, tenant, source_row: dict, override: dict) -> dict:
         raise ValidationError(
             {"code": "proposal_needs_review", "detail": "확인이 필요한 항목이 남아 있습니다.", "row": preview}
         )
+    if preview["initial_password_required"] and len(
+        str(override.get("initial_password") or "").strip()
+    ) < 4:
+        raise ValidationError(
+            {
+                "code": "initial_password_required",
+                "detail": "신규 계정을 만들 초기 비밀번호를 4자 이상 입력해 주세요.",
+                "row_id": override["row_id"],
+            }
+        )
     return {**override, "preview": preview}
 
 
@@ -527,6 +577,7 @@ def execute_proposal(*, tenant, actor, payload: dict, overrides: list[dict]) -> 
             created = False
             restored = False
             profile_changed: list[str] = []
+            repaired_parent_notice_sent = False
             if match["status"] == "existing":
                 student = (
                     Student.objects.select_for_update()
@@ -537,8 +588,13 @@ def execute_proposal(*, tenant, actor, payload: dict, overrides: list[dict]) -> 
                 update_data: dict[str, Any] = {}
                 if not student.phone and row.get("student_phone"):
                     update_data["phone"] = row["student_phone"]
-                if not student.parent_phone and row.get("parent_phone"):
+                if "parent.link" in preview["profile_changes"] and row.get(
+                    "parent_phone"
+                ):
                     update_data["parent_phone"] = row["parent_phone"]
+                    update_data["parent_initial_password"] = row.get(
+                        "initial_password", ""
+                    )
                 if update_data:
                     try:
                         updated = update_student_profile(
@@ -551,9 +607,23 @@ def execute_proposal(*, tenant, actor, payload: dict, overrides: list[dict]) -> 
                     except StudentProfileUpdateError as exc:
                         raise ValidationError(exc.detail) from exc
                     profile_changed = list(updated.changed_fields)
+                    if updated.parent_relinked or updated.parent_credentials_initialized:
+                        profile_changed.append("parent.link")
+                    if updated.parent_credentials_initialized:
+                        delivered = send_parent_account_credentials_notice(
+                            student=student,
+                            parent=updated.student.parent,
+                            parent_password=updated.parent_password_for_notice,
+                            origin_type="teacher_ops_assistant",
+                            origin_id=str(payload["nonce"]),
+                        )
+                        if not delivered:
+                            raise ValidationError(
+                                "학부모 계정 안내 알림톡을 보내지 못해 실행을 취소했습니다."
+                            )
+                        repaired_parent_notice_sent = True
                     student.refresh_from_db()
             else:
-                student_phone = "".join(char for char in row.get("student_phone", "") if char.isdigit())
                 resolution = resolve_student_import_row(
                     tenant,
                     {
@@ -565,7 +635,7 @@ def execute_proposal(*, tenant, actor, payload: dict, overrides: list[dict]) -> 
                         "grade": row.get("grade", ""),
                         "is_managed": True,
                     },
-                    student_phone[-4:],
+                    str(row.get("initial_password") or ""),
                     identity_policy="phone_if_available",
                     source_job_id=str(payload["nonce"]),
                 )
@@ -585,8 +655,7 @@ def execute_proposal(*, tenant, actor, payload: dict, overrides: list[dict]) -> 
             lecture_id = preview.get("selected_lecture_id")
             enrollment = None
             enrollment_created = False
-            notice_origin_id = ""
-            notice_expected = 0
+            notice_scheduled = False
             if row.get("enroll_lecture") or row.get("open_video"):
                 existing_enrollment = (
                     Enrollment.objects.select_for_update()
@@ -594,13 +663,16 @@ def execute_proposal(*, tenant, actor, payload: dict, overrides: list[dict]) -> 
                     .first()
                 )
                 enrollment_created = existing_enrollment is None or existing_enrollment.status != "ACTIVE"
-                notice_origin_id = str(student.pending_account_notice_origin_id or "")
-                notice_expected = (
-                    int(bool(student.parent_phone)) + int(bool(student.phone) and student.phone != student.parent_phone)
-                    if student.pending_account_notice_since
-                    else 0
-                )
                 enrollment = bulk_create_enrollments(tenant=tenant, lecture_id=lecture_id, student_ids=[student.id])[0]
+                notice_scheduled = bool(student.pending_account_notice_since)
+
+            notice_origin_id = str(student.pending_account_notice_origin_id or "")
+            notice_expected = (
+                int(bool(student.parent_phone))
+                + int(bool(student.phone) and student.phone != student.parent_phone)
+                if student.pending_account_notice_since
+                else 0
+            )
 
             attendance_evidence = None
             videos_evidence: list[dict] = []
@@ -658,16 +730,34 @@ def execute_proposal(*, tenant, actor, payload: dict, overrides: list[dict]) -> 
                     "session_id": session.id,
                 }
 
+            notice_requested = bool(
+                row.get("send_account_notice")
+                or created
+                or repaired_parent_notice_sent
+                or notice_expected
+            )
             account_notice = {
-                "requested": bool(row.get("send_account_notice")),
+                "requested": notice_requested,
                 "state": "not_requested",
                 "origin_id": "",
                 "expected_recipients": 0,
             }
-            if row.get("send_account_notice"):
-                if notice_expected:
+            if notice_requested:
+                if repaired_parent_notice_sent:
+                    account_notice.update(
+                        state="queued",
+                        origin_id=str(payload["nonce"]),
+                        expected_recipients=1,
+                    )
+                elif notice_expected and notice_scheduled:
                     account_notice.update(
                         state="queued", origin_id=notice_origin_id, expected_recipients=notice_expected
+                    )
+                elif notice_expected:
+                    account_notice.update(
+                        state="pending_first_enrollment",
+                        origin_id=notice_origin_id,
+                        expected_recipients=notice_expected,
                     )
                 else:
                     account_notice["state"] = "unavailable_without_pending_credentials"
@@ -683,6 +773,7 @@ def execute_proposal(*, tenant, actor, payload: dict, overrides: list[dict]) -> 
                 {
                     "row_id": row["row_id"],
                     "student_ref": student.id,
+                    "student_login_id": student.ps_number,
                     "account_creation": "created" if created else "not_created",
                     "account_restored": restored,
                     "profile_link": {
