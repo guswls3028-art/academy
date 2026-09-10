@@ -455,7 +455,8 @@ TENANT_DB_USAGE_SLOW_REQUEST_MS = int(
 )
 
 # /dev 운영 콘솔 알림 webhook (Slack incoming webhook URL).
-# 비어 있으면 전송 생략 — check_dev_alerts 커맨드는 조건 평가와 상태 기록만 수행.
+# 비어 있으면 일반 운영 룰은 전송을 생략한다. 실제 user_incidents가 있으면
+# DEV_ALERTS_WEBHOOK_REQUIRED와 무관하게 check_dev_alerts가 실패한다.
 DEV_ALERTS_WEBHOOK_URL = os.getenv("DEV_ALERTS_WEBHOOK_URL", "")
 # 수신 채널을 운영 계약으로 활성화한 뒤에는 URL 누락을 실패로 처리한다.
 DEV_ALERTS_WEBHOOK_REQUIRED = os.getenv(
