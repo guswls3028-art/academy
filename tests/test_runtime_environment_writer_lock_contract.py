@@ -205,6 +205,17 @@ def test_optional_runtime_refreshes_wait_terminal_before_lock_release() -> None:
     assert "send-command" not in _text(SCRIPTS / "set-dev-alerts-webhook.ps1")
 
 
+def test_dev_alerts_webhook_writer_keeps_receiver_and_requirement_in_one_ssot() -> None:
+    content = _text(SCRIPTS / "set-dev-alerts-webhook.ps1")
+
+    assert content.count('NotePropertyName "DEV_ALERTS_WEBHOOK_REQUIRED"') == 2
+    assert 'NotePropertyValue $false' in content
+    assert 'NotePropertyValue $true' in content
+    persist = content.index("$newJson =")
+    assert content.rindex('NotePropertyName "DEV_ALERTS_WEBHOOK_URL"') < persist
+    assert content.rindex('NotePropertyName "DEV_ALERTS_WEBHOOK_REQUIRED"') < persist
+
+
 def _run_lock_helper_scenario(body: str) -> subprocess.CompletedProcess[str]:
     helper = (SCRIPTS / "core" / "runtime-env-lock.ps1").as_posix()
     script = textwrap.dedent(

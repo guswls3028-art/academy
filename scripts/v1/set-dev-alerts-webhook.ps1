@@ -1,4 +1,4 @@
-# Set DEV_ALERTS_WEBHOOK_URL in /academy/api/env (SSM SecureString) and refresh /opt/api.env on running API instances.
+# Set DEV_ALERTS_WEBHOOK_URL and its required-state in /academy/api/env (SSM SecureString).
 # 사용:
 #   pwsh scripts/v1/set-dev-alerts-webhook.ps1 -Url "https://hooks.slack.com/services/..."
 #   pwsh scripts/v1/set-dev-alerts-webhook.ps1 -Url ""  # 비활성화 (제거)
@@ -44,7 +44,7 @@ if ($isBase64) {
 }
 $obj = $jsonStr | ConvertFrom-Json
 
-# 2) Update DEV_ALERTS_WEBHOOK_URL
+# 2) Update DEV_ALERTS_WEBHOOK_URL and the matching required-state atomically.
 $prev = $obj.PSObject.Properties["DEV_ALERTS_WEBHOOK_URL"].Value
 if ($Url -eq "") {
     if ($obj.PSObject.Properties["DEV_ALERTS_WEBHOOK_URL"]) {
@@ -53,8 +53,10 @@ if ($Url -eq "") {
     } else {
         Write-Host "[2/3] DEV_ALERTS_WEBHOOK_URL already unset, no change"
     }
+    $obj | Add-Member -NotePropertyName "DEV_ALERTS_WEBHOOK_REQUIRED" -NotePropertyValue $false -Force
 } else {
     $obj | Add-Member -NotePropertyName "DEV_ALERTS_WEBHOOK_URL" -NotePropertyValue $Url -Force
+    $obj | Add-Member -NotePropertyName "DEV_ALERTS_WEBHOOK_REQUIRED" -NotePropertyValue $true -Force
     Write-Host "[2/3] Set DEV_ALERTS_WEBHOOK_URL=<configured> (was: $(if ($prev) { '<set>' } else { '<unset>' }))"
 }
 
