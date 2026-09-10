@@ -65,6 +65,12 @@ class MeParentStudentTenantIsolationTests(TestCase):
             name="Local Child",
             suffix="101",
         )
+        second_local_student = self._student(
+            tenant=self.tenant,
+            username="me-parent-local-child-two",
+            name="Local Child Two",
+            suffix="303",
+        )
         foreign_student = self._student(
             tenant=self.other_tenant,
             username="me-parent-foreign-child",
@@ -79,11 +85,14 @@ class MeParentStudentTenantIsolationTests(TestCase):
         response = MeView.as_view()(request)
 
         self.assertEqual(response.status_code, 200, response.data)
-        self.assertEqual(response.data["linkedStudentId"], local_student.id)
-        self.assertEqual(response.data["linkedStudentName"], local_student.name)
+        self.assertNotIn("linkedStudentId", response.data)
+        self.assertNotIn("linkedStudentName", response.data)
         self.assertEqual(
             response.data["linkedStudents"],
-            [{"id": local_student.id, "name": local_student.name}],
+            [
+                {"id": local_student.id, "name": local_student.name},
+                {"id": second_local_student.id, "name": second_local_student.name},
+            ],
         )
         self.assertNotIn(
             foreign_student.id,

@@ -88,6 +88,12 @@
 과제 배정을 모두 다시 검증한다. 헤더 누락, 연결되지 않은 학생, 다른 테넌트 학생,
 다른 자녀의 수강 ID는 다른 자녀로 보정하지 않고 쓰기 전에 거절한다.
 
+`GET /api/v1/core/me/`는 현재 테넌트의 활성 연결 자녀 전체를 ID 오름차순의
+`linkedStudents` 배열로만 반환한다. 첫 행을 기본 자녀로 의미화하던
+`linkedStudentId`, `linkedStudentName` 단수
+필드는 제거됐다. 자녀가 한 명이면 프론트가 그 유일한 ID를 확정할 수 있지만, 여러 명이면
+저장된 유효한 직접 선택 또는 새 사용자 선택 전까지 학생 범위 API를 호출하지 않는다.
+
 대리 제출의 `Submission.user`는 학부모가 아니라 선택 자녀의 로그인 User다. 따라서
 성적·미제출 상태·교사 검수함 같은 후속 투영은 학생 본인 제출과 동일하게 이어진다.
 실제 요청자가 자녀 User와 다르면 `Submission.meta.submitted_by_user_id`에 학부모 User
@@ -141,6 +147,8 @@ Body: { "username": "{학부모전화번호}", "password": "{비밀번호}" }
 | `#{비밀번호안내}` | 상황별 안내 문구 |
 
 계정/비밀번호 복구 발송 정책은 `send_alimtalk_via_owner()`를 따른다. SMS fallback과 템플릿 fallback은 없다.
+학부모 본인이 비밀번호를 변경해 특정 자녀 문맥이 없는 경우에는 학부모 계정 정보만
+안내한다. 연결 목록의 첫 행이나 최근 행을 골라 학생 이름·아이디를 채우지 않는다.
 첫 수강 확정 계정 안내 경로는 큐 payload에
 `event_type=registration_approved_student|registration_approved_parent`를 실어
 운영 로그가 계정성 알림으로 분류되게 한다. 이 분류는

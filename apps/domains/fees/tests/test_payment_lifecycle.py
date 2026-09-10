@@ -312,6 +312,16 @@ class StudentFeeParentSelectionTest(FeesTestMixin, TestCase):
         request.tenant = self.tenant
         return request
 
+    def test_parent_invoice_list_requires_explicit_child_header(self):
+        request = self.factory.get("/student/fees/invoices/")
+        force_authenticate(request, user=self.parent_user)
+        request.tenant = self.tenant
+
+        response = StudentFeeInvoiceListView.as_view()(request)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(str(response.data["detail"]), "자녀를 선택한 뒤 다시 시도해 주세요.")
+
     def test_parent_invoice_list_uses_selected_child_only(self):
         response = StudentFeeInvoiceListView.as_view()(
             self._request("/student/fees/invoices/", self.student_a)
