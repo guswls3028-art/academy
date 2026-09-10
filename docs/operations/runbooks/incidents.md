@@ -63,6 +63,26 @@ GitHub 실행과 해당 감사 로그에서 직접 관측하고, 그 실패가 �
 `apps/core/tests/test_user_incident_monitoring.py`에서 수신처 누락, 평가 실패,
 전송 실패, dry-run, 성공 후 중복 억제, 민감정보 비노출을 검증한다.
 
+`work_record_date_anomalies` 룰은 최근 35일의 급여관리자 수기 생성·수정 감사를
+검사한다. 생성 로컬 날짜와 다른 매월 1일에 추가됐거나, PATCH로 날짜 또는 직원이
+옮겨진 결과가 같은 테넌트·같은 날짜의 서로 다른 직원 2명 이상에 남아 있는 경우에만
+검토 경고를 낸다. 수정 경고에는 record ID와 이전/이후 날짜·직원 ID를 함께 싣는다.
+이는 날짜 오류 확정이나 자동 정정이 아니다. 정상적인 단일 과거 입력은 경고하지
+않으며, 삭제되었거나 다른 날짜로 정정된 행도 현재 상태 재확인에서 제외한다.
+이 급여 검토 경고는 사용자 민원과 같은 필수 전달 신호다. 경고가 있는데 webhook이
+없거나 dry-run이라 전달되지 않으면 명령과 `cron.check_dev_alerts` 감사는 실패한다.
+Slack 수락 뒤에는 tenant/date와 현재
+record ID 집합의 PII 없는 fingerprint를 `alerts.work_record_date_slack`에 기록해 같은
+집합을 반복 발송하지 않는다. 한 번의 Slack 메시지에 표시되는 최대 5개 그룹만
+전송 완료로 기록하며, 남은 그룹은 다음 실행에서 이어서 알린다. fingerprint 영수증의
+보존 기간은 해당 검사에 요청한 조회 기간과 같다. 새 의심 행이 추가되어 집합이
+바뀌면 다시 경고한다.
+이전 버전은 수기 생성·삭제 감사를 남기지 않았으므로 날짜·시간·금액만으로 실제
+근무일을 추정해 복구하지 않는다. 원본 출퇴근 자료나 독립적인 사용자 확인이 있을
+때만 정확한 record ID를 대상으로 정정한다. 회귀 계약은
+`apps/core/tests/test_work_record_date_alerts.py`와
+`apps/domains/staffs/tests/test_work_record_audit.py`가 소유한다.
+
 5xx 폭주가 장애 중 DB 부하를 증폭하지 않도록 같은 테넌트·경로·오류 유형은 API
 프로세스별 60초에 1건만 bounded 비동기 큐로 감사 로그에 저장한다. 사용자 응답은
 DB INSERT를 기다리지 않으며 PII 없는 동일 신호를 애플리케이션 로그에도 남긴다.
