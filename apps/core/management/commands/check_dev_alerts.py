@@ -718,7 +718,7 @@ class Command(BaseCommand):
         parser.add_argument(
             "--silent",
             action="store_true",
-            help="트리거 없으면 종료 코드 0, 무출력.",
+            help="무경고 출력을 생략하고 경고는 규칙 키와 건수만 출력.",
         )
         parser.add_argument(
             "--rule",
@@ -762,6 +762,9 @@ class Command(BaseCommand):
                 triggered.append((rule, result))
 
         for rule, data in triggered:
+            if silent:
+                self.stdout.write(f"[{rule.key}] rows={len(data.get('rows') or [])}")
+                continue
             self.stdout.write(self.style.WARNING(f"\n[{rule.key}] {data.get('title')}"))
             for row in (data.get("rows") or [])[:10]:
                 self.stdout.write("  " + json.dumps(row, ensure_ascii=False))

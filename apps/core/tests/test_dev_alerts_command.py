@@ -119,6 +119,44 @@ class DevAlertsCommandTests(TestCase):
         self.run_command()
         self.post.assert_called_once()
         self.assert_audit("success")
+        self.assertIn("Finding", self.output.getvalue())
+        self.assertIn('"count": 1', self.output.getvalue())
+
+    def test_silent_delivery_keeps_private_details_out_of_console(self):
+        title = "synthetic-private-inquiry-title"
+        row = "synthetic-private-inquiry-body"
+        self.evaluate.return_value = {"title": title, "rows": [{"title": row}]}
+        self.run_command("--silent")
+        self.assertNotIn(title, self.output.getvalue() + self.errors.getvalue())
+        self.assertNotIn(row, self.output.getvalue() + self.errors.getvalue())
+        self.assertIn("[test_health] rows=1", self.output.getvalue())
+        self.post.assert_called_once()
+        receiver, payload = self.post.call_args.args
+        self.assertEqual(receiver, "https://hooks.example.invalid/test")
+        self.assertIn(
+            {"type": "section", "text": {"type": "mrkdwn", "text": f"*{title}*\n• title={row}"}},
+            payload["blocks"],
+        )
+        self.assert_audit("success")
+
+    @override_settings(DEV_ALERTS_WEBHOOK_URL="")
+    def test_silent_missing_receiver_does_not_dump_private_findings(self):
+        sentinel = "synthetic-private-inquiry"
+        self.evaluate.return_value = {"title": sentinel, "rows": [{"title": sentinel}]}
+        with self.assertRaisesMessage(CommandError, "DEV_ALERTS_WEBHOOK_URL"):
+            self.run_command("--silent")
+        self.assertNotIn(sentinel, self.output.getvalue() + self.errors.getvalue())
+        self.post.assert_not_called()
+        self.assert_audit("failed")
+
+    def test_silent_dry_run_does_not_dump_private_findings(self):
+        sentinel = "synthetic-private-inquiry"
+        self.evaluate.return_value = {"title": sentinel, "rows": [{"title": sentinel}]}
+        self.run_command("--silent", "--dry-run")
+        self.assertNotIn(sentinel, self.output.getvalue() + self.errors.getvalue())
+        self.assertIn("[test_health] rows=1", self.output.getvalue())
+        self.post.assert_not_called()
+        self.assert_audit("success")
 
     def test_webhook_exception_does_not_log_secret_url_or_response(self):
         sentinel = "synthetic-private-webhook-token"

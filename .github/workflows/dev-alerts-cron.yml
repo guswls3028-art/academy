@@ -2,7 +2,8 @@
 # /dev 콘솔 운영 알림 cron — check_dev_alerts (5분 주기).
 #
 # 룰: 사용자 5xx·화면 오류·문제 신고 / 만료 D-3 / 결제·worker 운영 위험 / 미답변 BUG/FB
-# Slack 전송: settings.DEV_ALERTS_WEBHOOK_URL (env). 미설정 시 평가만 수행.
+# Slack 전송: settings.DEV_ALERTS_WEBHOOK_URL (env). 미설정 시 실패 종료.
+# --silent 콘솔에는 규칙 키와 건수만 남기고 사용자 작성 내용은 출력하지 않는다.
 # 모든 호출은 OpsAuditLog `cron.check_dev_alerts` 로 기록.
 #
 # 패턴: API 인스턴스 SSM Run Command로 마지막 검증 성공 manifest의
