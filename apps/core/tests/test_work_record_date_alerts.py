@@ -166,6 +166,53 @@ class WorkRecordDateAlertTests(TestCase):
             action=alerts.WORK_RECORD_DATE_SLACK_DELIVERY_ACTION,
         )
         self.assertEqual(receipt.payload["fingerprints"], result["fingerprints"])
+        self.assertEqual(receipt.payload["displayed_group_count"], 1)
+
+    def test_receipt_only_consumes_the_five_groups_displayed_in_slack(self):
+        selected_dates = [
+            "2026-01-01",
+            "2026-02-01",
+            "2026-03-01",
+            "2026-04-01",
+            "2026-05-01",
+            "2026-06-01",
+        ]
+        for selected_date in selected_dates:
+            self._candidate(staff_index=0, selected_date=selected_date)
+            self._candidate(staff_index=1, selected_date=selected_date)
+        result = alerts.rule_work_record_date_anomalies()
+
+        alerts._record_work_record_date_slack_delivery(result)
+
+        receipt = OpsAuditLog.objects.get(
+            action=alerts.WORK_RECORD_DATE_SLACK_DELIVERY_ACTION,
+        )
+        self.assertEqual(receipt.payload["displayed_group_count"], 5)
+        self.assertEqual(
+            receipt.payload["fingerprints"],
+            result["fingerprints"][: alerts.SLACK_RULE_ROW_LIMIT],
+        )
+        remaining = alerts.rule_work_record_date_anomalies()
+        self.assertIsNotNone(remaining)
+        self.assertEqual(remaining["total"], 2)
+        self.assertEqual(
+            [row["selected_date"] for row in remaining["rows"]],
+            ["2026-06-01"],
+        )
+
+    def test_custom_window_days_also_bounds_delivery_receipt_retention(self):
+        self._candidate(staff_index=0)
+        self._candidate(staff_index=1)
+        result = alerts.rule_work_record_date_anomalies(window_days=5)
+        alerts._record_work_record_date_slack_delivery(result)
+        OpsAuditLog.objects.filter(
+            action=alerts.WORK_RECORD_DATE_SLACK_DELIVERY_ACTION,
+        ).update(created_at=timezone.now() - timedelta(days=10))
+
+        repeated = alerts.rule_work_record_date_anomalies(window_days=5)
+
+        self.assertIsNotNone(repeated)
+        self.assertEqual(repeated["fingerprints"], result["fingerprints"])
 
     @override_settings(DEV_ALERTS_WEBHOOK_URL="https://hooks.example.invalid/test")
     def test_command_records_dedupe_only_after_slack_accepts(self):
