@@ -57,6 +57,18 @@ foreach ($marker in @(
     "Backend Django smoke and deployment contracts",
     "scripts/lint/check_safe_method_writes.py",
     "--allow-contract-review",
+    "types: [opened, synchronize, reopened, edited, ready_for_review]",
+    "scripts.codex.test_user_journey_outcomes",
+    "scripts.codex.test_user_journey_receipts",
+    "scripts/codex/check_user_journey_outcomes.py",
+    "scripts/codex/user_journey_receipts.py verify",
+    "scripts/codex/user_journey_receipts.py issue",
+    "test-results/user-journey-machine-results/*.json",
+    "test-results/user-journey-receipts/*.json",
+    "Upload PII-free journey receipts",
+    "if-no-files-found: ignore",
+    'ref: ${{ github.event.pull_request.head.sha || github.sha }}',
+    '--event-path "$GITHUB_EVENT_PATH"',
     "permissions:",
     "contents: read"
 )) {

@@ -1,0 +1,205 @@
+{
+  "schema_version": 1,
+  "journeys": [
+    {
+      "id": "score-result-messaging",
+      "availability": "generally_available",
+      "seal_status": "gap",
+      "known_gaps": ["Current main is parent-only; the separate student-and-parent recipient change is not merged or sealed, and same-artifact send-to-log reload, provider-disabled readback, and zero-residue cleanup evidence is missing."],
+      "actors": ["owner", "admin", "teacher"],
+      "projection_audiences": ["owner", "admin", "teacher", "staff", "student", "parent"],
+      "role_outcomes": {
+        "owner": "Owner must explicitly choose recipients and inspect the persisted request.",
+        "admin": "Admin must explicitly choose recipients and inspect the persisted request.",
+        "teacher": "Teacher must explicitly choose recipients and inspect the persisted request.",
+        "staff": "Staff direct send must be denied before provider dispatch.",
+        "student": "Student must see only the published result for the own account.",
+        "parent": "Parent must see only the selected child's published result."
+      },
+      "path_patterns": ["apps/domains/results/**", "apps/support/results/**", "apps/domains/messaging/**", "apps/worker/messaging_worker/**", "academy/adapters/db/django/repositories_messaging.py", "apps/domains/student_app/results/**"],
+      "must_match": ["apps/domains/results/services/manual_exam_grading.py", "apps/domains/messaging/views/send_views.py", "apps/worker/messaging_worker/sqs_main.py", "academy/adapters/db/django/repositories_messaging.py", "apps/domains/student_app/results/views.py"],
+      "must_not_match": ["apps/domains/messaging/migrations/0001_initial.py", "apps/domains/messaging/tests/test_send_views.py", "docs/domain/messaging-alimtalk.md"],
+      "start_state": "A tenant-scoped student has a published result and staff has made explicit recipient and letter choices.",
+      "valid_action": "An authorized teacher or owner confirms one score-result message request.",
+      "invalid_case": "An unauthorized role or missing approved provider identity fails before provider dispatch.",
+      "persisted_outcome": "The result remains canonical and each requested recipient has one immutable delivery request and auditable state.",
+      "reload_assertion": "Student, guardian, staff result, and delivery-log reads agree after a fresh request.",
+      "downstream_projections": ["student result projection", "guardian result projection", "staff delivery log"],
+      "notification_intent": "Only explicitly selected student and guardian recipients are requested; result persistence is independent of notification success.",
+      "provider_dispatch_policy": "disabled_in_synthetic_qa",
+      "receipt_policy": {
+        "ttl_seconds": 21600,
+        "notification_mode": "explicit_recipients",
+        "required_cases": [
+          {"case_id": "score-send-valid-teacher", "kind": "valid", "actor": "teacher", "outcome_code": "requested"},
+          {"case_id": "score-send-invalid-staff", "kind": "invalid", "actor": "staff", "outcome_code": "forbidden"}
+        ],
+        "required_projections": [
+          {"projection_id": "owner-delivery-request", "audience": "owner"},
+          {"projection_id": "admin-delivery-request", "audience": "admin"},
+          {"projection_id": "teacher-delivery-request", "audience": "teacher"},
+          {"projection_id": "staff-delivery-log", "audience": "staff"},
+          {"projection_id": "student-published-result", "audience": "student"},
+          {"projection_id": "parent-selected-result", "audience": "parent"}
+        ]
+      },
+      "required_viewports": ["desktop-1366", "mobile-390"],
+      "cleanup_assertion": "Disposable tenant, users, result rows, delivery rows, queue items, and objects are zero after synthetic QA.",
+      "executable_evidence": [
+        {"path": "tests/test_critical_academy_journey.py", "runner": "pytest", "proves": ["tenant result projection", "student and parent role reads", "read safety"]},
+        {"path": "apps/domains/results/tests/test_admin_exam_results_scope.py", "runner": "pytest", "proves": ["staff result scope", "tenant isolation"]}
+      ],
+      "docs": ["docs/operations/user-journey-outcome-gate.md", "docs/domain/exam-grading.md", "docs/ssot/messaging-policy.md"]
+    },
+    {
+      "id": "omr-manual-descriptive",
+      "availability": "generally_available",
+      "seal_status": "gap",
+      "known_gaps": ["One same-artifact upload-to-identification-to-subjective-grading-to-publication replay with cross-role reload and zero-residue cleanup is missing."],
+      "actors": ["owner", "admin", "teacher", "staff"],
+      "projection_audiences": ["owner", "admin", "teacher", "staff", "student", "parent"],
+      "role_outcomes": {
+        "owner": "Owner can complete OMR review and manual grading within tenant scope.",
+        "admin": "Admin can complete OMR review and manual grading within tenant scope.",
+        "teacher": "Teacher can complete the authorized grading workflow.",
+        "staff": "Staff can perform permitted OMR operations while restricted grading actions stay denied.",
+        "student": "Student sees only the own published result projection.",
+        "parent": "Parent sees only the selected child's published result projection."
+      },
+      "path_patterns": ["apps/domains/submissions/omr_pipeline/**", "apps/domains/submissions/**omr**", "apps/domains/results/**manual**", "apps/domains/exams/**/*omr*", "apps/domains/assets/omr/**", "apps/support/omr/**", "apps/support/results/**manual**", "academy/domain/omr/**", "academy/application/use_cases/omr/**", "academy/adapters/ai/omr/**"],
+      "must_match": ["apps/domains/submissions/omr_pipeline/services/answer_persister.py", "apps/domains/results/services/manual_exam_grading.py", "apps/domains/exams/views/omr_generate_view.py", "apps/domains/assets/omr/services/omr_document_service.py", "academy/application/use_cases/omr/grading_readiness.py"],
+      "must_not_match": ["apps/domains/submissions/migrations/0010_omruploadbatch_omruploadbatchitem.py", "apps/domains/submissions/tests/test_omr_tenant_realuse_flow.py", "docs/domain/omr.md"],
+      "start_state": "A tenant-scoped exam, roster, OMR upload, and subjective answers are available for review.",
+      "valid_action": "Authorized staff identifies scans, records subjective grading, and publishes the completed result.",
+      "invalid_case": "Ambiguous identity, stale grading state, or foreign-tenant input remains reviewable and unmutated.",
+      "persisted_outcome": "Exact scan identity, objective and subjective scores, grading version, and publication state persist once.",
+      "reload_assertion": "Reload restores the same received, processing, completed, needs-identification, failed, and graded states.",
+      "downstream_projections": ["staff grading projection", "student result projection", "guardian result projection"],
+      "notification_intent": "Grading and publication do not imply a notification; any later message requires an explicit independent intent.",
+      "provider_dispatch_policy": "disabled_in_synthetic_qa",
+      "receipt_policy": {
+        "ttl_seconds": 21600,
+        "notification_mode": "no_notification",
+        "required_cases": [
+          {"case_id": "omr-grade-valid-teacher", "kind": "valid", "actor": "teacher", "outcome_code": "published"},
+          {"case_id": "omr-grade-invalid-staff", "kind": "invalid", "actor": "staff", "outcome_code": "forbidden"}
+        ],
+        "required_projections": [
+          {"projection_id": "owner-grading-state", "audience": "owner"},
+          {"projection_id": "admin-grading-state", "audience": "admin"},
+          {"projection_id": "teacher-grading-state", "audience": "teacher"},
+          {"projection_id": "staff-review-state", "audience": "staff"},
+          {"projection_id": "student-published-result", "audience": "student"},
+          {"projection_id": "parent-selected-result", "audience": "parent"}
+        ]
+      },
+      "required_viewports": ["desktop-1366", "mobile-390"],
+      "cleanup_assertion": "Disposable uploads, submissions, results, tenant users, queue items, and generated objects are zero after synthetic QA.",
+      "executable_evidence": [
+        {"path": "apps/domains/submissions/tests/test_omr_tenant_realuse_flow.py", "runner": "pytest", "proves": ["OMR tenant flow", "result persistence"]},
+        {"path": "apps/support/results/tests/test_manual_exam_grading.py", "runner": "pytest", "proves": ["manual grading", "descriptive score projection"]}
+      ],
+      "docs": ["docs/operations/user-journey-outcome-gate.md", "docs/domain/omr.md", "docs/domain/exam-grading.md"]
+    },
+    {
+      "id": "clinic-state",
+      "availability": "generally_available",
+      "seal_status": "gap",
+      "known_gaps": ["Same-artifact cross-role clinic mutation, reload projection, provider-disabled notification readback, and zero-residue cleanup evidence is missing."],
+      "actors": ["owner", "admin", "teacher", "staff", "student", "parent"],
+      "projection_audiences": ["owner", "admin", "teacher", "staff", "student", "parent"],
+      "role_outcomes": {
+        "owner": "Owner can configure, book, and advance allowed clinic states.",
+        "admin": "Admin can configure, book, and advance allowed clinic states.",
+        "teacher": "Teacher can operate clinic actions allowed by tenant capabilities.",
+        "staff": "Staff can operate clinic actions allowed by tenant capabilities.",
+        "student": "Student can request eligible bookings and see the own clinic state.",
+        "parent": "Parent sees only the selected child's clinic state and allowed actions."
+      },
+      "path_patterns": ["apps/domains/clinic/**", "apps/support/clinic/**", "apps/domains/progress/services/clinic_*", "apps/domains/results/**clinic**", "academy/adapters/db/django/repositories_clinic_targets.py"],
+      "must_match": ["apps/domains/clinic/services/lifecycle.py", "apps/support/clinic/session_dependencies.py", "apps/domains/progress/services/clinic_trigger_service.py", "academy/adapters/db/django/repositories_clinic_targets.py"],
+      "must_not_match": ["apps/domains/clinic/migrations/0001_initial.py", "apps/domains/clinic/tests.py", "docs/domain/clinic-booking.md"],
+      "start_state": "A tenant-scoped clinic session and eligible student booking state exist.",
+      "valid_action": "An authorized role creates or changes a booking and advances the allowed clinic state.",
+      "invalid_case": "An invalid transition, stale booking, or foreign-tenant target is rejected without adjacent mutation.",
+      "persisted_outcome": "The booking, participant state, operator audit, and independent notification request outcome persist exactly once.",
+      "reload_assertion": "Admin, teacher, student, and guardian projections show the same clinic state after reload.",
+      "downstream_projections": ["operations queue", "teacher clinic view", "student and guardian clinic views"],
+      "notification_intent": "Clinic state success is reported separately from notification request success or failure.",
+      "provider_dispatch_policy": "disabled_in_synthetic_qa",
+      "receipt_policy": {
+        "ttl_seconds": 21600,
+        "notification_mode": "separate_optional",
+        "required_cases": [
+          {"case_id": "clinic-state-valid-teacher", "kind": "valid", "actor": "teacher", "outcome_code": "advanced"},
+          {"case_id": "clinic-state-invalid-parent", "kind": "invalid", "actor": "parent", "outcome_code": "rejected"}
+        ],
+        "required_projections": [
+          {"projection_id": "owner-clinic-state", "audience": "owner"},
+          {"projection_id": "admin-clinic-state", "audience": "admin"},
+          {"projection_id": "teacher-clinic-state", "audience": "teacher"},
+          {"projection_id": "staff-clinic-state", "audience": "staff"},
+          {"projection_id": "student-clinic-state", "audience": "student"},
+          {"projection_id": "parent-selected-clinic-state", "audience": "parent"}
+        ]
+      },
+      "required_viewports": ["desktop-1366", "mobile-390"],
+      "cleanup_assertion": "Disposable sessions, bookings, participant plans, logs, tenant users, queues, and objects are zero after synthetic QA.",
+      "executable_evidence": [
+        {"path": "tests/test_clinic_operations_workflow_api.py", "runner": "pytest", "proves": ["clinic transition", "notification partial failure", "tenant denial"]},
+        {"path": "tests/test_clinic_multi_slot_booking_api.py", "runner": "pytest", "proves": ["booking persistence", "cross-tenant denial"]}
+      ],
+      "docs": ["docs/operations/user-journey-outcome-gate.md", "docs/domain/clinic-booking.md"]
+    },
+    {
+      "id": "messaging-template-recipient-log",
+      "availability": "generally_available",
+      "seal_status": "gap",
+      "known_gaps": ["Signed immutable template identity through request, worker, recipient log reload, provider-disabled readback, and zero-residue cleanup evidence is missing."],
+      "actors": ["owner", "admin", "teacher"],
+      "projection_audiences": ["owner", "admin", "teacher", "staff", "student", "parent"],
+      "role_outcomes": {
+        "owner": "Owner can request an exact approved notification and inspect provider evidence.",
+        "admin": "Admin can request an exact approved notification and inspect provider evidence.",
+        "teacher": "Teacher can request an exact approved notification within tenant scope.",
+        "staff": "Staff direct send is denied while explicitly permitted log projections remain scoped.",
+        "student": "Student is only an explicitly selected recipient for supported events.",
+        "parent": "Parent is only an explicitly selected recipient for supported events."
+      },
+      "path_patterns": ["apps/domains/messaging/**", "apps/support/messaging/**", "apps/worker/messaging_worker/**", "academy/adapters/db/django/repositories_messaging.py"],
+      "must_match": ["apps/domains/messaging/views/send_views.py", "apps/support/messaging/manual_context_sources.py", "apps/worker/messaging_worker/sqs_main.py", "academy/adapters/db/django/repositories_messaging.py"],
+      "must_not_match": ["apps/domains/messaging/migrations/0001_initial.py", "apps/domains/messaging/tests/test_send_views.py", "docs/ssot/messaging-policy.md"],
+      "start_state": "A tenant-scoped event, explicit recipient set, letter snapshot, and exact approved provider identity are available.",
+      "valid_action": "An authorized actor preflights and confirms one immutable notification request.",
+      "invalid_case": "Missing, unapproved, stale, mismatched, or substituted template identity fails closed with zero provider dispatch.",
+      "persisted_outcome": "The immutable request identity, recipient outcomes, retries, and redacted provider audit state persist without becoming future-send defaults.",
+      "reload_assertion": "Reload shows the same recipient-specific delivery states and protected log visibility.",
+      "downstream_projections": ["teacher request result", "owner operations summary", "role-scoped delivery log"],
+      "notification_intent": "Only the explicit event and recipients may dispatch; no template, content, channel, or recipient fallback is allowed.",
+      "provider_dispatch_policy": "disabled_in_synthetic_qa",
+      "receipt_policy": {
+        "ttl_seconds": 21600,
+        "notification_mode": "explicit_recipients",
+        "required_cases": [
+          {"case_id": "message-request-valid-teacher", "kind": "valid", "actor": "teacher", "outcome_code": "requested"},
+          {"case_id": "message-request-invalid-staff", "kind": "invalid", "actor": "staff", "outcome_code": "forbidden"}
+        ],
+        "required_projections": [
+          {"projection_id": "owner-delivery-log", "audience": "owner"},
+          {"projection_id": "admin-delivery-log", "audience": "admin"},
+          {"projection_id": "teacher-delivery-log", "audience": "teacher"},
+          {"projection_id": "staff-scoped-delivery-log", "audience": "staff"},
+          {"projection_id": "student-recipient-state", "audience": "student"},
+          {"projection_id": "parent-recipient-state", "audience": "parent"}
+        ]
+      },
+      "required_viewports": ["desktop-1366", "mobile-390"],
+      "cleanup_assertion": "Disposable templates, requests, logs, preview tokens, tenant users, queue items, and objects are zero after synthetic QA.",
+      "executable_evidence": [
+        {"path": "apps/domains/messaging/tests/test_delivery_state_preflight.py", "runner": "pytest", "proves": ["preflight denial", "zero dispatch"]},
+        {"path": "apps/domains/messaging/tests/test_messaging_operations.py", "runner": "pytest", "proves": ["delivery-state projection", "role-scoped operations read"]}
+      ],
+      "docs": ["docs/operations/user-journey-outcome-gate.md", "docs/domain/messaging-alimtalk.md", "docs/domain/messaging-delivery-log.md", "docs/ssot/messaging-policy.md"]
+    }
+  ]
+}

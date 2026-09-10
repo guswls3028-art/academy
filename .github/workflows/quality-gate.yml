@@ -3,6 +3,7 @@ name: Backend Quality Gate
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, edited, ready_for_review]
   workflow_dispatch:
 
 concurrency:
@@ -79,6 +80,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -112,6 +114,40 @@ jobs:
             ARGS+=(--allow-contract-review)
           fi
           python scripts/lint/check_expand_contract_migrations.py "${ARGS[@]}"
+      - name: User journey positive outcome contract
+        run: |
+          python -m unittest \
+            scripts.codex.test_user_journey_outcomes \
+            scripts.codex.test_user_journey_receipts -v
+          shopt -s nullglob
+          mkdir -p test-results/user-journey-receipts
+          for machine_result in test-results/user-journey-machine-results/*.json; do
+            receipt="test-results/user-journey-receipts/$(basename "$machine_result")"
+            python scripts/codex/user_journey_receipts.py issue \
+              --machine-result "$machine_result" \
+              --output "$receipt"
+          done
+          RECEIPT_ARGS=()
+          for receipt in test-results/user-journey-receipts/*.json; do
+            python scripts/codex/user_journey_receipts.py verify --receipt "$receipt"
+            RECEIPT_ARGS+=(--receipt "$receipt")
+          done
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            python scripts/codex/check_user_journey_outcomes.py \
+              --base-ref "${{ github.event.pull_request.base.sha }}" \
+              --event-path "$GITHUB_EVENT_PATH" \
+              "${RECEIPT_ARGS[@]}"
+          else
+            python scripts/codex/check_user_journey_outcomes.py --registry-only
+          fi
+      - name: Upload PII-free journey receipts
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: user-journey-receipts-${{ github.event.pull_request.head.sha || github.sha }}
+          path: test-results/user-journey-receipts/*.json
+          retention-days: 14
+          if-no-files-found: ignore
 
   django-contract:
     name: Backend Django smoke and deployment contracts
