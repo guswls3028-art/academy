@@ -531,7 +531,8 @@ SHA-256(canonical) -> 64자 hex
   조회한다. Solapi `statusCode=2000`은 공급사 접수, `3000`은 통신사 결과 대기이며
   모든 메시지가 `statusCode=4000`일 때만 `delivered`다. 다른 terminal 코드는 `failed`, 조회 실패는
   `unavailable`이며 저장된 접수 근거를 전달 완료로 오인하지 않는다. 정확한 group ID는
-  기존 역할별 마스킹 정책을 유지한다.
+  현재 tenant의 owner/admin/teacher/staff가 실제 수신자와 대조할 수 있으며 공급자
+  자격증명이나 공급자 실패 원문은 반환하지 않는다.
 - 중복 발송 방지를 우선해 `sending` 이후에는 워커 재시작, 같은 SQS 재전달, 다른 SQS MessageId의 중복 전달 모두 공급사를 다시 호출하지 않는다. 같은 SQS 메시지가 재전달되면 provider 응답 저장 실패/worker 중단으로 간주해 `sending→ambiguous`를 원자 반영하고 기존 차감액을 유지한다.
 - 대가는 at-most-once 모호 구간이다. 현재 `sending` DB 기록부터 실제 발송 endpoint 호출 전까지 Solapi는 보통 짧은 client 준비 구간이고, Ppurio는 token preflight timeout 최대 10초를 포함한다. 호출 후 응답 모호 구간은 Ppurio request timeout 최대 15초다. 이 구간 crash/timeout은 `ambiguous`이며 자동 재발송하지 않는다.
 - 크레딧 예약은 `NotificationLog.amount_deducted`와 tenant 잔액을 한 transaction에서 기록하고, 재선점/롤백도 멱등 처리한다. `ambiguous`는 실제 접수 가능성이 있어 자동 환불하지 않는다.

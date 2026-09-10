@@ -12,7 +12,7 @@ from rest_framework.permissions import IsAuthenticated
 from drf_spectacular.utils import OpenApiParameter, OpenApiTypes, extend_schema
 from apps.core.permissions import TenantResolvedAndStaff
 from apps.api.common.query_params import parse_query_int
-from apps.core.services.tenant_access import get_authorized_tenant_role
+from apps.core.services.tenant_access import STAFF_ROLES, get_authorized_tenant_role
 from apps.domains.messaging.models import NotificationLog
 from apps.domains.messaging.policy import CLINIC_NOTIFICATION_TRIGGERS
 from apps.domains.messaging.provider_delivery import get_provider_delivery_status
@@ -23,7 +23,7 @@ from apps.domains.messaging.security import (
 from apps.domains.messaging.selectors import notification_logs_for_business_tenant
 
 
-_PRIVILEGED_LOG_ROLES = frozenset({"owner", "admin"})
+_PRIVILEGED_LOG_ROLES = frozenset(STAFF_ROLES)
 
 
 def _alimtalk_logs_for_business_tenant(tenant):

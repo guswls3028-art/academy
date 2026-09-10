@@ -191,26 +191,16 @@ class TenantResolvedAndStaff(BasePermission):
 
 
 def can_manage_staff_payroll(user, tenant=None) -> bool:
-    """Canonical staff/payroll management authorization."""
+    """Canonical tenant-wide payroll and staff-management authorization."""
     if not user or not user.is_authenticated or not tenant:
         return False
     from apps.core.services.tenant_access import get_authorized_tenant_role
     role = get_authorized_tenant_role(user, tenant)
-    if role in ("owner", "admin"):
-        return True
-    if role in ("teacher", "staff"):
-        profile = getattr(user, "staff_profile", None)
-        return bool(
-            profile is not None
-            and getattr(profile, "tenant_id", None) == tenant.id
-            and getattr(profile, "is_active", False)
-            and getattr(profile, "is_manager", False)
-        )
-    return False
+    return role in ("owner", "admin")
 
 
 class TenantResolvedAndPayrollManager(BasePermission):
-    """Owner/admin or an active teacher/staff profile with delegated management."""
+    """Owner/admin access to tenant-wide employment and payroll data."""
 
     message = "Payroll manager permission required."
 

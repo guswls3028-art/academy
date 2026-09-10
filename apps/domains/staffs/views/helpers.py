@@ -65,10 +65,9 @@ def _owner_display_for_tenant(tenant, request=None):
 
 def can_access_staff_management(user, tenant=None) -> bool:
     """
-    직원관리 페이지 접근 권한(관리자 권한 on).
-    - owner, admin 역할 → True
-    - teacher, staff(조교) 역할 → Staff.is_manager 일 때만 True
-    - 비용·시급 등 민감 정보는 이 권한 있는 사람만 접근.
+    직원관리 페이지 접근 권한.
+    - 현재 tenant의 owner, admin 역할만 True
+    - `Staff.is_manager`는 직위/업무 위임 정보이며 급여 접근권을 만들지 않음
     """
     return can_manage_staff_payroll(user, tenant)
 
@@ -92,7 +91,7 @@ def is_month_locked(staff, date):
 
 
 def can_manage_payroll(user, tenant=None) -> bool:
-    """직원관리(관리자 권한) 접근 가능 여부. can_access_staff_management와 동일."""
+    """테넌트 전체 직원·급여 관리 접근 가능 여부."""
     return can_access_staff_management(user, tenant)
 
 

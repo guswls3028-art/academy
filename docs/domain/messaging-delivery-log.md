@@ -18,10 +18,13 @@
 
 - 인증된 현재 직원과 `request.tenant`가 모두 있어야 하며, 결과는 항상 현재
   테넌트로 필터링한다. 테넌트를 추정하거나 다른 테넌트로 대체하지 않는다.
-- `owner`, `admin`만 상세 조회에서 이미 저장된 본문 투영과 정확한 공급자
-  메시지 ID를 받을 수 있다.
-- `staff`, `teacher`는 본문을 받지 않는다. 공급자 증거는 존재 여부와 뒤쪽
-  일부만 남긴 마스킹 참조로 제한한다.
+- `owner`, `admin`, `staff`, `teacher`는 현재 tenant에서 허용된 운영자다. 새
+  로그는 이름과 실제 수신 전화번호를 `recipient_summary`에 기록하고, 이 역할들은
+  목록에서 수신자와 정확한 공급자 메시지 ID를 확인한다. 상세에서는 이미 저장된
+  비민감 본문도 확인한다. 수신자와 공급자 접수 근거를 서로 대조할 수 없는
+  마스킹은 운영 권한을 막는 것으로 취급한다.
+- 과거에 마스킹 요약만 저장된 로그는 현재 연락처로 추정하거나 다시 쓰지 않는다.
+  새 로그부터 정확한 수신 전화가 남으며 기존 로그의 원본 부족은 그대로 표시한다.
 - 목록 응답은 역할과 무관하게 본문을 포함하지 않는다. 상세 모달을 열 때만
   개별 상세 API가 호출된다.
 - 등록 자격증명, 비밀번호 초기화·찾기처럼 민감한 메시지 유형은 저장 시점에
@@ -61,8 +64,8 @@
 - `body_visibility`: `available`, `sensitive_redacted`, `restricted`,
   `not_recorded` 중 하나
 - `provider_evidence`: 공급자 식별자가 기록됐는지를 나타내는 boolean
-- `provider_message_reference`: 모든 허용 역할에 제공 가능한 마스킹 참조
-- `provider_message_id`: `owner`, `admin`에게만 제공하는 정확한 증거
+- `provider_message_reference`: 호환용 마스킹 참조
+- `provider_message_id`: 현재 tenant의 허용된 모든 직원에게 제공하는 정확한 접수 증거
 - `failure_code`, `failure_reason`: 개인정보가 제거된 실패 안내
 
 `message_body`가 비어 있으면 원문을 추정하거나 템플릿에서 재구성하지 않는다.

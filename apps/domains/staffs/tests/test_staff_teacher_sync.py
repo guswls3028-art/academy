@@ -264,11 +264,11 @@ class TestStaffManagementPermissions(TestCase):
     def test_non_manager_teacher_cannot_access_staff_management(self):
         self.assertFalse(can_access_staff_management(self.staff.user, self.tenant))
 
-    def test_manager_teacher_can_access_staff_management(self):
+    def test_legacy_manager_teacher_cannot_access_staff_management(self):
         self.staff.is_manager = True
         self.staff.save(update_fields=["is_manager"])
 
-        self.assertTrue(can_access_staff_management(self.staff.user, self.tenant))
+        self.assertFalse(can_access_staff_management(self.staff.user, self.tenant))
 
     def test_non_manager_assistant_cannot_access_staff_management(self):
         assistant_user = User.objects.create_user(
@@ -293,7 +293,7 @@ class TestStaffManagementPermissions(TestCase):
 
         self.assertFalse(can_access_staff_management(assistant.user, self.tenant))
 
-    def test_manager_assistant_can_access_staff_management(self):
+    def test_legacy_manager_assistant_cannot_access_staff_management(self):
         assistant_user = User.objects.create_user(
             username=f"t{self.tenant.id}_manager_assistant",
             password="test1234",
@@ -314,7 +314,7 @@ class TestStaffManagementPermissions(TestCase):
             is_active=True,
         )
 
-        self.assertTrue(can_access_staff_management(assistant.user, self.tenant))
+        self.assertFalse(can_access_staff_management(assistant.user, self.tenant))
 
     def test_admin_membership_can_access_staff_management_without_staff_profile(self):
         admin_user = User.objects.create_user(
@@ -472,8 +472,10 @@ class TestWorkMonthLockFilters(TestCase):
         self.factory = APIRequestFactory()
         self.tenant = _make_tenant()
         self.manager = _create_staff_teacher(self.tenant, name="관리강사", phone="01067676767")
-        self.manager.is_manager = True
-        self.manager.save(update_fields=["is_manager"])
+        TenantMembership.objects.filter(
+            tenant=self.tenant,
+            user=self.manager.user,
+        ).update(role="admin")
         self.staff_a = _create_staff_teacher(self.tenant, name="강사A", phone="01078787878")
         self.staff_b = _create_staff_teacher(self.tenant, name="강사B", phone="01089898989")
         WorkMonthLock.objects.create(
@@ -795,8 +797,17 @@ class TestStaffPasswordChange(TestCase):
     def setUp(self):
         self.tenant = _make_tenant()
         self.staff = _create_staff_teacher(self.tenant, name="비번테스트", phone="01022223333")
-        self.staff.is_manager = True
-        self.staff.save(update_fields=["is_manager"])
+        self.actor = User.objects.create_user(
+            username=f"t{self.tenant.id}_password_owner",
+            password="test1234",
+            name="대표",
+        )
+        TenantMembership.objects.create(
+            tenant=self.tenant,
+            user=self.actor,
+            role="owner",
+            is_active=True,
+        )
 
     def _call_change_password(self, staff_id, password_data):
         from rest_framework.test import APIRequestFactory
@@ -804,7 +815,7 @@ class TestStaffPasswordChange(TestCase):
         factory = APIRequestFactory()
         request = factory.post(f"/staffs/{staff_id}/change-password/", password_data, format="json")
         request.tenant = self.tenant
-        request.user = self.staff.user
+        request.user = self.actor
         view = StaffViewSet.as_view({"post": "change_password"})
         return view(request, pk=staff_id)
 

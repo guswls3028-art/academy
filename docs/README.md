@@ -55,6 +55,7 @@ backend/docs/
 | 레이어/코드 배치 | [architecture/hexagonal-cutover-policy.md](architecture/hexagonal-cutover-policy.md) |
 | OpenAPI·프런트 생성 타입 계약 | [architecture/api-schema-contract.md](architecture/api-schema-contract.md) |
 | GET/HEAD/OPTIONS 무변경 경계 | [architecture/safe-http-mutation-boundary.md](architecture/safe-http-mutation-boundary.md) |
+| 역할별 데이터·행위 권한 정본 | [domain/role-data-action-policy.md](domain/role-data-action-policy.md) |
 | 시험 생성·혼합 채점·오답노트 | [domain/exam-grading.md](domain/exam-grading.md) |
 | 데이터 목록 정렬·필터·페이지네이션 | [domain/data-list-ordering.md](domain/data-list-ordering.md) |
 | 출결 명단 정렬·페이지네이션 | [domain/attendance.md](domain/attendance.md) |

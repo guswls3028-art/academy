@@ -737,6 +737,36 @@ class StaffOperationsContractTests(TestCase):
             )
         )
 
+    def test_delegated_teacher_and_staff_manager_lack_peer_payroll_permission(self):
+        for role in ("teacher", "staff"):
+            with self.subTest(role=role):
+                user = User.objects.create_user(
+                    username=f"delegated-{role}-manager",
+                    password="1234",
+                )
+                TenantMembership.objects.create(
+                    tenant=self.tenant,
+                    user=user,
+                    role=role,
+                    is_active=True,
+                )
+                Staff.objects.create(
+                    tenant=self.tenant,
+                    user=user,
+                    name=f"{role} 관리자",
+                    is_manager=True,
+                )
+                request = self.factory.get("/staffs/payroll-snapshots/")
+                request.tenant = self.tenant
+                request.user = user
+
+                self.assertFalse(
+                    TenantResolvedAndPayrollManager().has_permission(
+                        request,
+                        view=None,
+                    )
+                )
+
     def test_legacy_monthly_staff_cannot_be_auto_closed(self):
         staff = self._staff("기존 월급 직원")
         Staff.objects.filter(pk=staff.pk).update(pay_type="MONTHLY")
@@ -950,7 +980,6 @@ class StaffOperationsContractTests(TestCase):
                 "name": "운영 실장",
                 "position": "DIRECTOR",
                 "role": "ASSISTANT",
-                "is_manager": True,
             },
             context={
                 "request": SimpleNamespace(
@@ -966,6 +995,8 @@ class StaffOperationsContractTests(TestCase):
             tenant=self.tenant,
             user=staff.user,
         )
+        Staff.objects.filter(pk=staff.pk).update(is_manager=True)
+        staff.refresh_from_db()
 
         self.assertEqual(staff.position, "DIRECTOR")
         self.assertTrue(staff.is_manager)
@@ -982,7 +1013,7 @@ class StaffOperationsContractTests(TestCase):
         self.assertEqual(row["position"], "DIRECTOR")
         self.assertEqual(row["position_label"], "실장")
         self.assertEqual(row["account_role"], "STAFF")
-        self.assertTrue(row["can_manage_staff"])
+        self.assertFalse(row["can_manage_staff"])
 
     def test_admin_account_reports_effective_management_and_cannot_be_toggled(self):
         admin_user = User.objects.create_user(
@@ -1025,6 +1056,7 @@ class StaffOperationsContractTests(TestCase):
             pk=staff.id,
         )
         self.assertEqual(patch_response.status_code, 400)
+        self.assertIn("계정 역할로 결정", str(patch_response.data))
         staff.refresh_from_db()
         self.assertFalse(staff.is_manager)
 

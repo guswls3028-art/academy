@@ -306,11 +306,7 @@ class StaffListSerializer(serializers.ModelSerializer):
 
     def get_can_manage_staff(self, obj) -> bool:
         account_role = self.get_account_role(obj)
-        return account_role in ("OWNER", "ADMIN") or bool(
-            obj.is_active
-            and account_role in ("TEACHER", "STAFF")
-            and obj.is_manager
-        )
+        return account_role in ("OWNER", "ADMIN")
 
 
 class StaffDetailSerializer(serializers.ModelSerializer):
@@ -401,11 +397,7 @@ class StaffDetailSerializer(serializers.ModelSerializer):
 
     def get_can_manage_staff(self, obj) -> bool:
         account_role = self.get_account_role(obj)
-        return account_role in ("OWNER", "ADMIN") or bool(
-            obj.is_active
-            and account_role in ("TEACHER", "STAFF")
-            and obj.is_manager
-        )
+        return account_role in ("OWNER", "ADMIN")
 
 
 # ======================================================
@@ -413,6 +405,7 @@ class StaffDetailSerializer(serializers.ModelSerializer):
 # ======================================================
 
 class StaffCreateUpdateSerializer(serializers.ModelSerializer):
+    is_manager = serializers.BooleanField(read_only=True)
     role = serializers.ChoiceField(
         choices=[("TEACHER", "강사"), ("ASSISTANT", "조교")],
         write_only=True,
@@ -456,11 +449,20 @@ class StaffCreateUpdateSerializer(serializers.ModelSerializer):
         ref_name = "StaffWrite"
 
     def validate(self, attrs):
-        if "user" in getattr(self, "initial_data", {}):
+        initial = getattr(self, "initial_data", {})
+        if "user" in initial:
             raise serializers.ValidationError(
                 {"user": "직원 계정은 직접 연결할 수 없습니다. 아이디/초기 비밀번호로 생성해 주세요."}
             )
-        initial = getattr(self, "initial_data", {})
+        if "is_manager" in initial:
+            raise serializers.ValidationError(
+                {
+                    "is_manager": (
+                        "직원관리 권한은 계정 역할로 결정됩니다. "
+                        "대표 또는 관리자 역할을 사용해 주세요."
+                    )
+                }
+            )
         username = str(initial.get("username") or "").strip()
         password = str(initial.get("password") or "")
         if bool(username) != bool(password):
@@ -623,20 +625,6 @@ class StaffCreateUpdateSerializer(serializers.ModelSerializer):
                             )
                         }
                     )
-                if (
-                    membership
-                    and membership.role in ("owner", "admin")
-                    and "is_manager" in validated_data
-                    and validated_data["is_manager"] != instance.is_manager
-                ):
-                    raise serializers.ValidationError(
-                        {
-                            "is_manager": (
-                                "대표/관리자 계정의 직원관리 권한은 "
-                                "직원 화면에서 변경할 수 없습니다."
-                            )
-                        }
-                    )
                 if wants_reactivation and requested_role is None:
                     raise serializers.ValidationError(
                         {
@@ -670,18 +658,6 @@ class StaffCreateUpdateSerializer(serializers.ModelSerializer):
                     "is_active",
                     instance.is_active,
                 )
-                resulting_is_manager = validated_data.get(
-                    "is_manager",
-                    instance.is_manager,
-                )
-                if resulting_is_manager and not resulting_is_active:
-                    raise serializers.ValidationError(
-                        {
-                            "is_manager": (
-                                "퇴사 처리된 직원에게 급여관리 권한을 부여할 수 없습니다."
-                            )
-                        }
-                    )
                 if wants_deactivation and staff_repo.work_record_open_exists(instance):
                     raise serializers.ValidationError(
                         {

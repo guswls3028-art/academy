@@ -9088,9 +9088,6 @@
           "is_active": {
             "type": "boolean"
           },
-          "is_manager": {
-            "type": "boolean"
-          },
           "name": {
             "maxLength": 100,
             "minLength": 1,
@@ -14158,6 +14155,7 @@
             "type": "boolean"
           },
           "is_manager": {
+            "readOnly": true,
             "type": "boolean"
           },
           "name": {
@@ -14188,6 +14186,7 @@
         },
         "required": [
           "id",
+          "is_manager",
           "name",
           "user"
         ],
@@ -14196,9 +14195,6 @@
       "StaffWriteRequest": {
         "properties": {
           "is_active": {
-            "type": "boolean"
-          },
-          "is_manager": {
             "type": "boolean"
           },
           "name": {

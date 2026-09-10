@@ -11,6 +11,11 @@ from apps.worker.messaging_worker.sqs_main import (
     _should_defer_disabled_tenant_message,
     send_one_alimtalk,
 )
+from apps.worker.messaging_worker import sqs_main as messaging_worker
+
+
+def test_recipient_summary_keeps_scoped_operational_phone():
+    assert messaging_worker._recipient_summary("최정원", "010-9123-4567") == "최정원 01091234567"
 
 
 @patch("apps.worker.messaging_worker.sqs_main._get_solapi_client")

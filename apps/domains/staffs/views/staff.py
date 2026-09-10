@@ -459,14 +459,7 @@ class StaffViewSet(viewsets.ModelViewSet):
                 "position_label": staff.get_position_display(),
                 "account_role": account_role,
                 "is_active": staff.is_active,
-                "can_manage_staff": (
-                    account_role in ("OWNER", "ADMIN")
-                    or bool(
-                        staff.is_active
-                        and account_role in ("TEACHER", "STAFF")
-                        and staff.is_manager
-                    )
-                ),
+                "can_manage_staff": account_role in ("OWNER", "ADMIN"),
                 "pay_type": staff.pay_type,
                 "work_hours": work_hours,
                 "work_amount": work_amount,
