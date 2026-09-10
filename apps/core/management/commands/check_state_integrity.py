@@ -12,7 +12,10 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("--tenant", type=int, required=True)
-        parser.add_argument("--limit", type=int, default=200)
+        parser.add_argument(
+            "--limit", type=int, default=200,
+            help="Rows per keyset page (1..1000, default 200); all pages share one bounded read-only snapshot.",
+        )
         parser.add_argument("--dry-run", action="store_true")
 
     def handle(self, *args, **options):

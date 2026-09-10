@@ -42,6 +42,13 @@ def get_target_exam_ids_for_session_enrollment(*, session, enrollment_id: int) -
         ExamEnrollment.objects.filter(exam_id__in=exam_ids)
         .values_list("exam_id", "enrollment_id")
     )
+    return target_exam_ids_from_rows(
+        exam_ids=exam_ids, explicit_rows=explicit_rows, enrollment_id=enrollment_id,
+    )
+
+
+def target_exam_ids_from_rows(*, exam_ids, explicit_rows, enrollment_id: int) -> list[int]:
+    """Canonical explicit/legacy membership for ORM and bounded snapshot readers."""
     explicitly_targeted_exam_ids = {int(exam_id) for exam_id, _ in explicit_rows}
     enrollment_exam_ids = {
         int(exam_id)

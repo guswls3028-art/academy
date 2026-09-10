@@ -6,6 +6,7 @@ The existing calculator's read method remains the owner of exam pass policy.
 
 from __future__ import annotations
 
+from collections import Counter
 from contextlib import contextmanager
 from datetime import timedelta
 import hashlib
@@ -19,11 +20,12 @@ from django.utils import timezone
 from apps.core.models import Tenant
 from apps.domains.exams.models import ExamEnrollment, ExamLecturePolicy
 from apps.domains.progress.models import ClinicLink, ProgressPolicy, SessionProgress
-from apps.domains.progress.services.session_calculator import SessionProgressCalculator
+from apps.domains.progress.services.session_calculator import ExamAggregationReadSources, SessionProgressCalculator
 from apps.domains.results.models import ExamAttempt, Result
 from apps.domains.results.utils.session_exam import get_all_exams_for_session
 from apps.domains.submissions.models import Submission
 from apps.support.progress.session_calculator_dependencies import get_target_exam_ids_for_session_enrollment
+from apps.support.progress.state_detector_page import StateDetectorPage
 
 RULE = "session_exam_projection_v1"
 SOURCE_LIMIT = 500
@@ -76,7 +78,7 @@ def _read_snapshot():
             yield
 
 
-def _inspect_row(progress, *, tenant_id, cutoff):
+def _inspect_row(progress, *, tenant_id, cutoff, sources=None):
     enrollment = progress.enrollment
     session = progress.session
     if (
@@ -96,7 +98,7 @@ def _inspect_row(progress, *, tenant_id, cutoff):
         raise InspectionFailure("unknown_enrollment_state")
     if enrollment.status != "ACTIVE" or enrollment.student.deleted_at:
         return "excluded", None
-    policy = ProgressPolicy.objects.filter(lecture_id=session.lecture_id).first()
+    policy = sources.policies.get(session.lecture_id) if sources is not None else ProgressPolicy.objects.filter(lecture_id=session.lecture_id).first()
     if policy is None:
         raise InspectionFailure("missing_policy")
     if (
@@ -110,25 +112,28 @@ def _inspect_row(progress, *, tenant_id, cutoff):
         or policy.exam_start_session_order > policy.exam_end_session_order
     ):
         raise InspectionFailure("invalid_exam_policy")
-    raw_exams = get_all_exams_for_session(session)
-    if raw_exams.exclude(tenant_id=tenant_id).exists():
+    if sources is not None:
+        exams = sources.exams[session.pk]
+        targets = sources.target_rows(session.pk)
+    else:
+        exams = _limited(get_all_exams_for_session(session).order_by("id"))
+        targets = _limited(ExamEnrollment.objects.filter(exam_id__in=[exam.pk for exam in exams]).select_related("enrollment").order_by("id"))
+    if any(exam.tenant_id != tenant_id for exam in exams):
         raise InspectionFailure("invalid_tenant_graph")
-    exams = _limited(raw_exams.filter(tenant_id=tenant_id).order_by("id"))
     exam_ids = [exam.pk for exam in exams]
-    targets_qs = ExamEnrollment.objects.filter(exam_id__in=exam_ids)
-    if targets_qs.exclude(enrollment__tenant_id=tenant_id).exists():
+    if any(target.enrollment.tenant_id != tenant_id for target in targets):
         raise InspectionFailure("invalid_tenant_graph")
-    targets = _limited(targets_qs.filter(enrollment__tenant_id=tenant_id).order_by("id"))
-    target_ids = get_target_exam_ids_for_session_enrollment(session=session, enrollment_id=enrollment.pk)
+    target_ids = sources.target_ids(session_id=session.pk, enrollment_id=enrollment.pk) if sources is not None else get_target_exam_ids_for_session_enrollment(session=session, enrollment_id=enrollment.pk)
     order = SessionProgressCalculator._regular_order_for_policy(session)
     if order is None or not policy.exam_start_session_order <= order <= policy.exam_end_session_order or not target_ids:
         return "excluded", None
     if not set(target_ids).issubset(exam_ids):
         raise InspectionFailure("missing_exam_source")
-    links_qs = ClinicLink.objects.filter(enrollment_id=enrollment.pk, session_id=session.pk)
-    if links_qs.exclude(tenant_id=tenant_id).exists():
+    links = sources.check_group(sources.links[(enrollment.pk, session.pk)]) if sources is not None else _limited(
+        ClinicLink.objects.filter(enrollment_id=enrollment.pk, session_id=session.pk).order_by("-cycle_no", "-id")
+    )
+    if any(link.tenant_id != tenant_id for link in links):
         raise InspectionFailure("invalid_tenant_graph")
-    links = _limited(links_qs.filter(tenant_id=tenant_id).order_by("-cycle_no", "-id"))
     current_links = {}
     for link in links:
         current_links.setdefault((link.source_type, link.source_id), link)
@@ -146,7 +151,7 @@ def _inspect_row(progress, *, tenant_id, cutoff):
         # Conservative v1 boundary: do not reinterpret a manual/legacy exception
         # as score-based session completion, even if another exam is attached.
         return "excluded", None
-    attempts = _limited(
+    attempts = sources.check_group([row for row in sources.attempts[enrollment.pk] if row.exam_id in target_ids]) if sources is not None else _limited(
         ExamAttempt.objects.filter(enrollment_id=enrollment.pk, exam_id__in=target_ids).order_by(
             "exam_id", "-attempt_index"
         )
@@ -163,12 +168,11 @@ def _inspect_row(progress, *, tenant_id, cutoff):
             representatives[attempt.exam_id] = attempt
     if any(attempt.status in {"pending", "grading"} for attempt in [*latest.values(), *representatives.values()]):
         return "deferred", None
-    submissions_qs = Submission.objects.filter(
-        enrollment_id=enrollment.pk, target_type="exam", target_id__in=target_ids
+    submissions = sources.check_group([row for row in sources.submissions[enrollment.pk] if row.target_id in target_ids]) if sources is not None else _limited(
+        Submission.objects.filter(enrollment_id=enrollment.pk, target_type="exam", target_id__in=target_ids).order_by("id")
     )
-    if submissions_qs.exclude(tenant_id=tenant_id).exists():
+    if any(item.tenant_id != tenant_id for item in submissions):
         raise InspectionFailure("invalid_tenant_graph")
-    submissions = _limited(submissions_qs.filter(tenant_id=tenant_id).order_by("id"))
     if any(item.status not in Submission.Status.values for item in submissions):
         raise InspectionFailure("unknown_submission_state")
     if any(
@@ -176,7 +180,7 @@ def _inspect_row(progress, *, tenant_id, cutoff):
         for item in submissions
     ):
         return "deferred", None
-    results = _limited(
+    results = sources.check_group([row for row in sources.results[enrollment.pk] if row.target_id in target_ids]) if sources is not None else _limited(
         Result.objects.filter(enrollment_id=enrollment.pk, target_type="exam", target_id__in=target_ids)
         .select_related("attempt")
         .order_by("id")
@@ -190,7 +194,7 @@ def _inspect_row(progress, *, tenant_id, cutoff):
             or not result.attempt.is_representative
         ):
             raise InspectionFailure("invalid_attempt_relation")
-    overrides = _limited(
+    overrides = sources.check_group([row for row in sources.overrides[session.lecture_id] if row.exam_id in target_ids]) if sources is not None else _limited(
         ExamLecturePolicy.objects.filter(lecture_id=session.lecture_id, exam_id__in=target_ids).order_by("id")
     )
     if any(not math.isfinite(item.pass_score) or item.pass_score < 0 for item in [*exams, *overrides]):
@@ -207,13 +211,25 @@ def _inspect_row(progress, *, tenant_id, cutoff):
     if progress.calculated_at is None:
         raise InspectionFailure("missing_calculation")
     _, _, expected, _ = SessionProgressCalculator._aggregate_exam_results(
-        enrollment_id=enrollment.pk, session=session, policy=policy
+        enrollment_id=enrollment.pk, session=session, policy=policy,
+        read_sources=ExamAggregationReadSources(
+            exam_ids=target_ids,
+            results=results,
+            exams={exam.pk: exam for exam in exams},
+            lecture_pass_scores={row.exam_id: float(row.pass_score) for row in overrides},
+            attempt_counts=dict(Counter(row.exam_id for row in attempts)),
+            not_submitted_exam_ids={
+                row.exam_id for row in attempts
+                if row.is_representative and isinstance(row.meta, dict) and row.meta.get("status") == "NOT_SUBMITTED"
+            },
+        ) if sources is not None else None,
     )
     return "checked", None if bool(progress.exam_passed) == expected else [bool(progress.exam_passed), expected]
 
 
 def inspect_session_exam_state(*, tenant_id, limit=200, now=None) -> dict:
-    """Inspect existing projections only; never create missing policy/progress."""
+    """Scan every existing projection; limit bounds one keyset page, not coverage."""
+    started = time.monotonic()
     report = {
         "rule": RULE,
         "inspection_status": "complete",
@@ -222,6 +238,9 @@ def inspect_session_exam_state(*, tenant_id, limit=200, now=None) -> dict:
         "excluded": 0,
         "deferred": 0,
         "finding_count": 0,
+        "source_count": None,
+        "scanned": 0,
+        "page_count": 0,
         "errors": [],
         "_covered_subjects": [],
         "_finding_subjects": [],
@@ -232,28 +251,45 @@ def inspect_session_exam_state(*, tenant_id, limit=200, now=None) -> dict:
             raise InspectionFailure("tenant_required")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
             raise InspectionFailure("invalid_limit")
+        report["page_size"] = limit
         cutoff = (now or timezone.now()) - SETTLE_GRACE
-        deadline = time.monotonic() + SCAN_TIMEOUT_SECONDS
+        deadline = started + SCAN_TIMEOUT_SECONDS
         with _read_snapshot():
             if not Tenant.objects.filter(pk=tenant_id).exists():
                 raise InspectionFailure("tenant_not_found")
-            rows = list(
-                SessionProgress.objects.filter(enrollment__tenant_id=tenant_id)
-                .select_related("enrollment__student", "enrollment__lecture", "session__lecture")
-                .order_by("id")[: limit + 1]
-            )
-            if len(rows) > limit:
-                raise InspectionFailure("scan_limit_exceeded")
-            for progress in rows:
+            source = SessionProgress.objects.filter(enrollment__tenant_id=tenant_id)
+            report["source_count"] = source.count()
+            last_id = 0
+            while report["scanned"] < report["source_count"]:
                 if time.monotonic() > deadline:
                     raise InspectionFailure("scan_timeout")
-                subject = _digest([RULE, tenant_id, progress.pk])
-                report["_covered_subjects"].append(subject)
-                status, mismatch = _inspect_row(progress, tenant_id=tenant_id, cutoff=cutoff)
-                report[status] += 1
-                if mismatch is not None:
-                    report["_finding_subjects"].append(subject)
-                    findings.append([subject, *mismatch])
+                rows = list(
+                    source.filter(pk__gt=last_id)
+                    .select_related("enrollment__student", "enrollment__lecture", "session__lecture")
+                    .order_by("id")[:limit]
+                )
+                if not rows:
+                    raise InspectionFailure("incomplete_coverage")
+                report["page_count"] += 1
+                sources = StateDetectorPage(
+                    rows, source_limit=SOURCE_LIMIT, failure=InspectionFailure, deadline=deadline,
+                )
+                for progress in rows:
+                    if time.monotonic() > deadline:
+                        raise InspectionFailure("scan_timeout")
+                    if progress.pk <= last_id:
+                        raise InspectionFailure("invalid_page_order")
+                    subject = _digest([RULE, tenant_id, progress.pk])
+                    status, mismatch = _inspect_row(progress, tenant_id=tenant_id, cutoff=cutoff, sources=sources)
+                    report[status] += 1
+                    report["scanned"] += 1
+                    report["_covered_subjects"].append(subject)
+                    last_id = progress.pk
+                    if mismatch is not None:
+                        report["_finding_subjects"].append(subject)
+                        findings.append([subject, *mismatch])
+            if report["scanned"] != report["source_count"]:
+                raise InspectionFailure("incomplete_coverage")
             if time.monotonic() > deadline:
                 raise InspectionFailure("scan_timeout")
     except InspectionFailure as exc:
@@ -262,6 +298,7 @@ def inspect_session_exam_state(*, tenant_id, limit=200, now=None) -> dict:
         # Queries/imports can fail. Never emit raw database, tenant, or user data.
         report["errors"].append("inspection_error:" + type(exc).__name__)
     report["finding_count"] = len(findings)
+    report["elapsed_ms"] = round((time.monotonic() - started) * 1000)
     report["fingerprint"] = _digest([RULE, tenant_id, findings])
     report["inspection_status"] = "failed" if report["errors"] else "deferred" if report["deferred"] else "complete"
     report["state"] = (

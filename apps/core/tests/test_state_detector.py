@@ -327,10 +327,12 @@ class StateDetectorTests(TransactionTestCase):
         self.age_sources()
         self.assertEqual(self.scan()["finding_count"], 1)
 
-    def test_scan_and_source_limits_never_report_partial_scan_as_healthy(self):
+    def test_page_size_preserves_full_coverage_and_source_limit_still_fails_closed(self):
         session = self.Session.objects.create(lecture=self.lecture, order=2, title="Synthetic")
         self.SessionProgress.objects.create(enrollment=self.enrollment, session=session, calculated_at=self.old)
-        self.assertIn("scan_limit_exceeded", self.scan(limit=1)["errors"])
+        report = self.scan(limit=1)
+        self.assertEqual(report["inspection_status"], "complete", report)
+        self.assertEqual((report["source_count"], report["scanned"], report["page_count"]), (2, 2, 2))
         with patch("apps.support.progress.state_detector_dependencies.SOURCE_LIMIT", 0):
             self.assertIn("source_limit_exceeded", self.scan()["errors"])
 

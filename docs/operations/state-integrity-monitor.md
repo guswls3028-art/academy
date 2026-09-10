@@ -64,10 +64,34 @@ v1은 projection/차시/정책/시험/attempt/Result/제출/해소/강의별 정
 계산 시각 누락, 쿼리 오류와 한도 초과는 검사 실패다. 실패/유예 검사를 `healthy`로
 표시하거나 복구 알림을 보내지 않는다. 이미 확인한 모순은 검사 실패와 별개로 보존한다.
 
-기본 projection 한도는 200, 명시적 상한은 1000, 차시별 각 원본 묶음은 500이다.
-초과하면 샘플 결과를 전체 성공으로 간주하지 않고 실패한다. PostgreSQL snapshot은
-REPEATABLE READ / READ ONLY, 쿼리별 timeout은 5초다. 차시 사이 및 검사 종료 시
-30초 전체 검사 budget을 확인하며, 초과 결과는 실패한다. ORM SQL 쓰기도 별도 거부한다.
+`--limit`은 **페이지당 projection 수**이며 기본 200, 최대 1000이다. 이전 전체
+중단 한도와 달리 작은 값을 주어도 샘플 검사로 끝내지 않는다. 한 tenant의 기존
+projection을 PK keyset(`id > last_id`, `id ASC`)으로 끝까지 순회한다. OFFSET,
+페이지별 새 snapshot, 임의 행 생략은 사용하지 않는다. 최초 snapshot의
+`source_count`와 실제 `scanned`가 같을 때만 완전 검사가 가능하며 JSON은
+`page_size`, `page_count`, `elapsed_ms`도 제공한다. 페이지 중 실패하면 완료한
+prefix의 checked/excluded/deferred와 모순을 보존하지만 전체 healthy/복구를 금지한다.
+동시 생성·삭제·수정은 이번 snapshot에 섞이지 않고 다음 검사에서 관측한다.
+
+PostgreSQL snapshot은 전체 페이지를 감싸는 REPEATABLE READ / READ ONLY이며
+쿼리별 timeout은 5초다. 페이지 원본 조회 전후, 행 사이 및 검사 종료 시 30초
+전체 budget을 확인한다. 실행 중인 쿼리는 최대 statement timeout까지 걸릴 수
+있지만 초과 결과를 성공으로 취급하지 않는다. ORM SQL 쓰기도 별도 거부한다.
+`state_detector_page.py`는 페이지 안에서 정책·대상·결과·attempt·제출·클리닉·
+강의별 기준을 묶어 읽으며 tenant/page/snapshot 사이에 cache를 공유하지 않는다.
+개별 원본 묶음은 기존처럼 500행, 페이지의 원본 종류별 총 메모리 상한은 10000행이다.
+초과는 `source_limit_exceeded`/`page_source_limit_exceeded`로 실패하며 샘플 성공으로
+바꾸지 않는다. 운영자는 더 작은 페이지 크기로 재검사할 수 있지만 시간·원본
+상한을 제거하지 않는다.
+복구 안전성 확인용 covered/finding subject 지문 배열은 총 검사행·모순 수에 비례해
+유지된다. 따라서 원본 객체의 페이지 제한을 전체 메모리의 상수 크기 보장으로
+표현하지 않는다. 실행 전체는 동일한 30초 예산에 묶인다.
+
+합격 계산은 여전히 `SessionProgressCalculator._aggregate_exam_results` 하나가
+소유한다. 페이지에서 검증한 `ExamAggregationReadSources`를 전달해 중복 SELECT만
+줄이고 정책·명시/legacy 대상·대표/미응시·MAX/AVG/LATEST 계산은 복제하지 않는다.
+기존 제품 호출은 인자 없이 같은 ORM 계산 경로를 유지한다. batch/direct 결과의
+응시여부·집계점수·합격·전체 metadata 동등성을 테스트한다.
 SQLite는 휴대 가능한 테스트/dry-run만 지원하며, 영수증·전달 실행은 PostgreSQL
 autocommit이 필수다. 제품 row lock은 잡지 않는다.
 
@@ -114,6 +138,9 @@ exit 0일 수 있으므로 exit code만으로 원본 정상/검사 완료를 판
 `apps/core/tests/test_state_detector.py`는 원본 불일치, 정상 예외, tenant 경계,
 읽기 전용 SQL, 불완전 검사/복구 금지, 중복 억제, 전달 실패 보존, 실제 loopback
 503→200, PostgreSQL 읽기 전용 snapshot과 별도 connection lock 경합을 검사한다.
+`apps/core/tests/test_state_detector_pagination.py`는 페이지 끝 모순, 중간 실패/timeout,
+동시 source 삽입·삭제·수정, 복구 금지, batch/direct 정책 동등성, 메모리 상한과
+2256행/12페이지 전체 검사(30초 예산, SELECT600회 이하)를 검증한다.
 
 ```powershell
 python -m pytest apps/core/tests/test_state_detector.py -q --tb=short

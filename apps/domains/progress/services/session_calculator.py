@@ -1,6 +1,7 @@
 # apps/domains/progress/services/session_calculator.py
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from django.utils import timezone
@@ -16,6 +17,18 @@ from apps.support.progress.session_calculator_dependencies import (
     get_result_attempt_models,
     homework_score_exists,
 )
+
+
+@dataclass(frozen=True)
+class ExamAggregationReadSources:
+    """Already scoped, snapshot-consistent inputs; contains no alternate policy."""
+
+    exam_ids: list[int]
+    results: list[Any]
+    exams: dict[int, Any]
+    lecture_pass_scores: dict[int, float]
+    attempt_counts: dict[int, int]
+    not_submitted_exam_ids: set[int]
 
 
 class SessionProgressCalculator:
@@ -79,10 +92,11 @@ class SessionProgressCalculator:
         enrollment_id: int,
         session,
         policy: ProgressPolicy,
+        read_sources: ExamAggregationReadSources | None = None,
     ) -> Tuple[bool, Optional[float], bool, Dict[str, Any]]:
         Result, ExamAttempt = get_result_attempt_models()
         Exam = get_exam_model()
-        exam_ids = get_target_exam_ids_for_session_enrollment(
+        exam_ids = read_sources.exam_ids if read_sources is not None else get_target_exam_ids_for_session_enrollment(
             session=session,
             enrollment_id=enrollment_id,
         )
@@ -96,7 +110,7 @@ class SessionProgressCalculator:
             }
             return False, None, True, meta
 
-        results = list(
+        results = read_sources.results if read_sources is not None else list(
             Result.objects.filter(
                 target_type="exam",
                 enrollment_id=int(enrollment_id),
@@ -126,14 +140,16 @@ class SessionProgressCalculator:
 
         exam_attempted = True
 
-        exams = {e.id: e for e in Exam.objects.filter(id__in=[int(x) for x in exam_ids])}
-        lecture_pass_scores = exam_pass_score_overrides(
+        exams = read_sources.exams if read_sources is not None else {
+            e.id: e for e in Exam.objects.filter(id__in=[int(x) for x in exam_ids])
+        }
+        lecture_pass_scores = read_sources.lecture_pass_scores if read_sources is not None else exam_pass_score_overrides(
             exam_ids=[int(exam_id) for exam_id in exam_ids],
             lecture_id=int(session.lecture_id),
         )
 
         # ✅ Attempt count is authoritative from ExamAttempt
-        attempt_counts = {
+        attempt_counts = read_sources.attempt_counts if read_sources is not None else {
             int(row["exam_id"]): int(row["cnt"] or 0)
             for row in (
                 ExamAttempt.objects.filter(
@@ -146,12 +162,12 @@ class SessionProgressCalculator:
         }
 
         # 미응시(NOT_SUBMITTED) ExamAttempt 식별
-        not_submitted_exam_ids: set = set()
-        for ea in ExamAttempt.objects.filter(
+        not_submitted_exam_ids = set(read_sources.not_submitted_exam_ids) if read_sources is not None else set()
+        for ea in ([] if read_sources is not None else ExamAttempt.objects.filter(
             exam_id__in=[int(x) for x in exam_ids],
             enrollment_id=int(enrollment_id),
             is_representative=True,
-        ):
+        )):
             meta = ea.meta if isinstance(ea.meta, dict) else {}
             if meta.get("status") == "NOT_SUBMITTED":
                 not_submitted_exam_ids.add(int(ea.exam_id))
