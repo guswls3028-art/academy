@@ -4,7 +4,7 @@
 
 # Django ecosystem
 Django==5.2.16
-djangorestframework==3.16.1
+djangorestframework==3.17.2
 drf-spectacular==0.30.0
 django-filter==25.2
 django-cors-headers==4.9.0
