@@ -24,7 +24,7 @@
 - ALB 80 listener는 `HTTPS:443`으로 redirect한다. 운영 사용자/테스트 기준 API URL은 `https://api.hakwonplus.com`이며, plain HTTP가 Django까지 도달하면 drift로 본다.
 - Cloudflare zone SSL mode는 Strict로 유지한다. API 레코드를 다시 proxied로 돌릴 때는 ALB HTTPS 443과 origin 검증을 먼저 확인한다.
 - 운영 Django는 `172.30.0.0/16`만 신뢰 프록시로 인정한다. ALB 기본 append 형식의 X-Forwarded-For를 오른쪽부터 검사해 외부 요청이 넣은 선행 값을 무시하며, 감사 로그·공개 폼·내부 API IP 정책·로그인 제한이 같은 resolver를 사용한다.
-- 로그인 제한은 LocMemCache가 아니라 RDS의 HMAC 버킷을 사용한다. 실제 IP는 분당 60회, tenant+로그인 계정은 5분당 10회로 API 인스턴스와 배포 재시작을 가로질러 공유하며 계정/IP 원문은 저장하지 않는다.
+- 로그인 제한은 LocMemCache가 아니라 RDS의 HMAC 버킷을 사용한다. 실제 IP는 분당 60회, tenant+로그인 계정은 5분당 10회로 API 인스턴스와 배포 재시작을 가로질러 공유하며 계정/IP 원문은 저장하지 않는다. 버킷 소비는 `POST /api/v1/token/`에만 적용하고, GET 등 지원하지 않는 메서드는 버킷 쓰기 전에 `405`로 거부한다.
 - SSOT 및 재현 스크립트: `docs/ssot/params.yaml`의 `api.acmCertificateArn`/`api.httpsSslPolicy`, `scripts/v1/resources/alb.ps1`의 `Ensure-Listener`/`Ensure-HttpsListener`.
 
 ## 2. CI/CD Pipeline Architecture

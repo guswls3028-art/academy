@@ -113,8 +113,10 @@
 
 - `IsPlatformAdmin`만 허용한다.
 - 기간은 7·28·90일, 필터는 tenant, 원본 role, surface다.
-- 조회는 운영 감사 로그에 남지만 결과 데이터는 감사 payload에 넣지
-  않는다.
+- 조회는 GET의 무쓰기 계약을 지켜 운영 감사 DB 행을 만들지 않는다.
+  대신 요청별 correlation ID가 붙는 구조화 애플리케이션 로그
+  `product_analytics.overview_read`에 기간과 필터 존재 여부만 남긴다.
+  같은 조회가 재시도되어도 영구 감사 행은 중복되지 않는다.
 - 단일 테넌트 필터에서 고유 actor가 1~4명이면 summary와 세부 셀을
   숨긴다.
 

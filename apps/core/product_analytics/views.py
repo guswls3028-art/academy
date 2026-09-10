@@ -20,7 +20,6 @@ from apps.core.product_analytics.services import (
     request_is_impersonated,
     store_events,
 )
-from apps.core.services.ops_audit import record_audit
 
 logger = logging.getLogger(__name__)
 
@@ -150,15 +149,11 @@ class ProductUsageOverviewView(APIView):
             role=role,
             surface=surface,
         )
-        record_audit(
-            request,
-            action="product_analytics.view",
-            summary="제품 기능 사용 분석 조회",
-            payload={
-                "days": days,
-                "tenant_id": tenant_id,
-                "role": role,
-                "surface": surface,
-            },
+        logger.info(
+            "product_analytics.overview_read days=%s tenant_filter=%s role=%s surface=%s",
+            days,
+            "selected" if tenant_id is not None else "all",
+            role or "all",
+            surface or "all",
         )
         return Response(payload)

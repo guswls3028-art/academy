@@ -3,11 +3,18 @@ from __future__ import annotations
 from datetime import timedelta
 
 from django.contrib.auth import get_user_model
+from django.db import connection
 from django.test import TestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
 
+from apps.core.middleware.safe_method_write import (
+    SafeMethodDatabaseWriteMiddleware,
+    sql_write_operation,
+)
 from apps.core.models import (
+    OpsAuditLog,
     ProductUsageDailyActor,
     Tenant,
     TenantMembership,
@@ -76,6 +83,45 @@ class ProductUsageOverviewTests(TestCase):
         force_authenticate(request, user=self.user)
         with override_settings(OWNER_TENANT_ID=self.platform.id):
             return ProductUsageOverviewView.as_view()(request)
+
+    def guarded_request(self, query: str):
+        request = self.factory.get(
+            f"/api/v1/core/dev/product-analytics/overview/{query}"
+        )
+        request.tenant = self.platform
+        force_authenticate(request, user=self.user)
+        view = SafeMethodDatabaseWriteMiddleware(
+            ProductUsageOverviewView.as_view()
+        )
+        with override_settings(OWNER_TENANT_ID=self.platform.id):
+            return view(request)
+
+    def test_overview_get_retries_are_read_only(self):
+        audit_count = OpsAuditLog.objects.count()
+
+        with self.assertLogs(
+            "apps.core.product_analytics.views",
+            level="INFO",
+        ) as captured_logs, CaptureQueriesContext(connection) as captured:
+            responses = [self.guarded_request("?days=28") for _ in range(3)]
+
+        self.assertEqual([response.status_code for response in responses], [200] * 3)
+        self.assertEqual(
+            [
+                query["sql"]
+                for query in captured.captured_queries
+                if sql_write_operation(query["sql"]) is not None
+            ],
+            [],
+        )
+        self.assertEqual(OpsAuditLog.objects.count(), audit_count)
+        self.assertEqual(
+            sum(
+                "product_analytics.overview_read" in message
+                for message in captured_logs.output
+            ),
+            3,
+        )
 
     def test_platform_admin_gets_role_feature_and_completion_metrics(self):
         for index in range(5):

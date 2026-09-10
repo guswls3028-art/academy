@@ -198,6 +198,8 @@ class TenantAwareTokenObtainPairView(TokenObtainPairView):
     throttle_classes = []  # __init__에서 설정
 
     def get_throttles(self):
+        if self.request.method.upper() != "POST":
+            return []
         from apps.api.common.throttles import LoginThrottle
         return [LoginThrottle()]
 

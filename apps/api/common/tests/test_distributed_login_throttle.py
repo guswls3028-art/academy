@@ -2,6 +2,7 @@ from datetime import timedelta
 
 from django.test import TestCase, override_settings
 from django.utils import timezone
+from rest_framework.test import APIClient
 
 from apps.api.common.throttles import LoginThrottle, _prune_expired_login_buckets
 from apps.core.models import LoginThrottleBucket
@@ -115,3 +116,29 @@ class DistributedLoginThrottleTests(TestCase):
 
         self.assertFalse(LoginThrottleBucket.objects.filter(bucket_key="a" * 64).exists())
         self.assertTrue(LoginThrottleBucket.objects.filter(bucket_key="b" * 64).exists())
+
+
+@override_settings(ALLOWED_HOSTS=["testserver"], TRUSTED_PROXY_CIDRS="")
+class LoginTokenMethodBoundaryTests(TestCase):
+    def test_get_is_rejected_before_login_throttle_writes(self):
+        response = APIClient().get("/api/v1/token/")
+
+        self.assertEqual(response.status_code, 405)
+        self.assertFalse(LoginThrottleBucket.objects.exists())
+
+    def test_post_still_consumes_distributed_login_throttle_buckets(self):
+        response = APIClient().post(
+            "/api/v1/token/",
+            {
+                "username": "missing-user",
+                "password": "wrong-password",
+                "tenant_code": "missing-tenant",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            set(LoginThrottleBucket.objects.values_list("scope", flat=True)),
+            {"ip", "account"},
+        )
