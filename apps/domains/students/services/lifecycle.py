@@ -147,6 +147,14 @@ def _append_unique(fields: list[str], field: str) -> None:
         fields.append(field)
 
 
+def _active_student_uses_ps_number(*, student: Student, tenant, ps_number: str) -> bool:
+    return Student.objects.filter(
+        tenant=tenant,
+        ps_number=ps_number,
+        deleted_at__isnull=True,
+    ).exclude(pk=student.pk).exists()
+
+
 def _normalize_digits(value: Any) -> str:
     return "".join(ch for ch in str(value or "") if ch.isdigit())
 
@@ -395,11 +403,11 @@ def restore_student(
 
         restored_ps_number = _deleted_ps_original(student.ps_number)
         if restored_ps_number:
-            if Student.objects.filter(
+            if _active_student_uses_ps_number(
+                student=student,
                 tenant=tenant,
                 ps_number=restored_ps_number,
-                deleted_at__isnull=True,
-            ).exclude(pk=student.pk).exists():
+            ):
                 raise StudentLifecycleError(
                     "ps_number_conflict",
                     f"아이디 '{restored_ps_number}'를 이미 사용 중인 활성 학생이 있습니다.",
@@ -412,6 +420,15 @@ def restore_student(
         try:
             student.save(update_fields=changed)
         except StudentInventoryNamespaceConflict as exc:
+            if restored_ps_number and _active_student_uses_ps_number(
+                student=student,
+                tenant=tenant,
+                ps_number=restored_ps_number,
+            ):
+                raise StudentLifecycleError(
+                    "ps_number_conflict",
+                    f"아이디 '{restored_ps_number}'를 이미 사용 중인 활성 학생이 있습니다.",
+                ) from exc
             raise StudentLifecycleError(
                 "student_storage_namespace_conflict",
                 "이 학생번호의 이전 저장자료 소유권을 확인한 뒤 다시 시도해 주세요.",

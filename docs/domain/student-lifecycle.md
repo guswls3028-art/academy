@@ -54,7 +54,10 @@ SSOT: `soft_delete_student(student, tenant=...)`
 SSOT: `restore_student(student, tenant=..., profile_data=None)`
 
 - `_del_` 접두사에서 원래 `ps_number`를 복원한다.
-- 같은 테넌트 활성 학생과 아이디 충돌이 있으면 실패한다.
+- 같은 테넌트 활성 학생과 아이디 충돌이 있으면 `ps_number_conflict`로 실패한다.
+  이 판정은 복원 사전 조회 뒤 경쟁 생성이 commit된 경우에도 동일하다. 활성 학생번호
+  점유가 legacy 저장공간 귀속 충돌과 동시에 관찰되면 학생번호 충돌을 우선하여, 경합
+  완료 순서에 따라 오류 코드와 사용자 안내가 바뀌지 않게 한다.
 - 복원하는 학생의 tombstone Inventory metadata도 원래 번호로 함께 되돌린다. 원래 번호에
   다른 owner 또는 모호한 legacy metadata가 있으면 합치거나 추측하지 않고 복원을 실패
   폐쇄하며 `student_storage_namespace_conflict`를 반환한다.
