@@ -206,11 +206,13 @@ class WorkRecordViewSet(viewsets.ModelViewSet):
                         **save_kwargs,
                     )
                 elif has_input_change and resulting_end_time:
-                    # Calculation inputs changed → clear manual flag so save() recalculates
+                    # 급여 입력 변경은 명시적으로만 재계산한다. 메모 등 비급여
+                    # PATCH가 기존 확정 금액을 새 산식으로 바꾸면 안 된다.
                     saved_record = serializer.save(
                         is_manually_edited=False,
                         **save_kwargs,
                     )
+                    saved_record.save(recalculate_payroll=True)
                 else:
                     saved_record = serializer.save(**save_kwargs)
                 if audited_fields:
@@ -276,7 +278,7 @@ class WorkRecordViewSet(viewsets.ModelViewSet):
             raise ValidationError("퇴근 시간이 없어 계산할 수 없습니다.")
 
         record.is_manually_edited = False
-        record.save()  # save() will auto-calculate since is_manually_edited=False
+        record.save(recalculate_payroll=True)
 
         return Response(WorkRecordSerializer(record).data)
 

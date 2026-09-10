@@ -48,6 +48,7 @@ from ..serializers import (
     StaffWorkStartRequestSerializer,
     StaffWorkSummarySerializer,
     StaffPayrollOverviewQuerySerializer,
+    StaffPayrollOverviewSerializer,
     WorkRecordSerializer,
 )
 from ..services import start_work_record
@@ -161,6 +162,11 @@ class StaffViewSet(viewsets.ModelViewSet):
             response.data["owner"] = owner
         return response
 
+    @extend_schema(
+        operation_id="staffs_payroll_overview_retrieve",
+        parameters=[StaffPayrollOverviewQuerySerializer],
+        responses=StaffPayrollOverviewSerializer,
+    )
     @action(detail=False, methods=["get"], url_path="payroll-overview")
     def payroll_overview(self, request):
         """전 직원 월 정산 현황. 금액·블로커·마감 상태를 한 번에 반환한다."""

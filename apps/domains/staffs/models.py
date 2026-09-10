@@ -380,7 +380,8 @@ class WorkRecord(TimestampModel):
         )
         return hours, amount, wage
 
-    def save(self, *args, **kwargs):
+    def save(self, *args, recalculate_payroll=None, **kwargs):
+        is_new_record = self._state.adding
         # 출근 시점 단가를 고정한다. 이후 단가 변경이나 과거 기록 재계산이
         # 이미 시작된 근무의 적용 단가를 소급 변경해서는 안 된다.
         if self.resolved_hourly_wage is None and self.work_type_id and self.staff_id:
@@ -389,8 +390,14 @@ class WorkRecord(TimestampModel):
                 staff=self.staff,
                 work_type=self.work_type,
             )
-        # Auto-calculate when end_time is set, unless manually edited
-        if self.end_time and not self.is_manually_edited:
+        # 기존 확정 기록은 메모 같은 비급여 필드 저장만으로 재계산하지 않는다.
+        # 신규 종료 기록과 명시적인 퇴근/급여입력 변경/재계산 경로만 산식을 적용한다.
+        should_recalculate = (
+            is_new_record
+            if recalculate_payroll is None
+            else bool(recalculate_payroll)
+        )
+        if self.end_time and not self.is_manually_edited and should_recalculate:
             self.work_hours, self.amount, self.resolved_hourly_wage = self.calculate_payroll()
         super().save(*args, **kwargs)
 

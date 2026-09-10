@@ -1,4 +1,6 @@
+import json
 from datetime import date, datetime, time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -105,6 +107,44 @@ class StaffOperationsContractTests(TestCase):
 
         self.assertEqual(str(record.work_hours), "3.87")
         self.assertEqual(record.amount, 58_000)
+
+    def test_memo_only_patch_preserves_existing_canonical_payroll_amount(self):
+        staff = self._staff("기존 정산 보존 직원")
+        work_type = WorkType.objects.create(
+            tenant=self.tenant,
+            name="기존 분단위 근무",
+            base_hourly_wage=15_000,
+        )
+        record = WorkRecord.objects.create(
+            tenant=self.tenant,
+            staff=staff,
+            work_type=work_type,
+            date=date(2026, 8, 15),
+            start_time=time(15, 36),
+            end_time=time(19, 28),
+            work_hours="3.87",
+            amount=58_050,
+            resolved_hourly_wage=15_000,
+            is_manually_edited=True,
+        )
+        WorkRecord.objects.filter(pk=record.pk).update(
+            is_manually_edited=False,
+        )
+
+        response = WorkRecordViewSet.as_view({"patch": "partial_update"})(
+            self._request(
+                "patch",
+                f"/staffs/work-records/{record.id}/",
+                {"memo": "확인 메모만 변경"},
+            ),
+            pk=record.id,
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        record.refresh_from_db()
+        self.assertEqual(record.memo, "확인 메모만 변경")
+        self.assertEqual(str(record.work_hours), "3.87")
+        self.assertEqual(record.amount, 58_050)
 
     def test_payroll_list_applies_staff_year_month_filters(self):
         selected = self._staff("선택 직원")
@@ -782,7 +822,7 @@ class StaffOperationsContractTests(TestCase):
         self.work_type.base_hourly_wage = 20_000
         self.work_type.save(update_fields=["base_hourly_wage"])
         record.end_time = time(10, 0)
-        record.save()
+        record.save(recalculate_payroll=True)
 
         self.assertEqual(record.resolved_hourly_wage, 12_000)
         self.assertEqual(record.amount, 12_000)
@@ -1163,3 +1203,28 @@ class StaffOperationsContractTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
+
+    def test_payroll_overview_openapi_contract_declares_query_and_response(self):
+        schema_path = Path(__file__).resolve().parents[4] / "schema" / "openapi.json"
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        operation = schema["paths"]["/api/v1/staffs/payroll-overview/"]["get"]
+
+        required_query = {
+            parameter["name"]
+            for parameter in operation["parameters"]
+            if parameter["in"] == "query" and parameter.get("required")
+        }
+        self.assertEqual(required_query, {"year", "month"})
+        response_schema = operation["responses"]["200"]["content"][
+            "application/json"
+        ]["schema"]
+        self.assertEqual(
+            response_schema["$ref"],
+            "#/components/schemas/StaffPayrollOverview",
+        )
+        row_properties = schema["components"]["schemas"][
+            "StaffPayrollOverviewRow"
+        ]["properties"]
+        self.assertIn("reference_transfer_amount", row_properties)
+        self.assertIn("work_type_breakdown", row_properties)
+        self.assertIn("advisory_issue_count", row_properties)
