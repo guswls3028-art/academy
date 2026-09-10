@@ -1,9 +1,21 @@
-# 클리닉 예약 정책과 다중 시간대 계약
+# 클리닉 개설 방식과 예약 정책
 
 ## 목적과 사용자 흐름
 
-클리닉 예약은 기존 한 시간 단위의 `fixed_slot`과 하나의 긴 운영 세션에서 실제
-체류 시간을 고르는 `time_range`를 함께 지원한다. 학생이나 교직원이 같은 날짜의
+클리닉을 새로 만들 때 교직원은 세부 입력보다 먼저 두 개설 방식 중 하나를
+명시적으로 고른다.
+
+- **시간지정 클리닉**(`fixed_slot`): 17:00–18:00처럼 정해진 한 타임을 개설하고
+  학생은 그 타임 전체를 예약한다. godmin·tchul의 기존 운영 방식이다.
+- **자유지정 클리닉**(`time_range`): 15:00–22:00처럼 운영 범위를 한 번 열고
+  학생은 그 안에서 16:00–19:00처럼 실제 등원·하원 시각을 시각적인 시간 축으로
+  선택한다. limglish의 독서실형 운영 방식이다.
+
+선택 뒤에만 날짜·운영시간·정원 같은 세부 입력을 보여 주며, 생성 화면의 짧은
+설명과 예시가 두 방식의 차이를 전달한다. 수정·복사는 저장된 세션 snapshot을
+그대로 열어 기존 일정의 의미를 바꾸지 않는다.
+
+학생이나 교직원이 같은 날짜의
 고정 세션 여러 개를 한 번에 선택하면, 각 시간대마다 독립적인
 `SessionParticipant`를 만든다. 예를 들어 17:00–18:00과 18:00–19:00을 함께
 선택하면 화면에는 17:00–19:00 이용으로 요약하지만 데이터와 정원은 두 세션에서
@@ -78,6 +90,10 @@
   `booking_start_time`/`booking_end_time`을 선택한다. 시작·종료는 둘 다 있어야
   하고 세션 시작 기준 30분 또는 60분 간격, 세션 운영 범위, 최대 체류 시간을
   모두 만족해야 한다. `preferred_*` 희망 시간과는 별도 사실이다.
+- 운영 범위는 같은 날짜 안에서 닫히거나 정확히 다음 날 `00:00`에 끝날 수 있다.
+  따라서 15:00–22:00과 21:00–00:00은 지원하지만, 다음 날 00:30처럼 자정을
+  넘겨 계속 운영하는 범위는 실패 폐쇄한다. 학생의 실제 예약 종료 `00:00`도
+  같은 규칙으로 다음 날 자정으로 계산한다.
 - tenant 기본값 `clinic_booking_mode`, `clinic_booking_interval_minutes`,
   `clinic_booking_max_stay_minutes`는 owner/admin만 바꾼다. 모든 직원 역할은 값을
   읽을 수 있고, session의 snapshot은 이후 기본값 변경에 따라 바뀌지 않는다.
@@ -105,9 +121,12 @@
 이미 생성된 세션은 바뀌지 않는다.
 
 - 기본값은 `false`다.
-- 초기 운영값은 `tchul=false`, `godmin=false`, `limglish=true`다.
-- 기존 `limglish` 세션은 migration에서 `true`, 나머지 기존 세션은 `false`로
-  설정한다.
+- 최초 다중 고정시간대 도입 시 운영값은 `tchul=false`, `godmin=false`,
+  `limglish=true`였고 그 이력은 기존 migration에 보존한다.
+- 현재 자유지정 전환 뒤에는 `tchul=false`, `godmin=false`를 유지하고,
+  `limglish`는 긴 `time_range` 세션 하나 안에서 실제 시간을 고르므로 기본값과
+  전환 대상 세션을 `false`로 둔다. 여러 고정 세션 점유 허용과 한 운영 범위 안의
+  연속 체류 선택을 같은 정책으로 취급하지 않는다.
 - 세션을 `true`에서 `false`로 바꿔도 기존 참가자 행은 보존한다. 이후 같은 날짜의
   충돌하는 새 예약만 막는다.
 - `cancelled`, `rejected`, `no_show`는 활성 충돌로 보지 않는다.
@@ -116,6 +135,31 @@
 현지 날짜를 직접 저장하는 `DateField`이므로 서버 UTC 시각에서 날짜를 다시
 추정하지 않는다. tenant나 session을 현재 요청 범위에서 확인할 수 없으면 다른
 tenant를 추정하지 않고 실패 폐쇄한다.
+
+## limglish 현재·미래 일정 전환
+
+기존 limglish 일정은 일반 migration에서 모든 tenant와 함께 추정 변환하지 않는다.
+배포된 코드와 migration이 먼저 적용된 뒤, 전용 명령이 정확한 `limglish` tenant의
+기준일 이후 일정만 잠그고 전환한다.
+
+```powershell
+python manage.py convert_limglish_clinic_time_ranges --from-date 2026-09-10
+python manage.py convert_limglish_clinic_time_ranges --from-date 2026-09-10 --execute --confirm <dry-run-token>
+```
+
+- 첫 명령은 변경 없이 session ID·참가자 수·정책 지문·확인 토큰만 JSON으로
+  출력하며 이름·전화번호·메모 같은 개인정보를 출력하지 않는다.
+- 실행은 같은 기준일로 다시 계산한 확인 토큰이 정확히 일치할 때만 진행한다.
+  tenant·session·participant를 transaction 안에서 잠가 dry-run 뒤 대상이
+  달라졌으면 실패 폐쇄한다.
+- 60분 단위의 고정 일정만 변환하고, 같은 날 종료 또는 정확한 다음 날 `00:00`
+  종료만 허용한다. 이미 부분 실제시간이 기록됐거나 형식이 섞인 참가자, 자정 이후
+  운영, 중복 tenant code는 임의 보정하지 않는다.
+- 예약·취소·거절 등 기존 참가자 행은 삭제하지 않고 원래 세션 전체 범위를 실제
+  `booking_start_time`/`booking_end_time`으로 채운다. 상태와 알림 이력은 유지한다.
+- 대상 session은 `time_range`, 60분 간격, 최대 600분, 여러 고정 세션 예약 OFF로
+  바꾸고 tenant의 새 일정 기본값도 동일하게 맞춘다. godmin·tchul과 과거 일정은
+  건드리지 않으며, 같은 명령을 다시 실행하면 변경 없는 상태로 끝난다.
 
 ## 원자성·동시성·알림
 
@@ -247,6 +291,10 @@ bulk 모두 `409`로 거부하고 요청 전체를 롤백한다. 일정 변경�
 - 직접 취소·부작용 0·학생/학부모·PostgreSQL 동시성 회귀:
   `tests/test_clinic_self_cancellation.py`
 - 시간 범위·권한·연락처·알림 이력 회귀: `tests/test_clinic_time_range_policy_api.py`
+- 자정 종료·구간 정원·리마인더·DB 제약 회귀:
+  `tests/test_clinic_time_range_midnight_api.py`
+- limglish dry-run/token/잠금/전환/tenant 격리 회귀:
+  `tests/test_convert_limglish_clinic_time_ranges_command.py`
 - 하원·등원 독립 회귀: `tests/test_clinic_operations_workflow_api.py`
 - 상태 소유권·오늘 계획·패스카드·완료 감사 회귀:
   `apps/domains/progress/tests/test_generic_write_boundaries.py`,
@@ -255,6 +303,8 @@ bulk 모두 `409`로 거부하고 요청 전체를 롤백한다. 일정 변경�
 ```powershell
 $env:DJANGO_SETTINGS_MODULE='apps.api.config.settings.test'
 python -m pytest tests/test_clinic_multi_slot_booking_api.py -q
+python -m pytest tests/test_clinic_time_range_midnight_api.py -q
+python -m pytest tests/test_convert_limglish_clinic_time_ranges_command.py -q
 python manage.py test tests.test_clinic_time_range_policy_api --noinput
 python manage.py makemigrations --check --dry-run
 python manage.py check --settings apps.api.config.settings.test
