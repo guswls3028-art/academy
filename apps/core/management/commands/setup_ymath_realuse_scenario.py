@@ -958,11 +958,23 @@ class Command(BaseCommand):
             )
 
     @staticmethod
-    def _non_database_residue(*, tenant_id: int | None, tenant_code: str) -> dict[str, int]:
+    def _qa_r2_prefixes(tenant_id: int) -> tuple[str, ...]:
+        if isinstance(tenant_id, bool) or not isinstance(tenant_id, int) or tenant_id <= 0:
+            raise CommandError("Frontend QA R2 cleanup requires an exact positive tenant ID.")
+        return (
+            f"tenants/{tenant_id}/",
+            f"excel/{tenant_id}/",
+            f"tenant-logos/{tenant_id}/",
+            f"landing-public/reviews/{tenant_id}/",
+            f"matchup-showcase-snapshots/tenant_{tenant_id}/",
+        )
+
+    @staticmethod
+    def _r2_storage_client():
         import boto3
         from botocore.config import Config
 
-        client = boto3.client(
+        return boto3.client(
             "s3",
             endpoint_url=settings.R2_ENDPOINT,
             region_name=settings.R2_REGION,
@@ -974,16 +986,44 @@ class Command(BaseCommand):
                 retries={"total_max_attempts": 2},
             ),
         )
+
+    @staticmethod
+    def _cleanup_qa_r2_objects(*, tenant_id: int) -> dict[str, int]:
+        """Delete only exact disposable-tenant prefixes and prove a zero readback."""
+
+        assert_isolated_runtime()
+        client = Command._r2_storage_client()
+        deleted = 0
+        for prefix in Command._qa_r2_prefixes(tenant_id):
+            while True:
+                page = client.list_objects_v2(
+                    Bucket=settings.R2_STORAGE_BUCKET,
+                    Prefix=prefix,
+                    MaxKeys=1000,
+                )
+                keys = [item["Key"] for item in page.get("Contents") or []]
+                if any(not key.startswith(prefix) for key in keys):
+                    raise CommandError("R2 returned an object outside the exact QA prefix.")
+                if not keys:
+                    break
+                response = client.delete_objects(
+                    Bucket=settings.R2_STORAGE_BUCKET,
+                    Delete={"Objects": [{"Key": key} for key in keys], "Quiet": True},
+                )
+                errors = response.get("Errors") or []
+                if errors:
+                    raise CommandError(
+                        f"Frontend QA R2 cleanup failed for {len(errors)} object(s)."
+                    )
+                deleted += len(keys)
+        return {"deleted": deleted, "remaining": 0}
+
+    @staticmethod
+    def _non_database_residue(*, tenant_id: int | None, tenant_code: str) -> dict[str, int]:
+        client = Command._r2_storage_client()
         r2_objects = 0
         if tenant_id is not None:
-            prefixes = (
-                f"tenants/{tenant_id}/",
-                f"excel/{tenant_id}/",
-                f"tenant-logos/{tenant_id}/",
-                f"landing-public/reviews/{tenant_id}/",
-                f"matchup-showcase-snapshots/tenant_{tenant_id}/",
-            )
-            for prefix in prefixes:
+            for prefix in Command._qa_r2_prefixes(tenant_id):
                 continuation_token = None
                 while True:
                     request = {

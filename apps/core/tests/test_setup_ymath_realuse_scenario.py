@@ -831,6 +831,68 @@ class SetupYmathRealuseScenarioTests(TestCase):
         self.assertEqual(requests[1]["ContinuationToken"], "next")
         self.assertTrue(all(request["Bucket"] == "test-storage" for request in requests))
 
+    def test_cleanup_qa_r2_objects_deletes_only_exact_tenant_prefixes_and_reads_back_zero(self):
+        tenant_id = 712
+        exact_prefixes = Command._qa_r2_prefixes(tenant_id)
+        objects = {
+            exact_prefixes[0]: [f"{exact_prefixes[0]}one", f"{exact_prefixes[0]}two"],
+            exact_prefixes[1]: [f"{exact_prefixes[1]}three"],
+        }
+        client = Mock()
+
+        def list_objects_v2(**kwargs):
+            return {
+                "Contents": [{"Key": key} for key in objects.get(kwargs["Prefix"], [])],
+                "IsTruncated": False,
+            }
+
+        def delete_objects(**kwargs):
+            keys = [item["Key"] for item in kwargs["Delete"]["Objects"]]
+            prefix = next(prefix for prefix in exact_prefixes if all(key.startswith(prefix) for key in keys))
+            objects[prefix] = [key for key in objects.get(prefix, []) if key not in keys]
+            return {"Deleted": [{"Key": key} for key in keys]}
+
+        client.list_objects_v2.side_effect = list_objects_v2
+        client.delete_objects.side_effect = delete_objects
+        with patch("boto3.client", return_value=client):
+            result = Command._cleanup_qa_r2_objects(tenant_id=tenant_id)
+
+        self.assertEqual(result, {"deleted": 3, "remaining": 0})
+        self.assertEqual(
+            [call.kwargs["Prefix"] for call in client.list_objects_v2.call_args_list],
+            [exact_prefixes[0], exact_prefixes[0], exact_prefixes[1], exact_prefixes[1], *exact_prefixes[2:]],
+        )
+        deleted_keys = [
+            item["Key"]
+            for call in client.delete_objects.call_args_list
+            for item in call.kwargs["Delete"]["Objects"]
+        ]
+        self.assertEqual(
+            sorted(deleted_keys),
+            sorted([
+                f"{exact_prefixes[0]}one",
+                f"{exact_prefixes[0]}two",
+                f"{exact_prefixes[1]}three",
+            ]),
+        )
+        self.assertTrue(all(call.kwargs["Bucket"] == "test-storage" for call in client.delete_objects.call_args_list))
+
+    @override_settings(
+        R2_AI_BUCKET="academy-production-artifacts",
+        R2_STORAGE_BUCKET="academy-production-artifacts",
+        R2_EXCEL_BUCKET="academy-production-artifacts",
+        R2_ADMIN_BUCKET="academy-production-artifacts",
+        R2_VIDEO_BUCKET="academy-production-artifacts",
+    )
+    def test_cleanup_qa_r2_objects_refuses_non_isolated_runtime_before_client_creation(self):
+        with patch("boto3.client") as client, self.assertRaisesMessage(
+            CommandError,
+            "isolated development or test",
+        ):
+            Command._cleanup_qa_r2_objects(tenant_id=712)
+
+        client.assert_not_called()
+
     def test_destroy_is_idempotent_when_scenario_is_absent(self):
         out = StringIO()
 
