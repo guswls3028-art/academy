@@ -336,8 +336,38 @@ class WorkRecordViewSet(viewsets.ModelViewSet):
         if not record.end_time:
             raise ValidationError("퇴근 시간이 없어 계산할 수 없습니다.")
 
+        audited_fields = ["amount", "is_manually_edited", "work_hours"]
+        evidence_fields = audited_fields + ["date", "staff"]
+        old_values = {
+            field: str(
+                getattr(
+                    record,
+                    f"{field}_id" if field == "staff" else field,
+                )
+            )
+            for field in evidence_fields
+        }
         record.is_manually_edited = False
         record.save(recalculate_payroll=True)
+        _record_required_work_record_audit(
+            request,
+            action="staff.work_record_updated",
+            payload={
+                "source": "payroll_manager_manual",
+                "work_record_id": record.id,
+                "fields": audited_fields,
+                "old": old_values,
+                "new": {
+                    field: str(
+                        getattr(
+                            record,
+                            f"{field}_id" if field == "staff" else field,
+                        )
+                    )
+                    for field in evidence_fields
+                },
+            },
+        )
 
         return Response(WorkRecordSerializer(record).data)
 

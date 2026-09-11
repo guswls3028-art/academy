@@ -625,7 +625,7 @@ def rule_work_record_date_anomalies(
     from apps.domains.staffs.models import WorkRecord
 
     since = timezone.now() - timedelta(days=window_days)
-    groups: dict[tuple[int, date], dict[int, dict]] = {}
+    groups: dict[tuple[int, date], dict[int, tuple[int, dict]]] = {}
     audits = (
         OpsAuditLog.objects.filter(
             action__in=(
@@ -693,7 +693,7 @@ def rule_work_record_date_anomalies(
         groups.setdefault(
             (int(audit["target_tenant_id"]), selected_date),
             {},
-        )[record_id] = evidence
+        )[record_id] = (audit["id"], evidence)
 
     delivered = _delivered_work_record_date_fingerprints(window_days=window_days)
     rows: list[dict] = []
@@ -712,12 +712,15 @@ def rule_work_record_date_anomalies(
         if distinct_staff < distinct_staff_threshold:
             continue
         record_ids = [row["id"] for row in current_records]
-        evidence = [candidate_evidence[record_id] for record_id in record_ids]
+        evidence = [candidate_evidence[record_id][1] for record_id in record_ids]
         fingerprint = _incident_fingerprint(
             "work_record_date_anomalies",
             tenant_id,
             selected_date,
-            record_ids,
+            [
+                (row["id"], row["staff_id"], candidate_evidence[row["id"]][0])
+                for row in current_records
+            ],
         )
         if fingerprint in delivered:
             continue

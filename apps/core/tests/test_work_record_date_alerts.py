@@ -281,6 +281,46 @@ class WorkRecordDateAlertTests(TestCase):
         self.assertEqual(receipt.payload["fingerprints"], result["fingerprints"])
         self.assertEqual(receipt.payload["displayed_group_count"], 1)
 
+    def test_new_staff_reassignment_realerts_same_records_including_recurrence(self):
+        self._candidate(staff_index=0)
+        record = self._candidate(staff_index=1)
+        first_result = alerts.rule_work_record_date_anomalies()
+        alerts._record_work_record_date_slack_delivery(first_result)
+        fingerprints = set(first_result["fingerprints"])
+
+        # Repeating B -> C later is a new event, not the previously acknowledged one.
+        for staff_index in (2, 1, 2):
+            old_staff_id = record.staff_id
+            record.staff = self.staffs[staff_index]
+            record.save(update_fields=["staff"])
+            OpsAuditLog.objects.create(
+                action="staff.work_record_updated",
+                target_tenant=self.tenant,
+                payload={
+                    "source": "payroll_manager_manual",
+                    "work_record_id": record.id,
+                    "fields": ["staff"],
+                    "old": {"date": "2026-08-01", "staff": str(old_staff_id)},
+                    "new": {"date": "2026-08-01", "staff": str(record.staff_id)},
+                },
+            )
+
+            result = alerts.rule_work_record_date_anomalies()
+
+            self.assertIsNotNone(result)
+            self.assertEqual(
+                result["rows"][0]["work_record_ids"],
+                first_result["rows"][0]["work_record_ids"],
+            )
+            self.assertEqual(
+                result["rows"][0]["evidence"][-1]["new_staff_id"],
+                record.staff_id,
+            )
+            self.assertTrue(fingerprints.isdisjoint(result["fingerprints"]))
+            fingerprints.update(result["fingerprints"])
+            alerts._record_work_record_date_slack_delivery(result)
+            self.assertIsNone(alerts.rule_work_record_date_anomalies())
+
     def test_receipt_only_consumes_the_five_groups_displayed_in_slack(self):
         selected_dates = [
             "2026-01-01",

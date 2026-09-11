@@ -91,6 +91,9 @@
   `staff.work_record_deleted` 감사 로그를 반드시 남긴다. 감사 저장이 실패하면 원
   근무기록 변경도 롤백한다. 수정 로그는 변경 필드와 함께 날짜·직원 ID의 정확한
   before/after 값을 항상 남겨 날짜나 직원을 옮긴 이력을 재구성할 수 있게 한다.
+  관리자 `POST /staffs/work-records/{id}/recalculate/`의 자동 계산 복원도 같은
+  `staff.work_record_updated` 감사로 금액·시간·수동 수정 플래그의 전후 값을 남긴다.
+  감사 실패 시 복원도 롤백하며 월마감·직원 및 테넌트 권한 경계는 유지한다.
   로그에는 actor와 tenant,
   record/staff/work-type ID, 날짜·시간·계산 입력·금액, `source=payroll_manager_manual`,
   생성 당시 로컬 날짜를 기록하고 이름·전화·메모는 기록하지 않는다. 삭제 로그는

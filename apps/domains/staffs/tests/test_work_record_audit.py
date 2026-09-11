@@ -8,7 +8,7 @@ from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps.core.models import OpsAuditLog, Tenant, TenantMembership
-from apps.domains.staffs.models import Staff, WorkRecord, WorkType
+from apps.domains.staffs.models import Staff, WorkMonthLock, WorkRecord, WorkType
 from apps.domains.staffs.views import StaffViewSet, WorkRecordViewSet
 
 
@@ -291,3 +291,174 @@ class WorkRecordAuditTests(TestCase):
         self.assertEqual(record.staff_id, self.staff.id)
         self.assertEqual(record.date, date(2026, 8, 9))
         self.assertEqual(record.amount, 67_500)
+
+    def test_manual_recalculate_records_exact_payroll_restore(self):
+        record = WorkRecord.objects.create(
+            tenant=self.tenant,
+            staff=self.staff,
+            work_type=self.work_type,
+            date=date(2026, 8, 1),
+            start_time=time(14, 0),
+            end_time=time(18, 30),
+            break_minutes=10,
+            meal_minutes=20,
+            work_hours=Decimal("9.50"),
+            amount=200_000,
+            resolved_hourly_wage=15_000,
+            adjustment_amount=500,
+            is_manually_edited=True,
+        )
+        request = self._request(
+            "post",
+            f"/api/v1/staffs/work-records/{record.id}/recalculate/",
+        )
+
+        response = WorkRecordViewSet.as_view({"post": "recalculate"})(
+            request,
+            pk=record.id,
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        record.refresh_from_db()
+        self.assertFalse(record.is_manually_edited)
+        self.assertEqual(record.work_hours, Decimal("4.00"))
+        self.assertEqual(record.amount, 60_500)
+        audit = OpsAuditLog.objects.get(action="staff.work_record_updated")
+        self.assertEqual(
+            audit.payload,
+            {
+                "source": "payroll_manager_manual",
+                "work_record_id": record.id,
+                "fields": ["amount", "is_manually_edited", "work_hours"],
+                "old": {
+                    "amount": "200000",
+                    "date": "2026-08-01",
+                    "is_manually_edited": "True",
+                    "staff": str(self.staff.id),
+                    "work_hours": "9.50",
+                },
+                "new": {
+                    "amount": "60500",
+                    "date": "2026-08-01",
+                    "is_manually_edited": "False",
+                    "staff": str(self.staff.id),
+                    "work_hours": "4.00",
+                },
+            },
+        )
+
+    def test_manual_recalculate_rolls_back_when_required_audit_cannot_be_written(self):
+        record = WorkRecord.objects.create(
+            tenant=self.tenant,
+            staff=self.staff,
+            work_type=self.work_type,
+            date=date(2026, 8, 1),
+            start_time=time(14, 0),
+            end_time=time(18, 30),
+            work_hours=Decimal("9.50"),
+            amount=200_000,
+            resolved_hourly_wage=15_000,
+            is_manually_edited=True,
+        )
+        with patch(
+            "apps.core.models.OpsAuditLog.objects.create",
+            side_effect=RuntimeError("audit unavailable"),
+        ):
+            request = self._request(
+                "post",
+                f"/api/v1/staffs/work-records/{record.id}/recalculate/",
+            )
+            response = WorkRecordViewSet.as_view({"post": "recalculate"})(
+                request,
+                pk=record.id,
+            )
+
+        self.assertEqual(response.status_code, 503, response.data)
+        record.refresh_from_db()
+        self.assertTrue(record.is_manually_edited)
+        self.assertEqual(record.work_hours, Decimal("9.50"))
+        self.assertEqual(record.amount, 200_000)
+
+    def test_manual_recalculate_keeps_locked_month_unchanged(self):
+        record = WorkRecord.objects.create(
+            tenant=self.tenant,
+            staff=self.staff,
+            work_type=self.work_type,
+            date=date(2026, 8, 1),
+            start_time=time(14, 0),
+            end_time=time(18, 30),
+            work_hours=Decimal("9.50"),
+            amount=200_000,
+            resolved_hourly_wage=15_000,
+            is_manually_edited=True,
+        )
+        WorkMonthLock.objects.create(
+            tenant=self.tenant,
+            staff=self.staff,
+            year=2026,
+            month=8,
+            is_locked=True,
+            locked_by=self.owner,
+        )
+        request = self._request(
+            "post",
+            f"/api/v1/staffs/work-records/{record.id}/recalculate/",
+        )
+
+        response = WorkRecordViewSet.as_view({"post": "recalculate"})(
+            request,
+            pk=record.id,
+        )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        record.refresh_from_db()
+        self.assertTrue(record.is_manually_edited)
+        self.assertEqual(record.work_hours, Decimal("9.50"))
+        self.assertEqual(record.amount, 200_000)
+        self.assertFalse(OpsAuditLog.objects.exists())
+
+    def test_manual_recalculate_cannot_reach_another_tenant_record(self):
+        other_tenant = Tenant.objects.create(
+            code="work-record-audit-other",
+            name="Work Record Audit Other",
+            is_active=True,
+        )
+        other_staff = Staff.objects.create(
+            tenant=other_tenant,
+            name="다른 테넌트 직원",
+            phone="",
+        )
+        other_work_type = WorkType.objects.create(
+            tenant=other_tenant,
+            name="다른 테넌트 근무",
+            base_hourly_wage=15_000,
+            is_active=True,
+        )
+        record = WorkRecord.objects.create(
+            tenant=other_tenant,
+            staff=other_staff,
+            work_type=other_work_type,
+            date=date(2026, 8, 1),
+            start_time=time(14, 0),
+            end_time=time(18, 30),
+            work_hours=Decimal("9.50"),
+            amount=200_000,
+            resolved_hourly_wage=15_000,
+            is_manually_edited=True,
+        )
+        request = self._request(
+            "post",
+            f"/api/v1/staffs/work-records/{record.id}/recalculate/",
+        )
+
+        response = WorkRecordViewSet.as_view({"post": "recalculate"})(
+            request,
+            pk=record.id,
+        )
+
+        self.assertEqual(response.status_code, 404, response.data)
+        record.refresh_from_db()
+        self.assertTrue(record.is_manually_edited)
+        self.assertEqual(record.work_hours, Decimal("9.50"))
+        self.assertEqual(record.amount, 200_000)
+        self.assertFalse(OpsAuditLog.objects.exists())
