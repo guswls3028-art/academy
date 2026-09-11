@@ -1056,6 +1056,141 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
         self.assertEqual(failure_context["stage"], "cleanup_r2")
         self.assertEqual(failure_context["residue"]["r2_objects"], 2)
 
+    def test_fixed_setup_post_commit_failure_reports_created_tenant_id(self):
+        session = json.loads((ROOT / "scripts/v1/templates/ssm/frontend_development_qa.json").read_text())
+        shell_script = shlex.split(session["properties"]["linux"]["commands"], posix=True)[2]
+        source = shell_script.split("<<'ACADEMY_QA_PY'\n", 1)[1].rsplit("ACADEMY_QA_PY", 1)[0]
+        functions = [node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef)]
+        namespace = {
+            "hashlib": hashlib,
+            "hmac": hmac,
+            "re": re,
+            "io": io,
+            "json": json,
+            "os": os,
+            "django": SimpleNamespace(setup=Mock()),
+            "boto3": SimpleNamespace(
+                client=lambda *_args, **_kwargs: SimpleNamespace(
+                    get_parameter=lambda **_kwargs: {"Parameter": {"Value": "test-password"}}
+                )
+            ),
+            "Config": lambda **_kwargs: None,
+        }
+        exec(
+            compile(
+                ast.Module(body=functions, type_ignores=[]),
+                "fixed-setup-post-commit-failure",
+                "exec",
+            ),
+            namespace,
+        )
+        tenant = "qa-ymath-realuse-fe-456-1-fedcba654321"
+        created = SimpleNamespace(pk=72)
+        command = Mock()
+        command._exact_tenant_or_fail_on_case_variant.side_effect = [None, created]
+        command._remaining_for_code.return_value = {"tenants": 0, "users": 0}
+        command._video_residue_for_code.return_value = {
+            "active_playback_sessions": 0,
+            "playback_events": 0,
+            "playback_sessions": 0,
+            "player_errors": 0,
+            "proctored_video_accesses": 0,
+            "video_accesses": 0,
+            "video_progresses": 0,
+            "videos": 0,
+            "violated_events": 0,
+        }
+        cursor = MagicMock()
+        audit = Mock()
+
+        def setup_scenario(*_args, **kwargs):
+            kwargs["stdout"].write(
+                json.dumps(
+                    {
+                        "status": "YMATH_REALUSE_SCENARIO_READY",
+                        "tenant_code": tenant,
+                        "tenant_id": 999,
+                        "video_state": command._video_residue_for_code.return_value,
+                    }
+                )
+            )
+
+        settings = SimpleNamespace(
+            VIDEO_BATCH_JOB_QUEUE="",
+            VIDEO_BATCH_JOB_DEFINITION="",
+            TOOLS_SQS_QUEUE_NAME="academy-v1-development-tools-queue",
+            MESSAGING_SQS_QUEUE_NAME="academy-v1-development-messaging-queue",
+            DATABASES={
+                "default": {
+                    "NAME": "academy_api_development",
+                    "USER": "academy_api_development_app",
+                }
+            },
+            **{
+                key: "academy-development-artifacts"
+                for key in (
+                    "R2_AI_BUCKET",
+                    "R2_STORAGE_BUCKET",
+                    "R2_ADMIN_BUCKET",
+                    "R2_VIDEO_BUCKET",
+                    "R2_EXCEL_BUCKET",
+                )
+            },
+        )
+        modules = {
+            "django.conf": SimpleNamespace(settings=settings),
+            "django.core.management": SimpleNamespace(call_command=Mock(side_effect=setup_scenario)),
+            "django.db": SimpleNamespace(
+                transaction=SimpleNamespace(atomic=nullcontext),
+                connection=SimpleNamespace(cursor=lambda: cursor),
+            ),
+            "apps.core.models": SimpleNamespace(OpsAuditLog=SimpleNamespace(objects=audit)),
+            "apps.core.management.commands.setup_ymath_realuse_scenario": SimpleNamespace(
+                Command=lambda: command,
+                assert_isolated_runtime=Mock(),
+            ),
+        }
+        digest = "sha256:" + "b" * 64
+        release = "sha-" + "a" * 40 + "-run-123-1"
+        env = {
+            "QA_ACTION": "Setup",
+            "QA_TENANT": tenant,
+            "QA_TENANT_ID": "0",
+            "QA_CAPABILITY": "a" * 64,
+            "QA_RELEASE": release,
+            "QA_DIGEST": digest,
+            "QA_SYNTHETIC_LONG_VIDEO": "false",
+            "QA_IMAGE": (
+                "809466760795.dkr.ecr.ap-northeast-2.amazonaws.com/academy-api@" + digest
+            ),
+            "DJANGO_SETTINGS_MODULE": "apps.api.config.settings.development",
+            "ACADEMY_RUNTIME_ENV": "development",
+            "ACADEMY_DEVELOPMENT_RELEASE_ID": release,
+            "SOLAPI_MOCK": "true",
+            "TOSS_AUTO_BILLING_ENABLED": "false",
+            **{
+                key: "academy-v1-development-ai-queue"
+                for key in (
+                    "AI_SQS_QUEUE_NAME_LITE",
+                    "AI_SQS_QUEUE_NAME_BASIC",
+                    "AI_SQS_QUEUE_NAME_PREMIUM",
+                )
+            },
+        }
+        failure_context = {"stage": "bootstrap", "tenant_id": 0, "residue": {}}
+        with (
+            patch.dict(sys.modules, modules),
+            patch.dict(os.environ, env, clear=True),
+            self.assertRaises(AssertionError),
+        ):
+            namespace["run"](failure_context)
+
+        self.assertEqual(failure_context["stage"], "setup_readback")
+        self.assertEqual(failure_context["tenant_id"], 72)
+        payload = namespace["failure_payload"](AssertionError(), failure_context)
+        self.assertEqual(payload["tenant_id"], 72)
+        self.assertEqual(payload["failure_stage"], "setup_readback")
+
     def test_fixed_failure_payload_is_stage_scoped_numeric_and_secret_free(self):
         session = json.loads((ROOT / "scripts/v1/templates/ssm/frontend_development_qa.json").read_text())
         shell_script = shlex.split(session["properties"]["linux"]["commands"], posix=True)[2]
@@ -1159,7 +1294,7 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
                          "187f6ac218435d3b3f938d903153c5785db3529ace89f4e79ea9b6e1bde8ddb6")
         for path, expected in (
             ("iam/trust_frontend_development_qa.json", "aa2c1a60b63ad287c2e8caba7257beaafe5d602df66659c3093f917ad670713a"),
-            ("ssm/frontend_development_qa.json", "6437a638d2e99761b26243c27454a656d969b880c152d9dcd9bd50869c38ba1c"),
+            ("ssm/frontend_development_qa.json", "cac26765c4df42bc6bfe3962f40d42361395b9a83c3a0ee90e07a54e0bdac548"),
             ("ssm/frontend_development_api_port.json", "974b6bf4e518533ee0ecd14c5e82b0a5f0538813e41253940cd46a6cb5e8d173"),
         ):
             with self.subTest(path=path):
