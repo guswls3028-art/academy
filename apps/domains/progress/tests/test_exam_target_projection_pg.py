@@ -146,6 +146,148 @@ class ExamTargetProjectionPostgresTests(TransactionTestCase):
         self.assert_canonical()
         self.assertEqual(self.protected(), protected)
 
+    def test_target_removal_audit_closes_only_removed_students_clinic_links(self):
+        missing = self.missing_exam([*self.enrollments_a, *self.enrollments_b])
+        removed = self.enrollments_a[0]
+        retained = self.enrollments_a[1]
+        removed_link = self.ClinicLink.objects.create(
+            tenant=self.tenant,
+            enrollment=removed,
+            session=self.session_a,
+            reason=self.ClinicLink.Reason.AUTO_FAILED,
+            is_auto=True,
+            source_type="exam",
+            source_id=missing.id,
+        )
+        retained_link = self.ClinicLink.objects.create(
+            tenant=self.tenant,
+            enrollment=retained,
+            session=self.session_a,
+            reason=self.ClinicLink.Reason.AUTO_FAILED,
+            is_auto=True,
+            source_type="exam",
+            source_id=missing.id,
+        )
+        delivery_before = {
+            label: list(apps.get_model(label).objects.order_by("pk").values())
+            for label in (
+                "messaging.NotificationLog",
+                "messaging.ScheduledNotification",
+                "core.PlatformPushOutbox",
+            )
+        }
+
+        response = self.put_targets(missing, [retained.id])
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["removed_effective_target_count"], 1)
+        self.assertEqual(response.data["removed_effective_target_session_count"], 1)
+        self.assertEqual(response.data["removed_clinic_link_count"], 1)
+        removed_link.refresh_from_db()
+        retained_link.refresh_from_db()
+        self.assertEqual(removed_link.resolution_type, self.ClinicLink.ResolutionType.SOURCE_REMOVED)
+        self.assertIsNotNone(removed_link.resolved_at)
+        self.assertEqual(
+            removed_link.resolution_evidence,
+            {
+                "reason": "exam_enrollment_removed",
+                "source_type": "exam",
+                "source_id": missing.id,
+                "session_id": self.session_a.id,
+                "enrollment_ids": [removed.id],
+                "user_id": self.admin.id,
+            },
+        )
+        self.assertEqual(
+            removed_link.resolution_history[-1]["action"],
+            "resolve_source_removed",
+        )
+        self.assertIsNone(retained_link.resolved_at)
+        self.assertEqual(
+            {
+                label: list(apps.get_model(label).objects.order_by("pk").values())
+                for label in delivery_before
+            },
+            delivery_before,
+        )
+
+    def test_first_explicit_target_closes_legacy_links_in_every_affected_session(self):
+        second = self.Session.objects.create(
+            lecture=self.lecture_a,
+            order=2,
+            title="Second legacy target session",
+        )
+        for enrollment in self.enrollments_a:
+            self.SessionEnrollment.objects.create(
+                tenant=self.tenant,
+                enrollment=enrollment,
+                session=second,
+            )
+        legacy_exam = self.missing_exam([])
+        legacy_exam.sessions.add(second)
+        removed = self.enrollments_a[0]
+        links = [
+            self.ClinicLink.objects.create(
+                tenant=self.tenant,
+                enrollment=enrollment,
+                session=session,
+                reason=self.ClinicLink.Reason.AUTO_FAILED,
+                is_auto=True,
+                source_type="exam",
+                source_id=legacy_exam.id,
+            )
+            for enrollment, session in (
+                (removed, self.session_a),
+                (removed, second),
+                (self.enrollments_b[0], self.session_b),
+            )
+        ]
+
+        response = self.put_targets(legacy_exam, [self.enrollments_a[1].id])
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["removed_effective_target_count"], 4)
+        self.assertEqual(response.data["removed_effective_target_session_count"], 3)
+        self.assertEqual(response.data["removed_clinic_link_count"], 3)
+        for link in links:
+            link.refresh_from_db()
+            self.assertEqual(
+                link.resolution_type,
+                self.ClinicLink.ResolutionType.SOURCE_REMOVED,
+            )
+            self.assertIn(
+                link.enrollment_id,
+                link.resolution_evidence["enrollment_ids"],
+            )
+
+    def test_target_replacement_rolls_back_when_removed_link_resolution_fails(self):
+        missing = self.missing_exam([*self.enrollments_a, *self.enrollments_b])
+        target_ids_before = set(
+            self.ExamEnrollment.objects.filter(exam=missing).values_list(
+                "enrollment_id", flat=True
+            )
+        )
+        progress_before = self.projection_rows()
+
+        with patch(
+            "apps.domains.exams.views.exam_enrollment_view.resolve_removed_exam_clinic_links",
+            side_effect=RuntimeError("synthetic clinic resolution failure"),
+        ) as resolver:
+            response = self.put_targets(missing, [self.enrollments_a[1].id])
+
+        resolver.assert_called_once()
+        self.assertEqual(response.status_code, 500, response.content)
+
+        self.assertEqual(
+            set(
+                self.ExamEnrollment.objects.filter(exam=missing).values_list(
+                    "enrollment_id", flat=True
+                )
+            ),
+            target_ids_before,
+        )
+        self.assertEqual(self.projection_rows(), progress_before)
+
     def test_shared_same_lecture_sessions_are_all_refreshed(self):
         second = self.Session.objects.create(lecture=self.lecture_a, order=2, title="Second")
         self.exam.sessions.add(second)

@@ -169,6 +169,38 @@ objective + subjective 합산과 문항별 만점 검증을 깨면 안 된다.
 미응시를 추정하지 않으며, 이후 채점 결과가 생기면 과거 미응시 표식은 다시
 대상으로 노출하거나 면제할 수 없다.
 
+현재 유효한 자동 클리닉 근거는 미해소 `ClinicLink`만으로 판정하지
+않고, 원본과 학생 대상 관계를 같이 검증한다. 시험은 현재 차시에
+연결된 활성 정규 시험이어야 하고, 명시 `ExamEnrollment`가 하나라도
+있는 시험은 해당 학생의 정확한 배정 행이 있어야 한다. 명시 배정이
+전혀 없는 legacy 시험만 차시 roster를 대상으로 계속 사용한다. 과제는
+현재 정규 원본과 정확한 `HomeworkAssignment` 쌍이 모두 필요하다.
+
+이 판정은 `apps.domains.results.utils.clinic.classify_source_links`가 소유하며,
+성적표의 `clinic_required`/이름 하이라이트, 관리자 대상 목록·요약·통계,
+상태 감사·복구 명령이 공유한다. 성적 칸이 `미배정`인 시험에서 과거
+실패 링크만으로 `clinic_required=true`가 될 수 없다. 시험 대상 완전 치환은
+변경 전·후의 유효 `(enrollment, session)` 쌍 전체를 비교하여, 처음 명시
+대상을 만드는 legacy 전환과 다중 연결 차시까지 빠진 학생의 미해소
+시험 링크만 `SOURCE_REMOVED` 이력으로 닫는다. 제거 자체는 알림이나
+outbox를 만들지 않고, 다른 선택 대상은 유지한다.
+
+운영 확인은 먼저 PII를 포함하지 않는 ID/사유 기반 dry-run으로 실행한다.
+`state_reason=exam_enrollment_unassigned`는 시험·차시는 유효하지만 해당
+학생의 명시 배정이 없는 유령 링크를 뜻한다.
+
+```powershell
+python manage.py detect_assessment_state_drift --tenant <tenant-id> --json
+python manage.py repair_assessment_state_drift --tenant <tenant-id> --json
+python manage.py repair_assessment_state_drift --tenant <tenant-id> --apply --json
+```
+
+복구는 기본 dry-run이며 `--apply`에서만 유령 링크를 동일한
+`SOURCE_REMOVED` 서비스로 감사 해소한다. 이 명령은 기존 계약대로 비활성/
+template 시험의 잘못된 차시 연결도 함께 분리하므로, 운영 apply 전에는 반드시
+정확한 tenant와 dry-run의 건수·샘플 ID를 대조한다. 적용 후 같은 detector의
+건수가 0인지 재확인한다.
+
 결석 등으로 면제할 때는
 `POST /results/admin/clinic-targets/waive-missing/`에 정확한 차시·수강·시험 ID와
 2~500자의 사유를 보낸다. 서버는 위 미응시 조건을 다시 잠금·검증하고 그때만

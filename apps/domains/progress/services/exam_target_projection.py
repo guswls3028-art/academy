@@ -31,12 +31,18 @@ def refresh_exam_target_projections(*, exam):
     There is deliberately no on-commit callback: a failed projection rolls back
     the source edit too. No grading, clinic, correction, risk-log or delivery
     service runs here. Existing attendance/homework/manual metadata stay intact.
+    The yielded set is populated after the source edit with effective
+    ``(enrollment_id, session_id)`` targets that were removed. Callers may use
+    it after the context exits to audit-close source-specific state.
     """
     if not connection.in_atomic_block:
         raise RuntimeError("exam target projection refresh requires a source transaction")
     before = target_pairs_for_exam(exam)
-    yield
-    changed = before.symmetric_difference(target_pairs_for_exam(exam))
+    removed: set[tuple[int, int]] = set()
+    yield removed
+    after = target_pairs_for_exam(exam)
+    removed.update(before - after)
+    changed = before.symmetric_difference(after)
     if not changed:
         return
     locked = lock_target_projection_enrollments(

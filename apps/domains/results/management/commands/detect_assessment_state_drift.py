@@ -3,16 +3,23 @@ Read-only assessment lifecycle drift report.
 
 Business SSOT:
 - live exam = regular + is_active + linked to session
+- live exam target = explicit ExamEnrollment, or the legacy roster only when
+  the exam has no explicit targets at all
 - live homework = regular + session + not removed_from_session_at
-- clinic target = unresolved automatic ClinicLink whose source is live
+- live homework target = exact HomeworkAssignment for the student and session
+- clinic target = unresolved automatic ClinicLink whose source and student
+  assignment are both live
 """
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from typing import Any
 
 from django.apps import apps
 from django.core.management.base import BaseCommand
+
+from apps.domains.results.utils.clinic import classify_source_links
 
 
 class Command(BaseCommand):
@@ -28,6 +35,7 @@ class Command(BaseCommand):
         HomeworkAssignment = apps.get_model("homework", "HomeworkAssignment")
         Homework = apps.get_model("homework_results", "Homework")
         ClinicLink = apps.get_model("progress", "ClinicLink")
+        Tenant = apps.get_model("core", "Tenant")
 
         tenant_id = options.get("tenant")
         sample_size = max(1, int(options.get("sample") or 10))
@@ -66,30 +74,6 @@ class Command(BaseCommand):
                 id__in=assignment_homework_ids
             )
 
-        live_exam_pairs = {
-            (int(exam_id), int(session_id))
-            for exam_id, session_id in exam_qs.filter(
-                exam_type="regular",
-                is_active=True,
-                sessions__isnull=False,
-            ).values_list("id", "sessions__id")
-        }
-        live_homework_pairs = {
-            (int(homework_id), int(session_id))
-            for homework_id, session_id in homework_qs.filter(
-                homework_type="regular",
-                session__isnull=False,
-            )
-            .exclude(meta__removed_from_session_at__isnull=False)
-            .values_list("id", "session_id")
-        }
-        live_homework_assignments = {
-            (int(homework_id), int(session_id), int(enrollment_id))
-            for homework_id, session_id, enrollment_id in HomeworkAssignment.objects.filter(
-                homework_id__in=[homework_id for homework_id, _ in live_homework_pairs]
-            ).values_list("homework_id", "session_id", "enrollment_id")
-        }
-
         def source_id(link: Any, source_type: str) -> int | None:
             meta = link.meta if isinstance(getattr(link, "meta", None), dict) else {}
             if link.source_type == source_type:
@@ -103,8 +87,7 @@ class Command(BaseCommand):
             except (TypeError, ValueError):
                 return None
 
-        ghost_links: list[dict[str, Any]] = []
-        for link in link_qs.only(
+        links = list(link_qs.only(
             "id",
             "tenant_id",
             "session_id",
@@ -112,35 +95,53 @@ class Command(BaseCommand):
             "source_type",
             "source_id",
             "meta",
-        ).iterator(chunk_size=500):
+        ).order_by("id"))
+        links_by_tenant: dict[int, list[Any]] = defaultdict(list)
+        for link in links:
+            links_by_tenant[int(link.tenant_id)].append(link)
+        tenants = Tenant.objects.in_bulk(links_by_tenant.keys())
+        non_live_reasons: dict[int, str] = {}
+        for link_tenant_id, tenant_links in links_by_tenant.items():
+            for link, reason in classify_source_links(
+                tenant_links,
+                tenant=tenants.get(link_tenant_id),
+            ):
+                if reason is not None:
+                    non_live_reasons[int(link.id)] = reason
+
+        ghost_links: list[dict[str, Any]] = []
+        for link in links:
+            non_live_reason = non_live_reasons.get(int(link.id))
+            if non_live_reason is None:
+                continue
             exam_id = source_id(link, "exam")
             if exam_id is not None:
-                if (exam_id, int(link.session_id)) not in live_exam_pairs:
-                    ghost_links.append({
-                        "id": int(link.id),
-                        "tenant_id": int(link.tenant_id),
-                        "session_id": int(link.session_id),
-                        "enrollment_id": int(link.enrollment_id),
-                        "source_type": "exam",
-                        "source_id": exam_id,
-                    })
+                ghost_links.append({
+                    "id": int(link.id),
+                    "tenant_id": int(link.tenant_id),
+                    "session_id": int(link.session_id),
+                    "enrollment_id": int(link.enrollment_id),
+                    "source_type": "exam",
+                    "source_id": exam_id,
+                    "state_reason": non_live_reason,
+                })
                 continue
 
             homework_id = source_id(link, "homework")
             if homework_id is not None:
-                triple = (homework_id, int(link.session_id), int(link.enrollment_id))
-                if (
-                    (homework_id, int(link.session_id)) not in live_homework_pairs
-                    or triple not in live_homework_assignments
-                ):
-                    ghost_links.append({
-                        "id": int(link.id),
-                        "tenant_id": int(link.tenant_id),
-                        "session_id": int(link.session_id),
-                        "enrollment_id": int(link.enrollment_id),
-                        "source_type": "homework",
-                        "source_id": homework_id,
-                    })
+                ghost_links.append({
+                    "id": int(link.id),
+                    "tenant_id": int(link.tenant_id),
+                    "session_id": int(link.session_id),
+                    "enrollment_id": int(link.enrollment_id),
+                    "source_type": "homework",
+                    "source_id": homework_id,
+                    "state_reason": non_live_reason,
+                })
+
+        reason_counts: dict[str, int] = defaultdict(int)
+        for row in ghost_links:
+            reason_counts[str(row["state_reason"])] += 1
 
         report = {
             "tenant": tenant_id if tenant_id is not None else "all",
@@ -148,6 +149,9 @@ class Command(BaseCommand):
             "template_linked_exam_count": template_linked_exams.count(),
             "removed_homework_with_assignment_count": removed_homework_with_assignments.count(),
             "unresolved_non_live_source_clinic_link_count": len(ghost_links),
+            "unresolved_non_live_source_clinic_link_reason_counts": dict(
+                sorted(reason_counts.items())
+            ),
             "samples": {
                 "inactive_regular_linked_exam_ids": list(
                     inactive_linked_exams.values_list("id", flat=True)[:sample_size]

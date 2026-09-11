@@ -32,20 +32,22 @@ def _link_source_id(link: Any, source_type: str) -> int | None:
     return None
 
 
-def filter_live_source_links(
+def classify_source_links(
     links: Iterable[Any],
     *,
     tenant: Any,
-) -> list[Any]:
+) -> list[tuple[Any, str | None]]:
     """
-    ClinicLink read-side guard.
+    Classify ClinicLinks against their current source and student assignment.
 
-    운영 노출의 SSOT는 unresolved ClinicLink지만, 원본 시험/과제가 이미 차시에서
-    제거된 링크는 SOURCE_REMOVED 전이가 누락돼도 화면/통계에서 fail closed 한다.
+    ``None`` means the link is live. A string is a stable, PII-free reason why
+    the link must be hidden and can be audit-closed by repair tooling.
     """
     links_list = list(links)
-    if not links_list or tenant is None:
+    if not links_list:
         return []
+    if tenant is None:
+        return [(link, "tenant_missing") for link in links_list]
 
     session_ids = {
         int(getattr(link, "session_id", 0) or 0)
@@ -122,7 +124,7 @@ def filter_live_source_links(
             ).values_list("homework_id", "session_id", "enrollment_id")
         }
 
-    live_links: list[Any] = []
+    classified: list[tuple[Any, str | None]] = []
     for link in links_list:
         source_type = getattr(link, "source_type", None)
         session_id = int(getattr(link, "session_id", 0) or 0)
@@ -130,32 +132,58 @@ def filter_live_source_links(
         exam_id = _link_source_id(link, "exam")
         if exam_id is not None:
             enrollment_id = int(getattr(link, "enrollment_id", 0) or 0)
-            if (
-                (exam_id, session_id) in live_exam_pairs
-                and (
-                    exam_id not in explicitly_targeted_exam_ids
-                    or (exam_id, enrollment_id) in live_exam_target_pairs
-                )
+            if (exam_id, session_id) not in live_exam_pairs:
+                classified.append((link, "exam_source_not_live"))
+            elif (
+                exam_id in explicitly_targeted_exam_ids
+                and (exam_id, enrollment_id) not in live_exam_target_pairs
             ):
-                live_links.append(link)
+                classified.append((link, "exam_enrollment_unassigned"))
+            else:
+                classified.append((link, None))
             continue
 
         homework_id = _link_source_id(link, "homework")
         if homework_id is not None:
             enrollment_id = int(getattr(link, "enrollment_id", 0) or 0)
-            if (
-                (homework_id, session_id) in live_homework_pairs
-                and (homework_id, session_id, enrollment_id)
-                in live_homework_assignment_triples
-            ):
-                live_links.append(link)
+            if (homework_id, session_id) not in live_homework_pairs:
+                classified.append((link, "homework_source_not_live"))
+            elif (
+                homework_id,
+                session_id,
+                enrollment_id,
+            ) not in live_homework_assignment_triples:
+                classified.append((link, "homework_enrollment_unassigned"))
+            else:
+                classified.append((link, None))
             continue
 
         # Ambiguous legacy automatic links without source metadata remain visible.
         if source_type is None:
-            live_links.append(link)
+            classified.append((link, None))
+        else:
+            classified.append((link, "unsupported_source"))
 
-    return live_links
+    return classified
+
+
+def filter_live_source_links(
+    links: Iterable[Any],
+    *,
+    tenant: Any,
+) -> list[Any]:
+    """
+    ClinicLink read-side guard.
+
+    운영 노출의 SSOT는 unresolved ClinicLink지만, 원본 시험/과제가 이미 차시에서
+    제거되었거나 해당 학생이 대상에서 빠진 링크는 SOURCE_REMOVED 전이가
+    누락돼도 화면/통계에서 fail closed 한다.
+    """
+    return [
+        link
+        for link, non_live_reason in classify_source_links(links, tenant=tenant)
+        if non_live_reason is None
+    ]
 
 
 def filter_current_clinic_links(clinic_links: Iterable[Any], *, tenant: Any) -> list[Any]:

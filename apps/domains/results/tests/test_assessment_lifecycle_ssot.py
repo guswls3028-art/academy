@@ -843,6 +843,89 @@ class AssessmentLifecycleSsotTests(TestCase):
         self.assertEqual(report["inactive_regular_linked_exam_count"], 1)
         self.assertEqual(report["unresolved_non_live_source_clinic_link_count"], 1)
 
+    def test_assessment_drift_commands_detect_and_repair_unassigned_exam_link(self):
+        Enrollment = apps.get_model("enrollment", "Enrollment")
+        ExamEnrollment = apps.get_model("exams", "ExamEnrollment")
+        Student = apps.get_model("students", "Student")
+        other_user = User.objects.create_user(
+            username="assessment-life-targeted-student",
+            password="test1234",
+            tenant=self.tenant,
+        )
+        other_student = Student.objects.create(
+            tenant=self.tenant,
+            user=other_user,
+            name="배정 학생",
+            ps_number="AL-002",
+            omr_code="AL000002",
+            parent_phone="01000000000",
+        )
+        other_enrollment = Enrollment.objects.create(
+            tenant=self.tenant,
+            student=other_student,
+            lecture=self.lecture,
+            status="ACTIVE",
+        )
+        exam = self.Exam.objects.create(
+            tenant=self.tenant,
+            title="일부 학생만 보는 시험",
+            exam_type="regular",
+            is_active=True,
+        )
+        exam.sessions.add(self.session)
+        ExamEnrollment.objects.create(exam=exam, enrollment=other_enrollment)
+        link = self.ClinicLink.objects.create(
+            tenant=self.tenant,
+            enrollment=self.enrollment,
+            session=self.session,
+            reason=self.ClinicLink.Reason.AUTO_FAILED,
+            is_auto=True,
+            source_type="exam",
+            source_id=exam.id,
+        )
+
+        out = StringIO()
+        call_command(
+            "detect_assessment_state_drift",
+            "--tenant",
+            str(self.tenant.id),
+            "--json",
+            stdout=out,
+        )
+        report = json.loads(out.getvalue())
+        self.assertEqual(report["unresolved_non_live_source_clinic_link_count"], 1)
+        self.assertEqual(
+            report["unresolved_non_live_source_clinic_link_reason_counts"],
+            {"exam_enrollment_unassigned": 1},
+        )
+        self.assertEqual(
+            report["samples"]["unresolved_non_live_source_clinic_links"][0]["id"],
+            link.id,
+        )
+        self.assertEqual(
+            report["samples"]["unresolved_non_live_source_clinic_links"][0]["state_reason"],
+            "exam_enrollment_unassigned",
+        )
+
+        out = StringIO()
+        call_command(
+            "repair_assessment_state_drift",
+            "--tenant",
+            str(self.tenant.id),
+            "--apply",
+            "--json",
+            stdout=out,
+        )
+        repair = json.loads(out.getvalue())
+        link.refresh_from_db()
+        self.assertEqual(repair["resolved_non_live_source_clinic_link_count"], 1)
+        self.assertEqual(
+            repair["samples"]["non_live_source_clinic_links"][0]["state_reason"],
+            "exam_enrollment_unassigned",
+        )
+        self.assertEqual(link.resolution_type, self.ClinicLink.ResolutionType.SOURCE_REMOVED)
+        self.assertIsNotNone(link.resolved_at)
+
     def test_repair_assessment_state_drift_detaches_inactive_exam_links(self):
         inactive_exam = self.Exam.objects.create(
             tenant=self.tenant,
