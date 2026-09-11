@@ -122,6 +122,7 @@ def _project_log(
         "message_body": visible_body,
         "message_mode": log.message_mode or "",
         "notification_type": log.notification_type or "",
+        "origin_type": log.origin_type or "",
         "origin_id": log.origin_id or "",
         "source_tenant_id": log.source_tenant_id,
         "target_type": log.target_type or "",
@@ -137,6 +138,12 @@ class NotificationLogListView(APIView):
 
     @extend_schema(
         parameters=[
+            OpenApiParameter(
+                "origin_id",
+                OpenApiTypes.STR,
+                OpenApiParameter.QUERY,
+                description="한 번의 사용자 발송 요청과 정확히 일치하는 PII 없는 원천 식별자.",
+            ),
             OpenApiParameter(
                 "origin_id_prefix",
                 OpenApiTypes.STR,
@@ -155,6 +162,14 @@ class NotificationLogListView(APIView):
         # status 필터: success / failure / all (기본 all)
         status_filter = (request.query_params.get("status") or "").strip().lower()
         base_qs = _alimtalk_logs_for_business_tenant(request.tenant)
+        origin_id = (request.query_params.get("origin_id") or "").strip()
+        if origin_id:
+            if len(origin_id) > 128 or not re.fullmatch(r"[A-Za-z0-9:_-]+", origin_id):
+                return Response(
+                    {"origin_id": "유효한 원천 식별자를 입력해 주세요."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            base_qs = base_qs.filter(origin_id=origin_id)
         origin_id_prefix = (request.query_params.get("origin_id_prefix") or "").strip()
         if origin_id_prefix:
             if len(origin_id_prefix) > 128 or not re.fullmatch(

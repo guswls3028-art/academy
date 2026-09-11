@@ -4,17 +4,22 @@
 """
 
 import re
+from uuid import uuid4
 
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from drf_spectacular.utils import extend_schema
 
 from apps.core.permissions import TenantResolvedAndStaff
 from apps.domains.messaging.models import MessageTemplate
 from apps.domains.messaging.permissions import can_send_messages
 from apps.domains.messaging.selectors import HOURLY_SEND_LIMIT, get_hourly_notification_usage
-from apps.domains.messaging.serializers import SendMessageRequestSerializer
+from apps.domains.messaging.serializers import (
+    SendMessageRequestSerializer,
+    SendMessageResponseSerializer,
+)
 from apps.domains.messaging.services.grade_personalization import (
     validate_grade_personalization,
 )
@@ -58,6 +63,10 @@ class SendMessageView(APIView):
     """
     permission_classes = [IsAuthenticated, TenantResolvedAndStaff]
 
+    @extend_schema(
+        request=SendMessageRequestSerializer,
+        responses={200: SendMessageResponseSerializer},
+    )
     def post(self, request):
         tenant = request.tenant
         if not can_send_messages(request, tenant):
@@ -132,6 +141,19 @@ class SendMessageView(APIView):
         expected_dispatches = sum(
             1 for recipient in recipients if recipient.phone and len(recipient.phone) >= 10
         )
+        if expected_dispatches == 0:
+            return Response(
+                {
+                    "detail": "선택한 대상 중 유효한 수신 번호가 없어 발송 요청을 접수하지 않았습니다.",
+                    "code": "no_sendable_recipient",
+                    "accepted_count": 0,
+                    "enqueued": 0,
+                    "scheduled": 0,
+                    "enqueue_failed": 0,
+                    "skipped_no_phone": len(recipients),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         recent_count = get_hourly_notification_usage(tenant)
         if (
             not scheduled_send_at
@@ -237,6 +259,7 @@ class SendMessageView(APIView):
         scheduled = 0
         skipped_no_phone = 0
         enqueue_failed = 0
+        batch_id = str(data.get("request_id") or uuid4())
         for recipient in recipients:
             phone = recipient.phone
             if not phone or len(phone) < 10:
@@ -337,6 +360,9 @@ class SendMessageView(APIView):
                         "target_type": "student" if send_to != "parent" else "parent",
                         "target_id": recipient.student_id,
                         "target_name": name,
+                        "occurrence_key": f"manual:{batch_id}:{send_to}:{recipient.student_id}",
+                        "origin_type": "manual_send",
+                        "origin_id": batch_id,
                     },
                 )
             except MessagingPolicyError as e:
@@ -357,10 +383,16 @@ class SendMessageView(APIView):
             detail += f" (큐 등록 실패 {enqueue_failed}건)"
         if skipped_no_phone:
             detail += f" (전화번호 없음 {skipped_no_phone}건)"
-        return Response({
+        response_data = {
             "detail": detail + ".",
+            "batch_id": batch_id,
+            "accepted_count": accepted,
             "enqueued": enqueued,
             "scheduled": scheduled,
             "enqueue_failed": enqueue_failed,
             "skipped_no_phone": skipped_no_phone,
-        }, status=status.HTTP_200_OK)
+        }
+        if accepted == 0:
+            response_data["code"] = "dispatch_not_accepted"
+            return Response(response_data, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return Response(response_data, status=status.HTTP_200_OK)

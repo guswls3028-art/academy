@@ -557,6 +557,8 @@ def execute_notification_batch(
                         "target_id": r.get("student_id"),
                         "target_name": r.get("student_name", ""),
                         "occurrence_key": f"batch_{batch_id}",
+                        "origin_type": "manual_preview",
+                        "origin_id": str(batch_id),
                     },
                 }
             )

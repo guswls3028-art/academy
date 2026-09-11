@@ -221,6 +221,10 @@ class SendMessageRequestSerializer(serializers.Serializer):
         allow_null=True,
         help_text="예약 발송 시각. 비어 있으면 즉시 발송합니다.",
     )
+    request_id = serializers.UUIDField(
+        required=False,
+        help_text="한 번의 사용자 발송 요청을 발송 로그까지 추적하는 식별자",
+    )
     block_category = serializers.CharField(
         required=False,
         allow_blank=True,
@@ -300,6 +304,16 @@ class SendMessageRequestSerializer(serializers.Serializer):
                 {"scheduled_send_at": "예약 발송 시각은 현재 이후여야 합니다."}
             )
         return attrs
+
+
+class SendMessageResponseSerializer(serializers.Serializer):
+    detail = serializers.CharField()
+    batch_id = serializers.UUIDField()
+    accepted_count = serializers.IntegerField(min_value=0)
+    enqueued = serializers.IntegerField(min_value=0)
+    scheduled = serializers.IntegerField(min_value=0)
+    enqueue_failed = serializers.IntegerField(min_value=0)
+    skipped_no_phone = serializers.IntegerField(min_value=0)
 
 
 class ScheduledNotificationSerializer(serializers.ModelSerializer):
