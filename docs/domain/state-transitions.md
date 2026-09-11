@@ -860,6 +860,15 @@ EXPIRED → {} (종단)
 | `DONE` | 완료 |
 | `FAILED` | 실패 |
 
+#### 불변조건
+
+- worker 시작은 `PENDING -> RUNNING`, callback 확정은
+  `PENDING|RUNNING -> DONE|FAILED`만 허용한다.
+- `DONE`과 `FAILED`는 terminal이다. stale retry로 `FAILED`가 된 이전 generation은
+  늦거나 중복된 callback으로 다시 열리지 않는다.
+- callback 전이는 tenant와 job ID를 함께 검증한 compare-and-set이며 기존 운영
+  row를 소급 변경하지 않는다.
+
 ---
 
 ### B18. NotificationLog

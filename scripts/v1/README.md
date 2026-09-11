@@ -126,6 +126,14 @@ pwsh scripts/v1/disable-legacy-deploy-crons.ps1 -Action Off -AwsProfile default
   기동한다. CI는 이후 worker-only release를 포함한 모든 후보에서 API/Tools digest를
   `deploy-api-development.ps1`의 blue/green 검증에 통과시킨 뒤에만 임시
   preprod로 진행한다. 수동 `deploy.ps1`도 같은 gate를 실행한다.
+- **오답노트 actual-worker canary**:
+  `run-wrong-note-development-canary.ps1`은 active development의 exact API/Tools
+  digest를 확인한 뒤 일회성 QA 테넌트에서 HTTP 생성, 실제 Tools SQS 소비,
+  R2 PDF download/reload, stale retry·중복 재배달·tenant mismatch를 검증한다.
+  중복 메시지는 worker log의 `callback_ok=true message_deleted=true`까지 확인하며
+  종료 시 tenant/user/AI job/audit/R2 잔여가 모두 0이어야 한다. GitHub에서는
+  `deployment_scope=development_only`, `run_wrong_note_canary=true`로만 실행하고
+  preprod와 production job은 구조적으로 skip한다.
 - **development 접속**:
   `connect-api-development.ps1 -AwsProfile <profile>`은 active instance를
   정확히 1대로 확인한 뒤 localhost:18000 SSM tunnel만 연다. public

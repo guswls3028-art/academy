@@ -482,12 +482,23 @@ def run_ai_sqs_worker(
                 if prepared is None:
                     # 이미 완료/실패된 job의 재배달은 저장된 결과로 domain callback만 재시도한다.
                     # callback 성공 또는 callback 대상 없음일 때만 SQS message를 삭제한다.
+                    message_deleted = False
                     callback_ok = _dispatch_terminal_callback_from_message(job_id, message, tier_from_msg)
                     if callback_ok:
-                        queue.delete(receipt_handle, tier_from_msg)
-                    else:
+                        message_deleted = queue.delete(receipt_handle, tier_from_msg)
+                        if not message_deleted:
+                            logger.error(
+                                "AI_JOB_IDEMPOTENT_DELETE_FAILED | job_id=%s",
+                                job_id,
+                            )
+                    if not callback_ok or not message_deleted:
                         consecutive_errors += 1
-                    logger.info("AI_JOB_IDEMPOTENT_SKIP | job_id=%s", job_id)
+                    logger.info(
+                        "AI_JOB_IDEMPOTENT_SKIP | job_id=%s callback_ok=%s message_deleted=%s",
+                        job_id,
+                        str(callback_ok).lower(),
+                        str(message_deleted).lower(),
+                    )
                     _current_receipt_handle = None
                     if _shutdown:
                         break

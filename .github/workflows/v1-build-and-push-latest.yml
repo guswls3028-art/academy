@@ -21,6 +21,19 @@ on:
       - 'LICENSE'
   workflow_dispatch:
     inputs:
+      deployment_scope:
+        description: "Run the full production release or stop after isolated development verification"
+        required: true
+        default: full
+        type: choice
+        options:
+          - full
+          - development_only
+      run_wrong_note_canary:
+        description: "Run the disposable wrong-note API to tools queue to R2 canary"
+        required: true
+        default: false
+        type: boolean
       allow_contract_migrations:
         description: "Allow an annotated contract migration after its expand release is fully deployed"
         required: true
@@ -80,7 +93,7 @@ jobs:
       # Capture the manifest promoted by that earlier run after the workflow-level
       # concurrency wait, rather than using the stale copy from this push SHA.
       - name: Capture current verified release baseline
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || inputs.deployment_scope == 'development_only'
         run: |
           set -euo pipefail
           BASELINE_DIR="$RUNNER_TEMP/release-baseline"
@@ -95,7 +108,7 @@ jobs:
           ' "$RUNNER_TEMP/release-baseline/release-manifest.latest.json" >/dev/null
 
       - name: Upload current verified release baseline
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || inputs.deployment_scope == 'development_only'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-baseline-${{ github.run_attempt }}
@@ -106,8 +119,24 @@ jobs:
       - name: Detect changes
         id: changes
         run: |
-          # workflow_dispatch → 강제 전체 빌드+배포
+          # A development-only review builds only the API and deterministic tools
+          # worker changed by the candidate, then structurally stops before preprod.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ inputs.run_wrong_note_canary }}" = "true" ] && [ "${{ inputs.deployment_scope }}" != "development_only" ]; then
+              echo "::error::run_wrong_note_canary requires deployment_scope=development_only"
+              exit 1
+            fi
+            if [ "${{ inputs.deployment_scope }}" = "development_only" ]; then
+              echo "workflow_dispatch — isolated development API/tools build only"
+              echo "build_all=false" >> $GITHUB_OUTPUT
+              echo "build_base=false" >> $GITHUB_OUTPUT
+              echo "build_api=true" >> $GITHUB_OUTPUT
+              echo "build_video=false" >> $GITHUB_OUTPUT
+              echo "build_messaging=false" >> $GITHUB_OUTPUT
+              echo "build_ai=false" >> $GITHUB_OUTPUT
+              echo "build_tools=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
             echo "workflow_dispatch — force full build"
             echo "build_all=true" >> $GITHUB_OUTPUT
             echo "build_base=true" >> $GITHUB_OUTPUT
@@ -501,7 +530,7 @@ jobs:
         run: python3 scripts/v1/deployment_lock.py acquire --owner "$ACADEMY_DEPLOY_LOCK_OWNER" --ttl-seconds 10800
 
   verify-release-freshness:
-    name: Refuse stale production release candidates
+    name: Refuse stale or unbased release candidates
     runs-on: ubuntu-latest
     needs: [acquire-production-lock]
     steps:
@@ -516,6 +545,7 @@ jobs:
       - name: Refuse stale or divergent release candidates
         env:
           ACADEMY_CANDIDATE_SHA: ${{ github.sha }}
+          ACADEMY_DEPLOYMENT_SCOPE: ${{ inputs.deployment_scope == 'development_only' && 'development' || 'production' }}
         run: |
           git fetch --no-tags origin main
           MAIN_SHA="$(git rev-parse origin/main)"
@@ -523,7 +553,8 @@ jobs:
           python3 scripts/v1/release_freshness.py \
             --candidate-sha "$ACADEMY_CANDIDATE_SHA" \
             --deployed-sha "$DEPLOYED_SHA" \
-            --main-sha "$MAIN_SHA"
+            --main-sha "$MAIN_SHA" \
+            --deployment-scope "$ACADEMY_DEPLOYMENT_SCOPE"
 
   verify-runtime-iam:
     name: Verify exact runtime worker-scale IAM
@@ -638,7 +669,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download current verified release baseline
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || inputs.deployment_scope == 'development_only'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: release-baseline-${{ github.run_attempt }}
@@ -883,7 +914,7 @@ jobs:
           ssh-key: ${{ secrets.ACADEMY_RELEASE_DEPLOY_KEY }}
 
       - name: Download current verified release baseline
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || inputs.deployment_scope == 'development_only'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: release-baseline-${{ github.run_attempt }}
@@ -1015,6 +1046,7 @@ jobs:
           retention-days: 7
 
       - name: Commit and push ci-build.latest.md
+        if: inputs.deployment_scope != 'development_only'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -1122,6 +1154,21 @@ jobs:
             -ExpectedProductionDatabaseName "${{ steps.development-env.outputs.production_database_name }}" `
             -Ci
 
+      - name: Verify wrong-note callback fencing through the real development queue
+        if: inputs.run_wrong_note_canary == true
+        shell: pwsh
+        run: |
+          $candidate = Get-Content `
+            /tmp/api-development-candidate/release-manifest.candidate.json `
+            -Raw | ConvertFrom-Json
+          ./scripts/v1/run-wrong-note-development-canary.ps1 `
+            -ExpectedReleaseId "${{ steps.development-env.outputs.release_id }}" `
+            -ExpectedApiDigest ([string]$candidate.images.'academy-api'.digest) `
+            -ExpectedToolsDigest ([string]$candidate.images.'academy-tools-worker'.digest) `
+            -RunId "${{ github.run_id }}" `
+            -RunAttempt "${{ github.run_attempt }}" `
+            -Ci
+
   # ============================================================
   # Phase 4: Isolated preprod server (before any production mutation)
   # ============================================================
@@ -1134,6 +1181,7 @@ jobs:
     needs: [detect-changes, build-and-push, verify-api-development]
     if: |
       always() &&
+      inputs.deployment_scope != 'development_only' &&
       needs.build-and-push.result == 'success' &&
       (
         needs.verify-api-development.result == 'success' ||

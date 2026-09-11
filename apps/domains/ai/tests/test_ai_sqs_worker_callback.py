@@ -11,9 +11,10 @@ from apps.shared.contracts.ai_result import AIResult
 
 
 class _OneMessageQueue:
-    def __init__(self, message: dict):
+    def __init__(self, message: dict, *, delete_succeeds: bool = True):
         self._message = message
         self.deleted = False
+        self.delete_succeeds = delete_succeeds
 
     def receive(self, *, tier: str, wait_time_seconds: int):
         message = self._message
@@ -24,7 +25,7 @@ class _OneMessageQueue:
 
     def delete(self, receipt_handle: str, tier: str) -> bool:
         self.deleted = True
-        return True
+        return self.delete_succeeds
 
     def extend_visibility(self, receipt_handle: str, tier: str, timeout: int) -> bool:
         return True
@@ -123,6 +124,38 @@ class AISQSWorkerCallbackTests(TestCase):
             source_id="123",
             tier="basic",
         )
+
+    def test_terminal_redelivery_reports_message_delete_failure(self):
+        job = AIJobModel.objects.create(
+            job_id="callback-redelivery-delete-failure",
+            job_type="ocr",
+            status="DONE",
+            tenant_id=str(self.tenant.id),
+            tier="basic",
+            source_domain="matchup",
+            source_id="123",
+        )
+        AIResultModel.objects.create(job=job, payload={"ok": True})
+        queue = _OneMessageQueue(
+            self._message_for(job),
+            delete_succeeds=False,
+        )
+
+        with (
+            mock.patch("apps.domains.ai.callbacks.dispatch_ai_result_to_domain"),
+            self.assertLogs("academy.ai_sqs_worker", level="INFO") as logs,
+        ):
+            exit_code = ai_sqs_worker.run_ai_sqs_worker(queue=queue)
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(queue.deleted)
+        rendered = "\n".join(logs.output)
+        self.assertIn(
+            "AI_JOB_IDEMPOTENT_DELETE_FAILED | "
+            "job_id=callback-redelivery-delete-failure",
+            rendered,
+        )
+        self.assertIn("message_deleted=false", rendered)
 
     def test_callback_success_completes_and_deletes_message(self):
         job = AIJobModel.objects.create(

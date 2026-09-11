@@ -384,6 +384,16 @@ lock/mutation job은 environment subject를 사용한다.
 4. `run-api-development-smoke.ps1`이 합성 학생 XLSX 파싱, 1장 PPTX 생성·재열기,
    API와 AI worker 설정 경로 각각에서 개발 R2 객체 put/get/delete를 실행하고
    각 처리시간을 기록한다.
+   오답노트 callback 경계 변경은 `run-wrong-note-development-canary.ps1`도
+   실행한다. 이 스크립트는 exact digest의 API/Tools 컨테이너에서만 두 개의
+   `qa-ymath-realuse-wn-*` 테넌트를 만들고 실제 HTTP API → development Tools
+   SQS worker → `academy-development-artifacts` PDF 흐름을 수행한다. 선행 active
+   job의 409, 5분 경과 후 retry, 늦은 성공·도메인 실패·transport 실패 callback의
+   무변경, terminal SQS 재배달의 `message_deleted=true`, 변조 tenant envelope
+   거부, presigned download와 reload를 모두 확인한다. 마지막 inspect 뒤
+   tracked/untracked tenant R2 prefix, AI job/result, audit seal, 두 tenant/user를
+   exact ownership capability로 삭제하고 모든 잔여 count가 0일 때만 성공한다.
+   production URL, DB, queue, R2에는 접근하지 않는다.
    현재 이 smoke는 Video Batch 제출 성공을 증명하지 않는다. Video Batch는 전용 개발
    queue/job definition/job role과 Batch에서 접근 가능한 개발 Redis가 준비되기 전까지
    비활성 상태여야 한다.

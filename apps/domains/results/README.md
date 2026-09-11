@@ -98,9 +98,14 @@ Wrong-note PDF / HWPX
 - `POST /results/wrong-notes/documents/`는 tenant 범위의 `WrongNotePDF`와 AI job을
   transaction에서 기록한 뒤 tools worker 큐에 발행한다. 발행 성공은
   `202 PENDING`, 발행 실패는 두 job을 `FAILED`로 닫고 `503`을 반환한다.
-  worker가 선택한 PDF/HWPX를 R2에 저장하고 callback이 `DONE` 또는 `FAILED`를 확정한다.
+  worker가 선택한 PDF/HWPX를 R2에 저장하고 callback이 `PENDING|RUNNING`에서만
+  `DONE` 또는 `FAILED`를 원자적으로 확정한다. stale retry로 닫힌 이전 job과 이미
+  종결된 job은 늦거나 중복된 callback에도 상태·파일 경로가 변하지 않는다.
   상태 API는 형식·파일명에 맞는 attachment presigned URL을 반환하고 기존 PDF
   경로는 호환 별칭으로 유지한다.
+  운영 형태의 positive/retry/duplicate/tenant 회귀는
+  `scripts/v1/run-wrong-note-development-canary.ps1`이 격리 development의 실제
+  HTTP·Tools SQS worker·R2 download/reload와 cleanup 0으로 검증한다.
 - 조회·생성·다운로드는 교직원 전용이다. 한 학원에서 한 번에 한 문서만 만들고,
   생성은 최대 100문항·90초로 제한한다. 현재 범위는 단일 시험 또는
   `lecture_id + from_session_order + 선택적 to_session_order`이며 양끝을 포함한다.
