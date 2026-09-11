@@ -774,6 +774,7 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
         env = {
             "QA_ACTION": "Inspect",
             "QA_TENANT": tenant,
+            "QA_TENANT_ID": "0",
             "QA_CAPABILITY": "a" * 64,
             "QA_RELEASE": release,
             "QA_DIGEST": digest,
@@ -881,6 +882,11 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
             "processes": 0,
             "r2_objects": 0,
         }
+        events = []
+        command._cleanup_qa_r2_objects.side_effect = lambda **_kwargs: (
+            events.append("r2"),
+            {"deleted": 2, "remaining": 0},
+        )[1]
         video_zero = {
             "active_playback_sessions": 0,
             "playback_events": 0,
@@ -895,12 +901,17 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
         command._video_residue_for_code.return_value = video_zero
         cursor = MagicMock()
         audit = Mock()
-        destroy = Mock(side_effect=lambda *args, **kwargs: kwargs["stdout"].write(json.dumps({
-            "status": "YMATH_REALUSE_SCENARIO_DESTROYED", "tenant_code": tenant,
-            "remaining": {"tenants": 0, "users": 0},
-            "residue": {"activity_audits": 0, "outstanding_tokens": 0},
-            "video_residue": video_zero,
-        })))
+        def destroy_scenario(*_args, **kwargs):
+            events.append("database")
+            kwargs["stdout"].write(json.dumps({
+                "status": "YMATH_REALUSE_SCENARIO_DESTROYED", "tenant_code": tenant,
+                "tenant_id": 72,
+                "remaining": {"tenants": 0, "users": 0},
+                "residue": {"activity_audits": 0, "outstanding_tokens": 0},
+                "video_residue": video_zero,
+            }))
+
+        destroy = Mock(side_effect=destroy_scenario)
         bucket_keys = ("R2_AI_BUCKET", "R2_STORAGE_BUCKET", "R2_ADMIN_BUCKET", "R2_VIDEO_BUCKET", "R2_EXCEL_BUCKET")
         settings = SimpleNamespace(
             VIDEO_BATCH_JOB_QUEUE="", VIDEO_BATCH_JOB_DEFINITION="",
@@ -920,6 +931,7 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
         digest = "sha256:" + "b" * 64
         release = "sha-" + "a" * 40 + "-run-123-1"
         env = {"QA_ACTION": "Cleanup", "QA_TENANT": tenant, "QA_CAPABILITY": capability,
+               "QA_TENANT_ID": "72",
                "QA_RELEASE": release, "QA_DIGEST": digest,
                "QA_SYNTHETIC_LONG_VIDEO": "false",
                "QA_IMAGE": "809466760795.dkr.ecr.ap-northeast-2.amazonaws.com/academy-api@" + digest,
@@ -928,6 +940,13 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
                **{key: "academy-v1-development-ai-queue" for key in
                   ("AI_SQS_QUEUE_NAME_LITE", "AI_SQS_QUEUE_NAME_BASIC", "AI_SQS_QUEUE_NAME_PREMIUM")}}
         with patch.dict(sys.modules, modules), patch.dict(os.environ, env, clear=True):
+            os.environ["QA_TENANT_ID"] = "73"
+            audit.filter.return_value.values_list.return_value = [own_record]
+            with self.assertRaises(AssertionError):
+                namespace["run"]()
+            command._cleanup_qa_r2_objects.assert_not_called()
+            destroy.assert_not_called()
+            os.environ["QA_TENANT_ID"] = "72"
             for records in ([foreign_owner], [], [own_record, own_record]):
                 audit.filter.return_value.values_list.return_value = records
                 with self.assertRaises(PermissionError):
@@ -945,17 +964,129 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
                 "r2_objects": 0,
             })
             self.assertEqual(result["video_residue"], video_zero)
+            self.assertEqual(result["tenant_id"], 72)
+            self.assertEqual(result["r2_cleanup"], {"deleted": 2, "remaining": 0})
+            self.assertEqual(events, ["r2", "database"])
             self.assertEqual(destroy.call_count, 1)
             self.assertTrue(destroy.call_args.kwargs["destroy"])
             self.assertEqual(destroy.call_args.kwargs["tenant_code"], tenant)
-            command._non_database_residue.assert_called_once_with(
-                tenant_id=72,
-                tenant_code=tenant,
-            )
+            self.assertEqual(command._non_database_residue.call_count, 3)
+            for call in command._non_database_residue.call_args_list:
+                self.assertEqual(call.kwargs, {"tenant_id": 72, "tenant_code": tenant})
+            command._cleanup_qa_r2_objects.assert_called_once_with(tenant_id=72)
             command._exact_tenant_or_fail_on_case_variant.return_value = None
             command._remaining_for_code.return_value = {"tenants": 0, "users": 0}
-            self.assertEqual(namespace["run"]()["status"], "YMATH_REALUSE_SCENARIO_ABSENT")
+            command._non_database_residue.reset_mock()
+            absent = namespace["run"]()
+            self.assertEqual(absent["status"], "YMATH_REALUSE_SCENARIO_ABSENT")
+            self.assertEqual(absent["tenant_id"], 72)
+            self.assertTrue(absent["r2_scope_proven"])
+            command._non_database_residue.assert_called_once_with(tenant_id=72, tenant_code=tenant)
             self.assertEqual(destroy.call_count, 1, "absent cleanup must not call destroy")
+            os.environ["QA_ACTION"] = "Inspect"
+            command._non_database_residue.reset_mock()
+            post_inspect = namespace["run"]()
+            self.assertEqual(post_inspect["status"], "DEVELOPMENT_QA_IDENTITY_PASS")
+            self.assertEqual(post_inspect["tenant_id"], 72)
+            self.assertTrue(post_inspect["r2_scope_proven"])
+            command._non_database_residue.assert_called_once_with(tenant_id=72, tenant_code=tenant)
+
+    def test_fixed_cleanup_stops_before_database_destroy_when_r2_cleanup_fails(self):
+        session = json.loads((ROOT / "scripts/v1/templates/ssm/frontend_development_qa.json").read_text())
+        shell_script = shlex.split(session["properties"]["linux"]["commands"], posix=True)[2]
+        source = shell_script.split("<<'ACADEMY_QA_PY'\n", 1)[1].rsplit("ACADEMY_QA_PY", 1)[0]
+        functions = [node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef)]
+        namespace = {"hashlib": hashlib, "hmac": hmac, "re": re, "io": io, "json": json,
+                     "os": os, "django": SimpleNamespace(setup=Mock())}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), "fixed-r2-failure", "exec"), namespace)
+        tenant = "qa-ymath-realuse-fe-456-1-fedcba654321"
+        capability = "a" * 64
+        own_record = namespace["ownership_payload"](tenant, 72, capability)
+        existing = SimpleNamespace(pk=72)
+        command = Mock()
+        command._exact_tenant_or_fail_on_case_variant.return_value = existing
+        command._remaining_for_code.return_value = {"tenants": 1, "users": 2}
+        command._video_residue_for_code.return_value = {
+            "active_playback_sessions": 0, "playback_events": 0, "playback_sessions": 0,
+            "player_errors": 0, "proctored_video_accesses": 0, "video_accesses": 0,
+            "video_progresses": 0, "videos": 0, "violated_events": 0,
+        }
+        command._non_database_residue.return_value = {
+            "listeners": 0, "processes": 0, "r2_objects": 2,
+        }
+        command._cleanup_qa_r2_objects.side_effect = RuntimeError("private provider detail")
+        audit = Mock()
+        audit.filter.return_value.values_list.return_value = [own_record]
+        destroy = Mock()
+        cursor = MagicMock()
+        settings = SimpleNamespace(
+            VIDEO_BATCH_JOB_QUEUE="", VIDEO_BATCH_JOB_DEFINITION="",
+            TOOLS_SQS_QUEUE_NAME="academy-v1-development-tools-queue",
+            MESSAGING_SQS_QUEUE_NAME="academy-v1-development-messaging-queue",
+            DATABASES={"default": {"NAME": "academy_api_development", "USER": "academy_api_development_app"}},
+            **{key: "academy-development-artifacts" for key in
+               ("R2_AI_BUCKET", "R2_STORAGE_BUCKET", "R2_ADMIN_BUCKET", "R2_VIDEO_BUCKET", "R2_EXCEL_BUCKET")})
+        modules = {
+            "django.conf": SimpleNamespace(settings=settings),
+            "django.core.management": SimpleNamespace(call_command=destroy),
+            "django.db": SimpleNamespace(transaction=SimpleNamespace(atomic=nullcontext),
+                                         connection=SimpleNamespace(cursor=lambda: cursor)),
+            "apps.core.models": SimpleNamespace(OpsAuditLog=SimpleNamespace(objects=audit)),
+            "apps.core.management.commands.setup_ymath_realuse_scenario":
+                SimpleNamespace(Command=lambda: command, assert_isolated_runtime=Mock()),
+        }
+        digest = "sha256:" + "b" * 64
+        release = "sha-" + "a" * 40 + "-run-123-1"
+        env = {"QA_ACTION": "Cleanup", "QA_TENANT": tenant, "QA_TENANT_ID": "72",
+               "QA_CAPABILITY": capability, "QA_RELEASE": release, "QA_DIGEST": digest,
+               "QA_SYNTHETIC_LONG_VIDEO": "false",
+               "QA_IMAGE": "809466760795.dkr.ecr.ap-northeast-2.amazonaws.com/academy-api@" + digest,
+               "DJANGO_SETTINGS_MODULE": "apps.api.config.settings.development",
+               "ACADEMY_RUNTIME_ENV": "development", "ACADEMY_DEVELOPMENT_RELEASE_ID": release,
+               "SOLAPI_MOCK": "true", "TOSS_AUTO_BILLING_ENABLED": "false",
+               **{key: "academy-v1-development-ai-queue" for key in
+                  ("AI_SQS_QUEUE_NAME_LITE", "AI_SQS_QUEUE_NAME_BASIC", "AI_SQS_QUEUE_NAME_PREMIUM")}}
+        failure_context = {"stage": "bootstrap", "residue": {}}
+        with patch.dict(sys.modules, modules), patch.dict(os.environ, env, clear=True), self.assertRaises(RuntimeError):
+            namespace["run"](failure_context)
+
+        command._cleanup_qa_r2_objects.assert_called_once_with(tenant_id=72)
+        destroy.assert_not_called()
+        audit.create.assert_not_called()
+        self.assertEqual(failure_context["stage"], "cleanup_r2")
+        self.assertEqual(failure_context["residue"]["r2_objects"], 2)
+
+    def test_fixed_failure_payload_is_stage_scoped_numeric_and_secret_free(self):
+        session = json.loads((ROOT / "scripts/v1/templates/ssm/frontend_development_qa.json").read_text())
+        shell_script = shlex.split(session["properties"]["linux"]["commands"], posix=True)[2]
+        source = shell_script.split("<<'ACADEMY_QA_PY'\n", 1)[1].rsplit("ACADEMY_QA_PY", 1)[0]
+        functions = [
+            node for node in ast.parse(source).body
+            if isinstance(node, ast.FunctionDef) and node.name in {"empty_residue", "failure_payload"}
+        ]
+        namespace = {}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), "fixed-safe-failure", "exec"), namespace)
+        payload = namespace["failure_payload"](
+            AssertionError("secret-token private provider detail"),
+            {"stage": "cleanup_r2", "tenant_id": 72, "residue": {
+                "activity_audits": 0, "outstanding_tokens": 0, "listeners": 0,
+                "processes": 0, "r2_objects": 2,
+            }},
+        )
+        self.assertEqual(payload["status"], "DEVELOPMENT_QA_FAILED")
+        self.assertEqual(
+            set(payload),
+            {"status", "error_type", "failure_stage", "tenant_id", "residue"},
+        )
+        self.assertEqual(payload["error_type"], "AssertionError")
+        self.assertEqual(payload["failure_stage"], "cleanup_r2")
+        self.assertEqual(payload["tenant_id"], 72)
+        self.assertEqual(
+            set(payload["residue"]),
+            {"activity_audits", "outstanding_tokens", "listeners", "processes", "r2_objects"},
+        )
+        self.assertTrue(all(type(value) is int and value >= 0 for value in payload["residue"].values()))
+        self.assertNotIn("secret-token", json.dumps(payload))
 
     def test_managed_ssm_parameter_allow_is_explicitly_bounded(self):
         source = (ROOT / "scripts/v1/resources/iam.ps1").read_text(encoding="utf-8-sig")
@@ -1028,7 +1159,7 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
                          "187f6ac218435d3b3f938d903153c5785db3529ace89f4e79ea9b6e1bde8ddb6")
         for path, expected in (
             ("iam/trust_frontend_development_qa.json", "aa2c1a60b63ad287c2e8caba7257beaafe5d602df66659c3093f917ad670713a"),
-            ("ssm/frontend_development_qa.json", "7c0aa1f5b6793a4115dc1769bbe95811fa299aa26818e498e4d8bcfaea4378a2"),
+            ("ssm/frontend_development_qa.json", "6437a638d2e99761b26243c27454a656d969b880c152d9dcd9bd50869c38ba1c"),
             ("ssm/frontend_development_api_port.json", "974b6bf4e518533ee0ecd14c5e82b0a5f0538813e41253940cd46a6cb5e8d173"),
         ):
             with self.subTest(path=path):
@@ -1044,10 +1175,19 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
             {
                 "Action",
                 "TenantCode",
+                "TenantId",
                 "ReleaseId",
                 "ApiDigest",
                 "OwnershipCapability",
                 "SyntheticLongVideo",
+            },
+        )
+        self.assertEqual(
+            session["parameters"]["TenantId"],
+            {
+                "type": "String",
+                "default": "0",
+                "allowedPattern": "^(0|[1-9][0-9]{0,18})$",
             },
         )
         self.assertEqual(
@@ -1070,12 +1210,17 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
         shell_script = agent_argv[2]
         self.assertEqual(shell_script.splitlines()[0], "set -eu")
         self.assertNotEqual(agent_argv[0], "set")
+        self.assertIn("-e QA_TENANT_ID={{TenantId}}", shell_script)
         python = shell_script.split("<<'ACADEMY_QA_PY'\n", 1)[1].rsplit("ACADEMY_QA_PY", 1)[0]
         compile(python, "fixed-development-session", "exec")
+        self.assertLess(
+            python.index('failure_context["tenant_id"] = expected_tenant_id'),
+            python.index("django.setup()"),
+        )
         self.assertIn('assert existing is None', python)
         self.assertIn('payload["remaining"] == {"tenants": 0, "users": 0}', python)
         self.assertIn('payload["residue"] == {"activity_audits": 0, "outstanding_tokens": 0}', python)
-        self.assertIn('payload["residue"] == {"activity_audits": 0, "outstanding_tokens": 0, "listeners": 0,', python)
+        self.assertIn('payload["residue"] == empty_residue()', python)
         self.assertIn("student_count=2 if synthetic_long_video else 1", python)
         self.assertIn("synthetic_long_video=synthetic_long_video", python)
         self.assertIn('assert payload["video_residue"] == expected_video_state(False)', python)

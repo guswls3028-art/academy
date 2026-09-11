@@ -190,11 +190,14 @@ APPROVED mock 템플릿을 보장한다. 이미 유효한 개발 템플릿은 �
 PostgreSQL tenant PK sequence를 전진시킨다. 그 ID나 code가 다른 tenant에 이미
 사용됐거나 기존 owner identity가 다르면 데이터를 덮어쓰지 않고 fail-closed한다.
 
-Cleanup은 같은 advisory lock/transaction 아래 exact tenant에 연결된 성공 소유권 행이
-정확히 1개이고 요청 capability digest가 일치할 때만 같은 명령의 destroy를 호출한다.
-누락·중복·다른 run capability·다른 tenant ID는 거부한다. 이미 부재하면 numeric
-tenant/user0 확인만 하고 destroy는 호출하지 않는다. 생성/정리가 겹쳐도 소유권 검사와
-destroy 사이에 lock을 풀지 않는다. destroy는 user 삭제 전에 exact scenario user의
+Setup 성공 응답의 positive `tenant_id`는 frontend runner가 메모리에만 보관하고,
+Cleanup 및 그 직후 Inspect에 고정 문서의 `TenantId`로 그대로 전달한다. 최초 Inspect와
+Setup은 기본값 `0`을 사용한다. Cleanup은 같은 advisory lock/transaction 아래 요청
+`TenantId`와 exact tenant PK가 같고, 그 tenant에 연결된 성공 소유권 행이 정확히 1개이며
+요청 capability digest가 일치할 때만 진행한다. 누락·중복·다른 run capability·다른
+tenant ID는 거부한다. 이미 DB에서 부재하면 전달받은 positive `TenantId`의 R2 prefix까지
+직접 0인지 읽고 destroy는 호출하지 않는다. 생성/정리가 겹쳐도 소유권 검사와 destroy
+사이에 lock을 풀지 않는다. destroy는 user 삭제 전에 exact scenario user의
 SimpleJWT outstanding token만 삭제한다. 학생 activity 감사 행은
 `student_activity.login/screen_view/target_open`, exact target tenant, scenario
 actor/target user, 현재 시각 이하, 그리고 최초 성공 `development.qa.setup` seal 시각
@@ -209,16 +212,26 @@ Inspect/Setup/Cleanup 출력은 tenant/user 수와 별도로 `outstanding_tokens
 `activity_audits`, exact development R2 prefix의 `r2_objects`, exact `QA_TENANT`
 환경을 가진 다른 container process의 `processes`, container port 18000 LISTEN의
 `listeners`를 모두 numeric residue로 반환한다. Setup/Cleanup에서 하나라도 0이 아니면
-고정 문서가 실패한다. R2는 `tenants/<id>/`, `excel/<id>/`,
+고정 문서가 실패한다. Cleanup은 capability와 `TenantId` 검증을 마친 뒤 DB destroy보다
+먼저 exact R2 prefix의 object만 삭제하고, 각 prefix를 다시 열거해 strong-consistency
+0을 확인한다. R2 실패 시 DB tenant와 소유권 seal은 보존되어 같은 exact target으로
+안전하게 재시도할 수 있다. R2는 `tenants/<id>/`, `excel/<id>/`,
 `tenant-logos/<id>/`, `landing-public/reviews/<id>/`,
-`matchup-showcase-snapshots/tenant_<id>/`만 열거하며 여기서 broad object 삭제를 하지
-않는다. process/listener 수는 원격 development API container 경계다. runner 로컬
+`matchup-showcase-snapshots/tenant_<id>/`만 열거·삭제하며 broad prefix나 다른 tenant
+object는 건드리지 않는다. process/listener 수는 원격 development API container 경계다. runner 로컬
 tunnel/process와 AWS Session tuple은 frontend 계약이 별도로 종료·증명한다. 이 변경은
 스키마나 기존 데이터 migration을 만들지 않는다.
 기존 QA tenant를 Inspect할 때도 tenant-scoped 감사·토큰 residue 조회는 하나의
 `transaction.atomic()` 안에서 실행한다. 따라서 PostgreSQL의 transaction-local tenant
 context가 조회 도중 풀리지 않으며, 외부 R2/process/listener readback은 DB transaction을
 끝낸 뒤 계속 수행한다.
+
+Cleanup과 positive `TenantId`를 받은 사후 Inspect의 성공·실패 출력은 요청 target
+`tenant_id`를 그대로 echo한다. 사후 Inspect는 DB tenant가 이미 없어도 그 ID의 exact R2
+prefix를 실제 열거하고 `r2_scope_proven=true`를 반환한다. `TenantId=0`인 최초 absent
+Inspect는 R2 target을 추측하지 않고 `r2_scope_proven=false`로 구분한다. 실패 출력은
+allowlist된 `failure_stage`, exception type, request `tenant_id`, 다섯 numeric residue만
+포함하며 provider 오류 문자열, capability, 사용자 식별자, secret은 출력하지 않는다.
 
 영상 분기를 켠 Setup은 별도 `video_state`에 `videos=1`,
 `video_accesses=2`, `proctored_video_accesses=2`를 반환하고 progress/session/event와
