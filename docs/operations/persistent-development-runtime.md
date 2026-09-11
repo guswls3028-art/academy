@@ -192,7 +192,9 @@ PostgreSQL tenant PK sequence를 전진시킨다. 그 ID나 code가 다른 tenan
 
 Setup 성공 응답의 positive `tenant_id`는 frontend runner가 메모리에만 보관하고,
 Cleanup 및 그 직후 Inspect에 고정 문서의 `TenantId`로 그대로 전달한다. 최초 Inspect와
-Setup은 기본값 `0`을 사용한다. Cleanup은 같은 advisory lock/transaction 아래 요청
+Setup은 기본값 `0`을 사용한다. 고정 Setup은 DB 생성 직후 확정된 positive tenant PK를
+post-commit readback보다 먼저 실패 context에 기록하므로, 그 이후 검증이 실패해도 안전
+payload가 정확한 cleanup target을 반환한다. Cleanup은 같은 advisory lock/transaction 아래 요청
 `TenantId`와 exact tenant PK가 같고, 그 tenant에 연결된 성공 소유권 행이 정확히 1개이며
 요청 capability digest가 일치할 때만 진행한다. 누락·중복·다른 run capability·다른
 tenant ID는 거부한다. 이미 DB에서 부재하면 전달받은 positive `TenantId`의 R2 prefix까지
