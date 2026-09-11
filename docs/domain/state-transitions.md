@@ -446,7 +446,11 @@ COMPLETE_ALLOWED_STATUSES = {"attended"}
 `pending`, `booked`, `no_show`, `cancelled`, `rejected` 참가자는 완료 처리할 수 없다.
 `uncomplete`는 완료 시각만 취소하고 출석 상태는 유지한다. `checked_in_at`은 실제
 등원 시각, `is_late`는 지각 여부, `checked_out_at`은 실제 하원 시각이다. 하원은
-`attended + checked_in_at`에서만 한 번 허용하며 하원 후 상태 정정은 실패 폐쇄한다.
+`attended + checked_in_at`에서는 기존 요청으로 허용한다. 등원을 기록하지 못한
+`booked` 참가자는 `confirm_without_arrival=true`와 현재 `expected_session_id`,
+`expected_student_id`를 모두 확인한 경우에만 하원 시각을 기록하며 `status`나
+`checked_in_at`을 만들지 않는다. 반복 하원은 기존 결과를 멱등 반환하고, 하원 후 상태
+정정은 실패 폐쇄한다.
 `completed_at`/`completed_by`는 시험·과제 보충 및 자율학습 완료 이력이므로 출석
 정정이나 하원에서 지우거나 하원 시각으로 재사용하지 않는다.
 
@@ -457,19 +461,31 @@ COMPLETE_ALLOWED_STATUSES = {"attended"}
 - `booked → pending` (승인 취소 없음)
 - `booked → rejected` (승인된 예약 거절 없음)
 - `cancelled/rejected → *` (상태 전이 종단)
-- `booked/no_show → checkout` (등원 시각 없음)
-- `checked_out_at != null → 상태 정정/중복 checkout`
+- `booked → checkout`에서 확인 플래그 또는 현재 session/student 확인값 누락
+- `no_show → checkout`
+- `checked_out_at != null → 상태 정정` (중복 checkout은 기존 결과 멱등 반환)
 
 #### UI 허용 액션
 
-| 상태 | Admin | Student |
-|------|-------|---------|
-| pending | 승인(→booked), 거절(→rejected), 취소(→cancelled) | 취소(→cancelled) |
-| booked | 등원/지각 등원(→attended), 재촉, 결석 확인(→no_show), 하원 비활성 | (변경 불가, "확정" 표시) |
-| attended | 하원(`checked_out_at`), 자율학습 완료(`completed_at`)를 별도 처리 | (미노출) |
-| no_show | 등원/지각 등원 정정(→attended), 기존 일정 이동 또는 새 일정 생성 | (미노출) |
-| cancelled | 종단 | (미노출) |
-| rejected | 종단 | (미노출) |
+| 상태 | Admin | Teacher mobile | Student |
+|------|-------|----------------|---------|
+| pending | 승인(→booked), 거절(→rejected), 취소(→cancelled) | 승인(→booked), 거절(→rejected) | 취소(→cancelled) |
+| booked | 등원/지각 등원(→attended), 재촉, 결석 확인(→no_show), 확인 후 미등원 하원 | 등원, 재촉, 결석 확인, 확인 후 미등원 하원 | (변경 불가, "확정" 표시) |
+| attended | 하원(`checked_out_at`), 자율학습 완료/완료 취소(`completed_at`) | 하원, 자율학습 완료/완료 취소 | (미노출) |
+| no_show | 등원/지각 등원 정정(→attended), 기존 일정 이동 또는 새 일정 생성 | 지각 등원 정정, 기존 일정 이동 또는 새 일정 생성 | (미노출) |
+| cancelled | 종단 | 종단 | (미노출) |
+| rejected | 종단 | 종단 | (미노출) |
+
+#### 패스카드와 이름 하이라이트 투영
+
+참가자 상태를 학생 합격 여부로 직접 바꾸지 않는다. 미해결 자동 `ClinicLink`가 있는
+학생은 `pending`이거나 예약이 `cancelled`·`rejected`·`no_show`로 끝났거나,
+`attended` 참가자의 `completed_at`이 기록된 뒤에도 과락이 남아 있으면
+`CLINIC_REQUIRED`이며 이름을 노란색으로 표시한다. 오늘 또는 미래의 `booked`, 혹은
+아직 완료하지 않은 `attended` 참가자가 있으면 `BOOKING_CONFIRMED`이고 하이라이트를
+제거한다. 모든 과락이 해소된 경우에만 `PASSED`가 된다. 이 판정은
+`apps/domains/clinic/services/passcard_state.py`를 패스카드와
+`name_highlight_clinic_target`이 함께 사용하며, 클라이언트가 별도로 추정하지 않는다.
 
 #### 희망 시간과 메모 소유권
 
