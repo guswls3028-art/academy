@@ -4,6 +4,7 @@ import datetime
 from dataclasses import dataclass
 from typing import Any
 
+from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -13,6 +14,12 @@ from apps.domains.clinic.models import (
     Session,
     SessionParticipant,
     SessionParticipantPlanItem,
+)
+from apps.domains.clinic.time_ranges import (
+    booking_window,
+    is_supported_time_range_session,
+    ranges_overlap,
+    session_window,
 )
 from apps.support.clinic.session_dependencies import (
     active_students_for_clinic_tenant,
@@ -1078,14 +1085,24 @@ def _validated_booking_range(
         raise ValidationError(
             {"booking_time": "예약 시작과 종료 시간을 함께 입력해 주세요."}
         )
+    if (
+        booking_start_time > datetime.time.min
+        and booking_end_time == datetime.time.min
+        and not settings.CLINIC_MIDNIGHT_TIME_RANGE_WRITES_ENABLED
+    ):
+        raise ValidationError({
+            "booking_time": "자정 종료 시간 범위 예약은 안전 배포 완료 후 활성화됩니다."
+        })
 
-    session_start = datetime.datetime.combine(session.date, session.start_time)
-    session_end = session_start + datetime.timedelta(minutes=session.duration_minutes)
-    booking_start = datetime.datetime.combine(session.date, booking_start_time)
-    booking_end = datetime.datetime.combine(session.date, booking_end_time)
-    if session_end.date() != session.date:
+    session_start, session_end = session_window(session)
+    booking_start, booking_end = booking_window(
+        session=session,
+        start_time=booking_start_time,
+        end_time=booking_end_time,
+    )
+    if not is_supported_time_range_session(session):
         raise ValidationError(
-            {"booking_time": "자정을 넘는 클리닉은 시간 범위 예약을 지원하지 않습니다."}
+            {"booking_time": "자정 이후까지 이어지는 클리닉은 시간 범위 예약을 지원하지 않습니다."}
         )
     if not session_start <= booking_start < booking_end <= session_end:
         raise ValidationError(
@@ -1148,7 +1165,7 @@ def _assert_session_capacity(
 
     if booking_start_time is None or booking_end_time is None:
         raise ValidationError({"booking_time": "예약 시작과 종료 시간을 입력해 주세요."})
-    ranged_active = SessionParticipant.objects.filter(
+    ranged_active = list(SessionParticipant.objects.filter(
         tenant=tenant,
         session=session,
         status__in=(
@@ -1156,16 +1173,31 @@ def _assert_session_capacity(
             SessionParticipant.Status.BOOKED,
             SessionParticipant.Status.ATTENDED,
         ),
+    ).only("booking_start_time", "booking_end_time"))
+    cursor, end = booking_window(
+        session=session,
+        start_time=booking_start_time,
+        end_time=booking_end_time,
     )
-    cursor = datetime.datetime.combine(session.date, booking_start_time)
-    end = datetime.datetime.combine(session.date, booking_end_time)
     step = datetime.timedelta(minutes=int(session.booking_interval_minutes))
     while cursor < end:
         next_cursor = min(cursor + step, end)
-        concurrent = ranged_active.filter(
-            booking_start_time__lt=next_cursor.time(),
-            booking_end_time__gt=cursor.time(),
-        ).count()
+        concurrent = 0
+        for participant in ranged_active:
+            if participant.booking_start_time is None or participant.booking_end_time is None:
+                concurrent += 1
+                continue
+            participant_start, participant_end = booking_window(
+                session=session,
+                start_time=participant.booking_start_time,
+                end_time=participant.booking_end_time,
+            )
+            concurrent += ranges_overlap(
+                participant_start,
+                participant_end,
+                cursor,
+                next_cursor,
+            )
         if concurrent >= session.max_participants:
             raise Conflict("해당 클리닉은 선택한 시간의 정원이 마감되었습니다.")
         cursor = next_cursor
@@ -1175,8 +1207,7 @@ def booking_availability_for_session(*, tenant, session: Session) -> dict[str, A
     """Return tenant-scoped interval capacity without exposing participant identity."""
 
     interval = int(session.booking_interval_minutes)
-    start = datetime.datetime.combine(session.date, session.start_time)
-    end = start + datetime.timedelta(minutes=session.duration_minutes)
+    start, end = session_window(session)
     slots = []
     active = getattr(session, "booking_capacity_participants", None)
     if active is None or session.booking_mode == "fixed_slot":
@@ -1193,13 +1224,22 @@ def booking_availability_for_session(*, tenant, session: Session) -> dict[str, A
     while cursor < end:
         next_cursor = min(cursor + datetime.timedelta(minutes=interval), end)
         if session.booking_mode == "time_range":
-            used = sum(
-                participant.booking_start_time is not None
-                and participant.booking_end_time is not None
-                and participant.booking_start_time < next_cursor.time()
-                and participant.booking_end_time > cursor.time()
-                for participant in active
-            )
+            used = 0
+            for participant in active:
+                if participant.booking_start_time is None or participant.booking_end_time is None:
+                    used += 1
+                    continue
+                participant_start, participant_end = booking_window(
+                    session=session,
+                    start_time=participant.booking_start_time,
+                    end_time=participant.booking_end_time,
+                )
+                used += ranges_overlap(
+                    participant_start,
+                    participant_end,
+                    cursor,
+                    next_cursor,
+                )
         else:
             used = len(active)
         slots.append({
@@ -1606,6 +1646,11 @@ def change_participant_booking(
         new_session_id = int(new_session_id)
     except (TypeError, ValueError) as exc:
         raise ValidationError({"detail": "new_session_id는 숫자여야 합니다."}) from exc
+
+    # The limglish conversion locks tenant -> sessions -> participants. Enter
+    # the same tenant fence before this writer locks a student or participant,
+    # so neither path can hold a lower-level row while waiting on the other.
+    tenant = tenant.__class__.objects.select_for_update(no_key=True).get(pk=tenant.pk)
     try:
         booking_identity = (
             SessionParticipant.objects

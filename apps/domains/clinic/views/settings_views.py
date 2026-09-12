@@ -6,6 +6,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
+from apps.core.models import Tenant
 from apps.core.parsing import parse_bool
 from apps.core.permissions import TenantResolvedAndStaff
 from apps.core.services.tenant_access import get_authorized_tenant_role
@@ -68,32 +69,9 @@ class ClinicSettingsView(APIView):
         ) not in {"owner", "admin"}:
             raise PermissionDenied("예약 정책은 대표 또는 관리자만 변경할 수 있습니다.")
 
-        next_mode = request.data.get(
-            "booking_mode", getattr(tenant, "clinic_booking_mode", "fixed_slot")
-        )
-        if next_mode not in {"fixed_slot", "time_range"}:
-            raise ValidationError({"booking_mode": "fixed_slot 또는 time_range만 사용할 수 있습니다."})
-        try:
-            next_interval = int(
-                request.data.get(
-                    "booking_interval_minutes",
-                    getattr(tenant, "clinic_booking_interval_minutes", 60),
-                )
-            )
-            next_max_stay = int(
-                request.data.get(
-                    "booking_max_stay_minutes",
-                    getattr(tenant, "clinic_booking_max_stay_minutes", 240),
-                )
-            )
-        except (TypeError, ValueError) as exc:
-            raise ValidationError({"booking_policy": "예약 간격과 최대 체류 시간은 숫자여야 합니다."}) from exc
-        if next_interval not in {30, 60}:
-            raise ValidationError({"booking_interval_minutes": "예약 간격은 30분 또는 60분이어야 합니다."})
-        if next_max_stay < next_interval or next_max_stay % next_interval:
-            raise ValidationError({"booking_max_stay_minutes": "최대 체류 시간은 예약 간격의 양의 배수여야 합니다."})
-        update_fields = []
         with transaction.atomic():
+            tenant = Tenant.objects.select_for_update().get(pk=tenant.pk)
+            update_fields = []
             if "use_daily_random" in request.data:
                 tenant.clinic_use_daily_random = parse_bool(
                     request.data["use_daily_random"], field_name="use_daily_random",
@@ -107,14 +85,44 @@ class ClinicSettingsView(APIView):
                 update_fields.append("clinic_auto_approve_booking")
 
             if policy_fields.intersection(request.data):
-                tenant.clinic_booking_mode = next_mode
-                tenant.clinic_booking_interval_minutes = next_interval
-                tenant.clinic_booking_max_stay_minutes = next_max_stay
-                update_fields.extend([
-                    "clinic_booking_mode",
-                    "clinic_booking_interval_minutes",
-                    "clinic_booking_max_stay_minutes",
-                ])
+                next_mode = request.data.get(
+                    "booking_mode", tenant.clinic_booking_mode
+                )
+                if next_mode not in {"fixed_slot", "time_range"}:
+                    raise ValidationError({
+                        "booking_mode": "fixed_slot 또는 time_range만 사용할 수 있습니다."
+                    })
+                try:
+                    next_interval = int(request.data.get(
+                        "booking_interval_minutes",
+                        tenant.clinic_booking_interval_minutes,
+                    ))
+                    next_max_stay = int(request.data.get(
+                        "booking_max_stay_minutes",
+                        tenant.clinic_booking_max_stay_minutes,
+                    ))
+                except (TypeError, ValueError) as exc:
+                    raise ValidationError({
+                        "booking_policy": "예약 간격과 최대 체류 시간은 숫자여야 합니다."
+                    }) from exc
+                if next_interval not in {30, 60}:
+                    raise ValidationError({
+                        "booking_interval_minutes": "예약 간격은 30분 또는 60분이어야 합니다."
+                    })
+                if next_max_stay < next_interval or next_max_stay % next_interval:
+                    raise ValidationError({
+                        "booking_max_stay_minutes": "최대 체류 시간은 예약 간격의 양의 배수여야 합니다."
+                    })
+
+                if "booking_mode" in request.data:
+                    tenant.clinic_booking_mode = next_mode
+                    update_fields.append("clinic_booking_mode")
+                if "booking_interval_minutes" in request.data:
+                    tenant.clinic_booking_interval_minutes = next_interval
+                    update_fields.append("clinic_booking_interval_minutes")
+                if "booking_max_stay_minutes" in request.data:
+                    tenant.clinic_booking_max_stay_minutes = next_max_stay
+                    update_fields.append("clinic_booking_max_stay_minutes")
 
             colors = request.data.get("colors")
             if colors is not None:
