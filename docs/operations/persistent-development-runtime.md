@@ -237,11 +237,31 @@ allowlist된 `failure_stage`, exception type, request `tenant_id`, 다섯 numeri
 
 영상 분기를 켠 Setup은 별도 `video_state`에 `videos=1`,
 `video_accesses=2`, `proctored_video_accesses=2`를 반환하고 progress/session/event와
-PLAYER_ERROR/위반 수가 모두 0임을 검증한다. Inspect는 같은 키를 현재 숫자로만
-반환한다. Cleanup과 이미 부재한 cleanup은 soft-delete 포함 영상, 권한, 진도,
+PLAYER_ERROR/위반 수가 모두 0임을 검증한다. Inspect의 `video_state`는 soft-delete를
+포함한 tenant 전체의 같은 키를 현재 숫자로 반환한다. 다른 실사용 흐름이 만든 뒤
+soft-delete한 학습 영상도 여기에 포함되므로 단일 장시간 영상의 성공 수치로 쓰지 않는다.
+장시간 재생 뒤 Inspect만 Setup에서 반환한 exact positive `TenantId`와 `VideoId`를
+함께 보낸다. `VideoId`는 기본 `0`인 정수 문자열이며 양수는 `Inspect`와
+`SyntheticLongVideo=true`, positive `TenantId` 조합에서만 허용한다. 서버는 해당
+tenant code/PK, 영상 PK, 비삭제 상태 및 고정 synthetic metadata identity를 검증한 뒤
+그 영상만의 `synthetic_video_state`와 검증된 `synthetic_video_id`를 별도로 반환한다.
+해당 ID가 없거나 다른 tenant, soft-delete된 대상, 다른 영상 identity면 실패한다.
+이 조회는 기존 Inspect의 DB transaction 안에서 실행하며, tenant 전체 집계나
+creation/cleanup capability 권한을 대체하지 않는다. frontend는 Setup ID echo를 확인하고
+기존 영상 1/권한 2/진도 2/session 4/active·error·violation 0 조건을 그대로 적용한다.
+숫자 관측은 frontend가 assertion 전에 allowlist로 보존하며 원문 응답이나 비밀값은 남기지 않는다.
+
+Cleanup과 이미 부재한 cleanup은 계속 soft-delete 포함 tenant 전체 영상, 권한, 진도,
 재생 session/event, 활성 session, PLAYER_ERROR, 위반 event가 전부 0인
 `video_residue`를 요구한다. 이름·전화·로그인 ID 같은 사용자 값은 이 readback에
 포함하지 않는다.
+회귀는 기존 scenario command DB 테스트의 두 학생 정상 재생+잔존 학습 영상 혼재,
+잘못된/다른 tenant/삭제 대상 거부와 전체 cleanup 0, 고정 문서의 offline Inspect
+control-flow 테스트가 소유한다. 합성 입력 회귀는 과거 실패 실행의 누락된 runtime
+payload를 복구한 증거가 아니며 다른 수치 불일치 가능성도 배제하지 않는다.
+이 계약의 적용에는 새 command가 들어간 API candidate의 공식 배포와 검토된 고정 SSM
+문서 버전의 적용·readback이 모두 필요하다. 문서 파일/로컬 테스트 통과만으로 live 적용이나
+공식 frontend gate 성공을 주장하지 않는다. IAM grant·신뢰·포트·timeout 변경은 없다.
 
 이 경계는 생성 요청자가 보유한 capability의 증명이며 GitHub JWT의 run claim을 서버가
 직접 검증한 것은 아니다. 원문 capability는 runner 메모리와 고정 SSM parameter로만

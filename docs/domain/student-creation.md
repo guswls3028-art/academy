@@ -1,7 +1,7 @@
 # 학생 생성 SSOT
 
 **상태:** Active  
-**최종 점검:** 2026-09-10
+**최종 점검:** 2026-09-12
 **코드 기준:** `apps/domains/students/services/creation.py`, `apps/domains/students/services/registration_approval.py`, `apps/domains/students/services/import_students.py`, `apps/domains/students/services/import_passwords.py`, `apps/domains/students/services/custom_fields.py`, `apps/domains/students/views/student_views.py`, `apps/domains/students/views/registration_views.py`, `apps/domains/students/services/lecture_enroll.py`, `apps/domains/students/services/bulk_from_excel.py`
 
 ## 1. 책임 경계
@@ -28,6 +28,10 @@
 - HTTP 응답 모양
 
 가입 신청 승인의 durable orchestration SSOT는 `approve_registration_request()`다. 이 서비스는 `pending -> approved` 전이와 학생 계정 생성 그래프 호출을 하나의 트랜잭션으로 처리한다. 승인만으로 알림톡을 보내지 않으며, 첫 수강 확정 후 발송할 비밀번호 안내 문구를 암호화해 학생에 staging한다.
+
+가입 신청 목록의 자동 승인 설정은 `GET/PATCH /api/v1/students/registration_requests/settings/`가 소유한다. 인증된 현재 테넌트의 활성 owner/admin/staff/teacher만 조회·수정할 수 있다. `PATCH`의 `auto_approve`는 기존 `parse_bool` 계약을 따르며, `false`는 해제이고 `null` 또는 필드 생략은 변경하지 않는다. 실제 DB 저장을 완료한 경우에만 `200 {"auto_approve": bool}`을 반환한다. 저장 중 예외가 발생하면 해당 저장을 rollback하고 요청의 테넌트 객체도 이전 값으로 복원한 뒤 `503`, `code=registration_settings_save_failed`, 재시도 안내를 반환한다. 예외 상세는 응답에 노출하지 않고 서버에 같은 오류 코드·tenant ID·exception traceback을 기록한다. 관리자 가입 신청 목록 화면은 실패 응답에서 기존 조회 캐시를 유지하고 오류를 표시하므로 저장되지 않은 설정을 성공으로 표시하지 않는다. 재시도 성공 후 GET/새로고침은 저장값을 읽으며, 이후의 신규 가입만 그 값에 따라 승인 또는 대기 처리된다. 설정 변경 자체는 기존 대기 신청을 승인하거나 계정을 만들거나 알림톡을 보내지 않는다. 테넌트별 공개 가입 허용 정책과 타 테넌트 접근 금지는 변경하지 않는다.
+
+설정 회귀 검증의 진입점은 `apps/domains/students/tests/test_registration_settings.py`다. 실제 DRF 요청으로 저장 전 실패·저장 후 예외 rollback·안전 오류 및 서버 로그·재시도 후 GET과 신규 가입 승인·해제 후 대기·bool/null·역할/테넌트 경계를 검증하며, 기존 SQLite 및 PostgreSQL 전체 CI의 `apps/domains` 수집 경로에 포함된다. 실제 화면 검증은 가입 신청 목록에서 토글 → 저장 결과 → 새로고침 → 합성 신규 가입의 승인/대기 결과를 확인한다. 로컬 API 테스트만으로 이 화면 검증이나 운영 반영을 완료 처리하지 않는다.
 
 학생 등록 Excel/import/JSON bulk row orchestration SSOT는 `import_students_from_rows()`, `resolve_student_import_row()`, `resolve_student_import_conflicts()`다. 이 서비스는 학생 등록 행의 중복/복원/생성 판단, school_level_mode 검증, 계정 그래프 호출, 첫 수강용 계정 안내 staging, delete-and-recreate conflict resolution을 소유한다. R2 업로드, AI job dispatch, HTTP 응답 모양은 여전히 view/worker compatibility boundary다. 강의/차시 Excel 수강등록은 이 생성 경계를 호출하지 않고 `lecture_enroll_from_excel_rows()`가 같은 테넌트의 활성 학생만 조회한다. 학생번호가 있으면 같은 tenant의 exact `ps_number`를 최우선 사용하며, 공란일 때만 exact 이름과 숫자로 정규화한 학부모 전화번호 조합을 사용한다. `김지우a/b/1/2` 같은 이름 suffix는 서로 다른 이름이고, 형제·쌍둥이가 학부모 전화번호만 공유하는 것은 중복이 아니다. 학생 전화번호는 이 매칭 조건이 아니다. 후보 행을 잠근 상태에서 정확히 한 명일 때만 등록하며 같은 fallback 식별자의 활성 학생이 복수이면 임의 선택하지 않는다. 학생-only Excel과 강의/차시 Excel 파일은 dispatch 직전에 tenant별 R2 Excel key로 업로드한다. Dispatch가 동기적으로 거절되거나 예외로 끝나면 각 view는 자신이 방금 업로드한 exact key를 즉시 삭제하고, cleanup 자체가 실패해도 원래 dispatch 실패를 성공으로 바꾸지 않는다. DB commit 뒤 SQS publish가 거절되어 최초 HTTP 응답이 이미 수락된 경우에도 gateway가 `source_domain=enrollment`, 일치하는 tenant/bucket, `excel/<tenant>/<32자 hex>.xlsx` 생성 규칙을 모두 만족하는 exact key만 삭제한다. 다른 Excel job이나 임의 key는 이 보상을 적용하지 않는다. 정상 publish가 수락된 파일의 후속 삭제는 worker lifecycle이 계속 소유한다.
 

@@ -74,6 +74,7 @@ backend/docs/
 | 수동 정식 배포 | [operations/formal-deploy.md](operations/formal-deploy.md) |
 | 동시 Codex 세션 격리·정리 | [operations/concurrent-codex-sessions.md](operations/concurrent-codex-sessions.md) |
 | 변경 위험 라우팅·교차 저장소 릴리스 증거 | [operations/change-risk-and-release-bundle.md](operations/change-risk-and-release-bundle.md) |
+| 실패 은폐·정상 이용 복구 후보와 수리 상태 | [refactor/failure-transparency-stabilization.md](refactor/failure-transparency-stabilization.md) |
 | 운영 canary·E2E 잔재 정리 | [operations/production-canary.md](operations/production-canary.md) |
 | 개발자 문의 운영함 | [operations/dev-console-inbox.md](operations/dev-console-inbox.md) |
 | 읽기 전용 상태 모순 검사·전달 영수증 | [operations/state-integrity-monitor.md](operations/state-integrity-monitor.md) |
