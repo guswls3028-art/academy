@@ -1,4 +1,5 @@
 
+import logging
 import uuid
 from datetime import timezone as datetime_timezone
 
@@ -41,6 +42,9 @@ from ..serializers import (
     PlaybackRenewResponseSerializer,
     PlaybackEventBatchRequestSerializer,
     PlaybackEventBatchResponseSerializer,
+    PlaybackV2EventsRequestSerializer,
+    PlaybackV2EndRequestSerializer,
+    PlaybackV2ResponseSerializer,
 )
 from ..drm import create_playback_token, verify_playback_token
 from ..services.playback_session import (
@@ -53,6 +57,8 @@ from ..services.playback_session import (
     should_revoke_by_stats,
 )
 from .playback_mixin import VideoPlaybackMixin
+
+logger = logging.getLogger(__name__)
 
 
 # ----------------------------------------------------------
@@ -209,6 +215,36 @@ def _session_db_status(session_id: str):
     )
 
 
+def _playback_protocol_error(payload, request, *, legacy_only=False):
+    claim = payload.get("event_protocol_version", 1)
+    if type(claim) is not int or claim not in (1, 2):
+        return "event_protocol_mismatch"
+    if legacy_only and claim == 2:
+        return "event_protocol_mismatch"
+    sid = payload.get("session_id")
+    if not sid:
+        return "event_protocol_mismatch" if claim == 2 else None
+    stored = VideoPlaybackSession.objects.filter(session_id=sid).values_list("event_protocol_version", flat=True).first()
+    if stored is not None and claim != stored:
+        return "event_protocol_mismatch"
+    if claim == 2:
+        if stored is None:
+            return "session_inactive"
+        if payload.get("monitoring_enabled") is not True:
+            return "event_protocol_mismatch"
+        from apps.domains.student_app.permissions import get_request_student
+        from rest_framework.exceptions import PermissionDenied
+
+        student = get_request_student(request)
+        if student is None or student.id != payload.get("student_id") or not VideoPlaybackSession.objects.filter(
+            session_id=sid, video_id=payload.get("video_id"), enrollment_id=payload.get("enrollment_id"),
+            video__tenant_id=request.tenant.id, enrollment__tenant_id=request.tenant.id,
+            enrollment__student_id=student.id,
+        ).exists():
+            raise PermissionDenied("session_scope_mismatch")
+    return None
+
+
 def _db_session_is_inactive(st: str | None) -> bool:
     return st in (VideoPlaybackSession.Status.REVOKED, VideoPlaybackSession.Status.EXPIRED)
 
@@ -293,6 +329,7 @@ class PlaybackStartView(VideoPlaybackMixin, APIView):
             user=request.user,
             device_id=device_id,
             request_id=request_id,
+            event_protocol_version=serializer.validated_data["event_protocol_version"],
         )
         if not grant.token or not grant.access_mode:
             return _deny(
@@ -324,6 +361,7 @@ class PlaybackStartView(VideoPlaybackMixin, APIView):
                 "expires_at": expires_at,
                 "access_mode": access_mode.value,
                 "monitoring_enabled": monitoring_enabled,
+                "event_protocol_version": grant.event_protocol_version,
                 "policy": policy,
                 "play_url": play_url,
             }).data,
@@ -357,6 +395,9 @@ class PlaybackRefreshView(APIView):
         binding_error = _playback_token_request_error(payload, request)
         if binding_error:
             return _deny(binding_error, code=403)
+        protocol_error = _playback_protocol_error(payload, request)
+        if protocol_error:
+            return _deny(protocol_error, code=409)
 
         if not _is_policy_token_valid(payload):
             return _deny("policy_changed", code=403)
@@ -397,6 +438,9 @@ class PlaybackRenewView(APIView):
         binding_error = _playback_token_request_error(payload, request)
         if binding_error:
             return _deny(binding_error, code=403)
+        protocol_error = _playback_protocol_error(payload, request)
+        if protocol_error:
+            return _deny(protocol_error, code=409)
 
         try:
             video = video_repo.video_get_by_id_with_relations(int(payload.get("video_id")))
@@ -622,10 +666,11 @@ class PlaybackRenewView(APIView):
                     buffer_heartbeat_session_ttl,
                 )
 
-                buffer_heartbeat_session_ttl(
-                    session_id=session_id,
-                    ttl_seconds=max(1, expires_at - now_timestamp),
-                )
+                if playback_session.event_protocol_version == 1:
+                    buffer_heartbeat_session_ttl(
+                        session_id=session_id,
+                        ttl_seconds=max(1, expires_at - now_timestamp),
+                    )
 
         response_payload = {
             "ok": True,
@@ -635,6 +680,7 @@ class PlaybackRenewView(APIView):
             "access_mode": access_mode.value,
             "monitoring_enabled": monitoring_enabled,
             "policy_version": _policy_version_of(current_video),
+            "event_protocol_version": payload.get("event_protocol_version", 1),
         }
         if renewed_play_url:
             response_payload["play_url"] = renewed_play_url
@@ -658,6 +704,9 @@ class PlaybackHeartbeatView(APIView):
         binding_error = _playback_token_request_error(payload, request)
         if binding_error:
             return _deny(binding_error, code=403)
+        protocol_error = _playback_protocol_error(payload, request)
+        if protocol_error:
+            return _deny(protocol_error, code=409)
 
         if not _is_policy_token_valid(payload):
             return _deny("policy_changed", code=403)
@@ -704,6 +753,9 @@ class PlaybackEndView(APIView):
         binding_error = _playback_token_request_error(payload, request)
         if binding_error:
             return _deny(binding_error, code=403)
+        protocol_error = _playback_protocol_error(payload, request, legacy_only=True)
+        if protocol_error:
+            return _deny(protocol_error, code=409)
 
         # FREE_REVIEW: Skip DB operations
         monitoring_enabled = payload.get("monitoring_enabled")
@@ -738,6 +790,9 @@ class PlaybackEventBatchView(APIView):
         binding_error = _playback_token_request_error(payload, request)
         if binding_error:
             return _deny(binding_error, code=403)
+        protocol_error = _playback_protocol_error(payload, request, legacy_only=True)
+        if protocol_error:
+            return _deny(protocol_error, code=409)
 
         if not _is_policy_token_valid(payload):
             return _deny("policy_changed", code=403)
@@ -871,3 +926,54 @@ class PlaybackEventBatchView(APIView):
             PlaybackEventBatchResponseSerializer({"stored": len(objs)}).data,
             status=201,
         )
+
+
+def _apply_v2_request(request, *, finalize):
+    from apps.domains.student_app.permissions import get_request_student
+    from ..services.playback_event_batch import PlaybackBatchError, apply_event_batches
+
+    if len(request.body) > 48 * 1024:
+        return _deny("batch_too_large", code=413)
+    serializer_type = PlaybackV2EndRequestSerializer if finalize else PlaybackV2EventsRequestSerializer
+    serializer = serializer_type(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    ok, payload, err = verify_playback_token(serializer.validated_data["token"])
+    if not ok:
+        return _deny(err)
+    binding_error = _playback_token_request_error(payload, request)
+    if binding_error:
+        return _deny(binding_error)
+    if payload.get("event_protocol_version") != 2:
+        return _deny("event_protocol_mismatch", code=409)
+    student = get_request_student(request)
+    if student is None or student.id != payload.get("student_id"):
+        return _deny("token_student_mismatch")
+    batches = serializer.validated_data["batches"] if finalize else [serializer.validated_data["batch"]]
+    try:
+        result = apply_event_batches(
+            tenant_id=request.tenant.id, user_id=request.user.id, student_id=student.id,
+            payload=payload, batches=batches, finalize=finalize,
+        )
+    except PlaybackBatchError as exc:
+        return _deny(exc.detail, code=exc.status_code)
+    except Exception:
+        request_id = _req_id()
+        logger.exception("PLAYBACK_V2_WRITE_FAILED request_id=%s", request_id)
+        return Response({"detail": "playback_events_unavailable", "request_id": request_id}, status=503)
+    return Response(PlaybackV2ResponseSerializer(result).data, status=200 if finalize else 201)
+
+
+class PlaybackV2EventBatchView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(request=PlaybackV2EventsRequestSerializer, responses={201: PlaybackV2ResponseSerializer})
+    def post(self, request):
+        return _apply_v2_request(request, finalize=False)
+
+
+class PlaybackV2EndView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(request=PlaybackV2EndRequestSerializer, responses={200: PlaybackV2ResponseSerializer})
+    def post(self, request):
+        return _apply_v2_request(request, finalize=True)

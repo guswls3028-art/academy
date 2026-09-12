@@ -26,6 +26,7 @@ class PlaybackAccessGrant:
     access_mode: str | None = None
     monitoring_enabled: bool = False
     policy_version: int | None = None
+    event_protocol_version: int = 1
     error: str | None = None
     status_code: int = 403
 
@@ -225,6 +226,7 @@ def issue_playback_access_grant(
     user,
     device_id: str,
     request_id: str | None = None,
+    event_protocol_version: int = 1,
 ) -> PlaybackAccessGrant:
     """Atomically issue current access and a monitored session when required."""
     from academy.adapters.db.django import repositories_video as video_repo
@@ -242,6 +244,8 @@ def issue_playback_access_grant(
         issue_session,
     )
 
+    if type(event_protocol_version) is not int or event_protocol_version not in (1, 2):
+        raise ValueError("unsupported playback event protocol")
     lecture_id = getattr(getattr(video, "session", None), "lecture_id", None)
     tenant_id = getattr(video, "tenant_id", None) or getattr(enrollment, "tenant_id", None)
     if not lecture_id or not tenant_id:
@@ -356,7 +360,9 @@ def issue_playback_access_grant(
                 violated_count=0,
                 total_count=0,
                 is_revoked=False,
+                event_protocol_version=event_protocol_version,
             )
+        selected_event_protocol = event_protocol_version if monitoring_enabled else 1
         token_payload = {
             "video_id": current_video.id,
             "enrollment_id": locked_enrollment.id,
@@ -366,6 +372,7 @@ def issue_playback_access_grant(
             "tenant_id": tenant_id,
             "access_mode": access_mode.value,
             "monitoring_enabled": monitoring_enabled,
+            "event_protocol_version": selected_event_protocol,
             "pv": int(getattr(current_video, "policy_version", 1) or 1),
         }
         if request_id:
@@ -378,7 +385,7 @@ def issue_playback_access_grant(
         except ValueError:
             transaction.set_rollback(True)
             return PlaybackAccessGrant(error="access_expired")
-        if playback_session_id:
+        if playback_session_id and selected_event_protocol == 1:
             redis_ttl = ttl
             if inactive_expires_at is not None:
                 redis_ttl = inactive_expires_at - int(timezone.now().timestamp())
@@ -395,6 +402,7 @@ def issue_playback_access_grant(
             expires_at=expires_at,
             access_mode=access_mode.value,
             monitoring_enabled=monitoring_enabled,
+            event_protocol_version=selected_event_protocol,
             policy_version=int(getattr(current_video, "policy_version", 1) or 1),
         )
 

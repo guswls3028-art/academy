@@ -10,6 +10,7 @@ from .models import (
     InactiveVideoEntitlement,
     VideoProgress,
     VideoPlaybackEvent,
+    VideoPlaybackSession,
     VideoFolder,
 )
 from .encoding_progress import (
@@ -499,6 +500,7 @@ class VideoProgressSerializer(serializers.ModelSerializer):
 class PlaybackStartRequestSerializer(serializers.Serializer):
     enrollment_id = serializers.IntegerField()
     device_id = serializers.CharField(max_length=128)
+    event_protocol_version = serializers.ChoiceField(choices=[1, 2], default=1)
 
 
 class PlaybackRefreshRequestSerializer(serializers.Serializer):
@@ -515,6 +517,7 @@ class PlaybackEndRequestSerializer(serializers.Serializer):
 
 class PlaybackResponseSerializer(serializers.Serializer):
     token = serializers.CharField()
+    event_protocol_version = serializers.ChoiceField(choices=[1, 2], default=1)
     session_id = serializers.CharField(allow_null=True, required=False)  # None for FREE_REVIEW
     expires_at = serializers.IntegerField(allow_null=True, required=False)  # None for FREE_REVIEW
     access_mode = serializers.ChoiceField(
@@ -528,6 +531,7 @@ class PlaybackResponseSerializer(serializers.Serializer):
 
 class PlaybackRenewResponseSerializer(serializers.Serializer):
     ok = serializers.BooleanField()
+    event_protocol_version = serializers.ChoiceField(choices=[1, 2], default=1)
     playback_token = serializers.CharField()
     playback_session_id = serializers.CharField(allow_null=True)
     playback_expires_at = serializers.IntegerField()
@@ -558,6 +562,71 @@ class PlaybackEventBatchRequestSerializer(serializers.Serializer):
 
 class PlaybackEventBatchResponseSerializer(serializers.Serializer):
     stored = serializers.IntegerField()
+
+
+class PlaybackV2StrictSerializer(serializers.Serializer):
+    def to_internal_value(self, data):
+        if isinstance(data, dict) and set(data) - set(self.fields):
+            raise serializers.ValidationError({"non_field_errors": ["알 수 없는 재생 기록 필드입니다."]})
+        return super().to_internal_value(data)
+
+
+class PlaybackV2EventSerializer(PlaybackV2StrictSerializer):
+    type = serializers.ChoiceField(choices=VideoPlaybackEvent.EventType.choices)
+    occurred_at = serializers.IntegerField(required=False)
+    payload = serializers.JSONField(default=dict)
+
+    def validate_payload(self, value):
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("이벤트 내용은 객체여야 합니다.")
+        return value
+
+
+class PlaybackV2BatchSerializer(PlaybackV2StrictSerializer):
+    batch_id = serializers.UUIDField()
+    events = PlaybackV2EventSerializer(many=True, allow_empty=False, max_length=50)
+
+    def validate(self, attrs):
+        from .services.playback_event_batch import normalized_batch_bytes
+
+        try:
+            size = len(normalized_batch_bytes(attrs))
+        except (TypeError, ValueError):
+            raise serializers.ValidationError("이벤트 내용은 유효한 JSON이어야 합니다.")
+        if size > 8 * 1024:
+            raise serializers.ValidationError("재생 기록 배치가 8KiB를 초과했습니다.")
+        return attrs
+
+
+class PlaybackV2EventsRequestSerializer(PlaybackV2StrictSerializer):
+    token = serializers.CharField()
+    batch = PlaybackV2BatchSerializer()
+
+
+class PlaybackV2EndRequestSerializer(PlaybackV2StrictSerializer):
+    token = serializers.CharField()
+    batches = PlaybackV2BatchSerializer(many=True, allow_empty=True, max_length=8)
+
+    def validate_batches(self, value):
+        ids = [batch["batch_id"] for batch in value]
+        if len(ids) != len(set(ids)):
+            raise serializers.ValidationError("종료 요청에 같은 배치가 중복되었습니다.")
+        if sum(len(batch["events"]) for batch in value) > 200:
+            raise serializers.ValidationError("종료 요청은 이벤트 200건까지 허용합니다.")
+        return value
+
+
+class PlaybackV2AcknowledgementSerializer(serializers.Serializer):
+    batch_id = serializers.UUIDField()
+    event_count = serializers.IntegerField()
+    duplicate = serializers.BooleanField()
+
+
+class PlaybackV2ResponseSerializer(serializers.Serializer):
+    protocol_version = serializers.IntegerField()
+    session_status = serializers.ChoiceField(choices=VideoPlaybackSession.Status.choices)
+    inserted_count = serializers.IntegerField()
+    acknowledgements = PlaybackV2AcknowledgementSerializer(many=True)
 
 
 # ========================================================
