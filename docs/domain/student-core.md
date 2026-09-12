@@ -419,7 +419,18 @@ The passcard keeps the unresolved `ClinicLink` verdict in `current_result` and r
 the separate `passcard_state` (`PASSED`, `CLINIC_REQUIRED`, or
 `BOOKING_CONFIRMED`). A future-or-today `booked` reservation yields
 `BOOKING_CONFIRMED` without resolving any `ClinicLink`. After check-in, `attended`
-keeps that state across local-date changes until `completed_at` is recorded. Completion
+keeps that state across local-date changes until `completed_at` is recorded, but only
+for assessments on or before the clinic's scheduled date. Every confirming or visible
+booking must be on or after the latest live unresolved assessment session date across
+the student's active enrollments. A session without a date uses the tenant-local date
+of its `ClinicLink.created_at`; an undated source must not permit unlimited reuse of
+old attendance. Same-date clinics remain supported because the assessment schedule
+owns a date, not an exam-end timestamp. An older attended clinic (including one with
+checkout recorded but no completion) cannot confirm a newer assessment. The API
+selects the next qualifying booking instead; no attendance, booking, score, or
+`ClinicLink` history is rewritten by this read projection. A future booking scheduled
+before a future assessment is also insufficient. Resolved, removed, or completed
+sources do not move the cutoff. Completion
 ends the booking state immediately: if any link is still unresolved, the student
 returns to `CLINIC_REQUIRED` until the next confirmed booking; if every link has been
 resolved, the state is `PASSED`. `cancelled`, `rejected`, and `no_show` never confirm
@@ -434,12 +445,19 @@ inherit this projection.
 `name_highlight_clinic_target` is the administrative projection of the same
 student-level state, not an independent attendance flag. It is `true` only while
 the student's passcard is `CLINIC_REQUIRED`. A confirmed future/today booking or an
-incomplete `attended` clinic changes the passcard to `BOOKING_CONFIRMED` and removes
+incomplete `attended` clinic that meets the same assessment-date cutoff changes the
+passcard to `BOOKING_CONFIRMED` and removes
 the yellow name highlight from every unresolved enrollment for that student.
 `pending` does not remove it. When clinic work receives `completed_at`, unresolved
 links make both the passcard and yellow highlight return immediately; resolving all
 links makes the passcard `PASSED` and keeps the highlight off. All projections use
 tenant-scoped student and enrollment relationships and fail closed on missing data.
+
+Regression entry: `apps.domains.clinic.tests.StudentClinicPermissionAPITest` exercises
+old attendance, a future booking before the assessment, same-day positive booking,
+reload consistency, and a later requirement in another active lecture. Both idcard
+and `compute_clinic_highlight_map` must agree while source and attendance rows remain
+unchanged.
 
 ### Staff student-support session and ended-lecture boundary
 

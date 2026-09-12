@@ -125,6 +125,31 @@ def unresolved_auto_clinic_links(
     return filter_current_clinic_links(clinic_links, tenant=tenant)
 
 
+def passcard_required_dates_by_student(*, tenant: Any, student_ids: set[int]) -> dict:
+    """Use all active enrollments, even for a single-session highlight request."""
+    from apps.domains.clinic.services.passcard_state import passcard_required_booking_date
+    from apps.domains.enrollment.selectors import enrollments_for_tenant
+
+    enrollment_students = dict(
+        enrollments_for_tenant(tenant).filter(
+            status="ACTIVE",
+            student_id__in=student_ids,
+            student__tenant=tenant,
+            lecture__tenant=tenant,
+        ).values_list("id", "student_id")
+    )
+    links_by_student: dict[int, list[Any]] = {}
+    for link in unresolved_auto_clinic_links(
+        tenant=tenant, enrollment_ids=list(enrollment_students),
+    ):
+        student_id = enrollment_students[link.enrollment_id]
+        links_by_student.setdefault(student_id, []).append(link)
+    return {
+        student_id: passcard_required_booking_date(links)
+        for student_id, links in links_by_student.items()
+    }
+
+
 def clinic_link_source_projection(
     *,
     tenant: Any,

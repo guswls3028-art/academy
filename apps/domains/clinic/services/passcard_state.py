@@ -11,6 +11,24 @@ from django.utils import timezone
 from apps.domains.clinic.models import SessionParticipant
 
 
+def passcard_required_booking_date(clinic_links: Iterable[Any]):
+    """The latest live assessment date, never the date an old clinic was booked."""
+    dates = [
+        link.session.date or timezone.localtime(link.created_at).date()
+        for link in clinic_links
+    ]
+    return max(dates, default=None)
+
+
+def passcard_booking_covers_requirements(*, participant, required_date) -> bool:
+    if required_date is None:
+        return True
+    schedule_date = (
+        participant.session.date if participant.session_id else participant.requested_date
+    )
+    return bool(schedule_date and schedule_date >= required_date)
+
+
 def _scheduled_booking_q(*, statuses: Iterable[str], local_date) -> Q:
     return Q(status__in=tuple(statuses)) & (
         Q(session__date__gte=local_date)
@@ -64,13 +82,25 @@ def passcard_confirmed_student_ids(
     normalized_ids = {int(student_id) for student_id in student_ids if student_id}
     if not normalized_ids:
         return set()
-    return set(
+    from apps.support.clinic.idcard_dependencies import passcard_required_dates_by_student
+
+    required_dates = passcard_required_dates_by_student(
+        tenant=tenant, student_ids=normalized_ids,
+    )
+    participants = (
         SessionParticipant.objects.filter(
             tenant=tenant,
             student_id__in=normalized_ids,
         )
         .filter(passcard_tenant_booking_q(tenant=tenant))
         .filter(passcard_confirming_booking_q(local_date=local_date))
-        .values_list("student_id", flat=True)
-        .distinct()
+        .select_related("session")
     )
+    return {
+        participant.student_id
+        for participant in participants
+        if passcard_booking_covers_requirements(
+            participant=participant,
+            required_date=required_dates.get(participant.student_id),
+        )
+    }

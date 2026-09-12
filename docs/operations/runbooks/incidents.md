@@ -21,9 +21,18 @@
 - 공용 `문제 신고` 모달 접수
 - 관리자·선생님 개발자 메뉴의 `[BUG]` 제보
 
-운영 알림 채널은 Slack webhook 하나다. `DEV_ALERTS_WEBHOOK_URL`이 없으면 외부 발송은
-하지 않고, 경고 발견 여부와 관계없이 명령을 실패 종료한다. 수신처 없이 평가만 하는
-명시적 `--dry-run`은 허용하지만 외부 알림 정상 동작의 증거가 아니다. SMS/LMS 설정, 실발송 테스트,
+운영 알림 채널은 Slack webhook 하나다. 채널을 사용하지 않는 상태에서는
+`DEV_ALERTS_WEBHOOK_URL`과 `DEV_ALERTS_WEBHOOK_REQUIRED=false`를 함께 유지한다.
+무경고 실행과 일반 운영 룰만 발생한 실행은 외부 발송 없이 평가하고, 감사 로그
+payload에 `delivery_status=not_configured`를 남긴다. 그러나 `user_incidents`가
+한 건이라도 발생하면 `required` 값과 무관하게 종료 코드 1과
+`cron.check_dev_alerts.result=failed`를 남긴다. 수신처가 실제로 성공 응답하기 전에는
+사용자 민원을 성공 처리하지 않는다. 채널을 활성화할 때는
+`scripts/v1/set-dev-alerts-webhook.ps1`로 URL과 required 상태를 함께 바꾼다.
+`DEV_ALERTS_WEBHOOK_REQUIRED=true`인데 URL이 없으면 명령은 실패 종료한다.
+수신처 없이 평가만 하는 명시적 `--dry-run`은 허용하지만 외부 알림 정상 동작의
+증거가 아니다. dry-run에서 `user_incidents`가 발견되면 발송하거나 fingerprint를
+소비하지 않되, 수신 미확인 실행이므로 종료 코드 1과 실패 감사를 남긴다. SMS/LMS 설정, 실발송 테스트,
 CloudWatch transition 문자 발송 예외는 모두 제거되었다. 운영 장애용으로 승인된 공용
 카카오 템플릿이 없으므로 이 경로를 임의의 알림톡으로 대체하지 않고 fail-closed한다.
 
@@ -34,13 +43,16 @@ fingerprint를 소비하지 않는다. 폐기 전 SMS가 남긴
 `OpsAuditLog(action=alerts.user_incident_sms)`는 기존 2일 중복 억제와 사고 이력
 조회에만 읽으며, 새 SMS provider 호출이나 재조회·재시도에는 사용하지 않는다.
 
-명령은 알 수 없는 `--rule`, 어느 룰이든 평가 오류, webhook 미설정·전송 실패를
+명령은 알 수 없는 `--rule`, 어느 룰이든 평가 오류, 필수 webhook 미설정·전송 실패를
 종료 코드 1과 `cron.check_dev_alerts.result=failed`로 기록한다. 일부 룰 평가가
 실패해도 나머지 정상 평가된 경고의 전송은 시도하며, 수락된 사용자 오류만
 fingerprint를 소비한다. 실패한 전체 검사를 `All clear`로 출력하지 않는다.
 `--silent`는 정상 무경고 출력만 억제하며 실패를 성공으로 바꾸지 않는다.
-`--dry-run`도 검사 오류는 실패한다. 감사 기록 자체를 저장할 수 없어도 명령은
+`--dry-run`도 검사 오류나 미발송 사용자 민원이 있으면 실패한다. 감사 기록 자체를 저장할 수 없어도 명령은
 실패 종료하며, 예외 원문·webhook URL 대신 고정 사유와 예외 종류만 남긴다.
+`audit_failed_24h`는 `cron.check_dev_alerts` 자체의 실패를 제외한다. 크론 실패는
+GitHub 실행과 해당 감사 로그에서 직접 관측하고, 그 실패가 다시 같은 크론의 실패
+임계치를 키우지는 않는다.
 
 무경고 실행은 수신처가 설정되어 있어도 불필요한 시험 메시지를 보내지 않는다.
 따라서 성공 실행은 해당 검사 완료의 근거이며, Slack 실수신 확인과 같지 않다.
@@ -50,6 +62,28 @@ fingerprint를 소비한다. 실패한 전체 검사를 `All clear`로 출력하
 회귀 검증: `apps/core/tests/test_dev_alerts_command.py`와
 `apps/core/tests/test_user_incident_monitoring.py`에서 수신처 누락, 평가 실패,
 전송 실패, dry-run, 성공 후 중복 억제, 민감정보 비노출을 검증한다.
+
+`work_record_date_anomalies` 룰은 최근 35일의 급여관리자 수기 생성·수정 감사를
+검사한다. 생성 로컬 날짜와 다른 매월 1일에 추가됐거나, PATCH로 날짜 또는 직원이
+옮겨진 결과가 같은 테넌트·같은 날짜의 서로 다른 직원 2명 이상에 남아 있는 경우에만
+검토 경고를 낸다. 수정 경고에는 record ID와 이전/이후 날짜·직원 ID를 함께 싣는다.
+이는 날짜 오류 확정이나 자동 정정이 아니다. 정상적인 단일 과거 입력은 경고하지
+않으며, 삭제되었거나 다른 날짜로 정정된 행도 현재 상태 재확인에서 제외한다.
+이 급여 검토 경고는 사용자 민원과 같은 필수 전달 신호다. 경고가 있는데 webhook이
+없거나 dry-run이라 전달되지 않으면 명령과 `cron.check_dev_alerts` 감사는 실패한다.
+Slack 수락 뒤에는 tenant/date, 현재 record/staff ID 및 각 기록의 최신 유효 날짜·직원
+변경 감사 ID의 PII 없는 fingerprint를 `alerts.work_record_date_slack`에 기록해 같은
+사건을 반복 발송하지 않는다. 한 번의 Slack 메시지에 표시되는 최대 5개 그룹만
+전송 완료로 기록하며, 남은 그룹은 다음 실행에서 이어서 알린다. fingerprint 영수증의
+보존 기간은 해당 검사에 요청한 조회 기간과 같다. 새 의심 행이 추가되어 집합이
+바뀌거나 같은 기록에 새 날짜·직원 변경이 발생하면 다시 경고한다. 직원 변경이
+이후 되돌아와 같은 전후 값으로 재발해도 새 감사 ID로 구분한다. 변경 없는 반복
+검사나 금액·메모만의 수정은 새 날짜·직원 사건으로 취급하지 않는다.
+이전 버전은 수기 생성·삭제 감사를 남기지 않았으므로 날짜·시간·금액만으로 실제
+근무일을 추정해 복구하지 않는다. 원본 출퇴근 자료나 독립적인 사용자 확인이 있을
+때만 정확한 record ID를 대상으로 정정한다. 회귀 계약은
+`apps/core/tests/test_work_record_date_alerts.py`와
+`apps/domains/staffs/tests/test_work_record_audit.py`가 소유한다.
 
 5xx 폭주가 장애 중 DB 부하를 증폭하지 않도록 같은 테넌트·경로·오류 유형은 API
 프로세스별 60초에 1건만 bounded 비동기 큐로 감사 로그에 저장한다. 사용자 응답은
