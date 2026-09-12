@@ -731,6 +731,189 @@ class ClinicConversionPostgresConcurrencyTest(TransactionTestCase, ClinicAPITest
         self.assertEqual(set(responses), {"create", "change"})
         return responses
 
+    def _race_new_reservation_with_session_patch(self, new_reservation_writer):
+        participant_created = threading.Event()
+        patch_has_tenant = threading.Event()
+        responses = {}
+        errors = []
+        student = self.data["students"][0]
+        tenant_model = self.tenant.__class__
+        original_participant_create = SessionParticipant.objects.create
+        original_get = QuerySet.get
+
+        def gate_after_participant_create(*args, **kwargs):
+            participant = original_participant_create(*args, **kwargs)
+            if threading.current_thread().name == "clinic-new-reservation":
+                participant_created.set()
+                if not patch_has_tenant.wait(10):
+                    raise AssertionError("session patch did not lock the tenant")
+            return participant
+
+        def observe_patch_tenant_lock(queryset, *args, **kwargs):
+            result = original_get(queryset, *args, **kwargs)
+            if (
+                threading.current_thread().name == "clinic-session-patch"
+                and queryset.model is tenant_model
+                and queryset.query.select_for_update
+            ):
+                patch_has_tenant.set()
+            return result
+
+        def create_new_reservation():
+            close_old_connections()
+            try:
+                client = APIClient()
+                client.force_authenticate(user=student.user)
+                responses["create"] = new_reservation_writer(client, self.session)
+            except Exception as exc:  # pragma: no cover - asserted by caller
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        def patch_session():
+            close_old_connections()
+            try:
+                if not participant_created.wait(10):
+                    raise AssertionError("new reservation did not create its participant")
+                client = APIClient()
+                client.force_authenticate(user=self.data["admin_user"])
+                responses["patch"] = client.patch(
+                    f"/api/v1/clinic/sessions/{self.session.id}/",
+                    {"title": "FK-compatible patch"},
+                    format="json",
+                    **self._headers(self.tenant),
+                )
+            except Exception as exc:  # pragma: no cover - asserted by caller
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        with (
+            patch.object(
+                SessionParticipant.objects,
+                "create",
+                side_effect=gate_after_participant_create,
+            ),
+            patch.object(QuerySet, "get", observe_patch_tenant_lock),
+            patch(
+                "apps.domains.clinic.views.participant_views._send_clinic_notification",
+                return_value={"requested": 2, "failed": 0, "send_to": "both"},
+            ),
+        ):
+            threads = [
+                threading.Thread(
+                    target=create_new_reservation,
+                    name="clinic-new-reservation",
+                ),
+                threading.Thread(target=patch_session, name="clinic-session-patch"),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=20)
+
+        self.assertFalse(any(thread.is_alive() for thread in threads), "race threads hung")
+        self.assertEqual(errors, [])
+        self.assertEqual(set(responses), {"create", "patch"})
+        return responses
+
+    def _race_new_reservation_with_conversion(self):
+        participant_created = threading.Event()
+        conversion_has_tenant = threading.Event()
+        token = self._dry_run_token()
+        responses = {}
+        conversion_outcomes = []
+        errors = []
+        student = self.data["students"][0]
+        original_participant_create = SessionParticipant.objects.create
+        original_exact_tenant = convert_limglish_clinic_time_ranges._exact_tenant
+
+        def gate_after_participant_create(*args, **kwargs):
+            participant = original_participant_create(*args, **kwargs)
+            if threading.current_thread().name == "clinic-new-reservation":
+                participant_created.set()
+                if not conversion_has_tenant.wait(10):
+                    raise AssertionError("conversion did not lock the tenant")
+            return participant
+
+        def observe_conversion_tenant_lock(*args, **kwargs):
+            tenant = original_exact_tenant(*args, **kwargs)
+            if threading.current_thread().name == "clinic-conversion":
+                conversion_has_tenant.set()
+            return tenant
+
+        def create_new_reservation():
+            close_old_connections()
+            try:
+                client = APIClient()
+                client.force_authenticate(user=student.user)
+                responses["create"] = client.post(
+                    "/api/v1/clinic/participants/",
+                    {"session": self.session.id},
+                    format="json",
+                    **self._headers(self.tenant),
+                )
+            except Exception as exc:  # pragma: no cover - asserted by caller
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        def convert():
+            close_old_connections()
+            try:
+                if not participant_created.wait(10):
+                    raise AssertionError("new reservation did not create its participant")
+                call_command(
+                    "convert_limglish_clinic_time_ranges",
+                    "--from-date",
+                    self.from_date.isoformat(),
+                    "--execute",
+                    "--confirm",
+                    token,
+                    stdout=StringIO(),
+                )
+            except CommandError as exc:
+                conversion_outcomes.append(str(exc))
+            except Exception as exc:  # pragma: no cover - asserted by caller
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        with (
+            patch.object(
+                SessionParticipant.objects,
+                "create",
+                side_effect=gate_after_participant_create,
+            ),
+            patch.object(
+                convert_limglish_clinic_time_ranges,
+                "_exact_tenant",
+                side_effect=observe_conversion_tenant_lock,
+            ),
+            patch(
+                "apps.domains.clinic.views.participant_views._send_clinic_notification",
+                return_value={"requested": 2, "failed": 0, "send_to": "both"},
+            ),
+        ):
+            threads = [
+                threading.Thread(
+                    target=create_new_reservation,
+                    name="clinic-new-reservation",
+                ),
+                threading.Thread(target=convert, name="clinic-conversion"),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=20)
+
+        self.assertFalse(any(thread.is_alive() for thread in threads), "race threads hung")
+        self.assertEqual(errors, [])
+        self.assertEqual(set(responses), {"create"})
+        self.assertEqual(len(conversion_outcomes), 1)
+        self.assertIn("--confirm does not match", conversion_outcomes[0])
+        return responses["create"]
+
     def test_concurrent_create_cannot_escape_conversion_plan(self):
         response = self._race_conversion_with_writer(lambda client: client.post(
             "/api/v1/clinic/sessions/",
@@ -850,3 +1033,21 @@ class ClinicConversionPostgresConcurrencyTest(TransactionTestCase, ClinicAPITest
 
         self.assertEqual(responses["create"].status_code, 201)
         self.assertEqual(responses["change"].status_code, 200)
+
+    def test_single_create_and_conversion_use_fk_compatible_tenant_lock(self):
+        response = self._race_new_reservation_with_conversion()
+
+        self.assertEqual(response.status_code, 201)
+
+    def test_bulk_create_and_session_patch_use_fk_compatible_tenant_lock(self):
+        responses = self._race_new_reservation_with_session_patch(
+            lambda client, session: client.post(
+                "/api/v1/clinic/participants/bulk-create/",
+                {"session_ids": [session.id]},
+                format="json",
+                **self._headers(self.tenant),
+            )
+        )
+
+        self.assertEqual(responses["create"].status_code, 201)
+        self.assertEqual(responses["patch"].status_code, 200)
