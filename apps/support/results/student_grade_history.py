@@ -10,6 +10,9 @@ from django.db.models import Max
 from django.db.models.functions import Coalesce
 
 from apps.domains.results.models import ExamAttempt, Result
+from apps.domains.results.services.omr_subjective_completion import (
+    pending_omr_result_ids_for_ids,
+)
 from apps.domains.results.utils.exam_achievement import compute_exam_achievement_bulk
 from apps.domains.results.utils.initial_exam_score import (
     load_initial_exam_scores,
@@ -165,6 +168,9 @@ def build_student_exam_history(
         if int(row["target_id"]) not in explicit_exam_ids
         or (int(row["enrollment_id"]), int(row["target_id"])) in explicit_target_pairs
     ]
+    pending_result_ids = pending_omr_result_ids_for_ids(
+        row["id"] for row in results
+    )
     exam_ids = list({row["target_id"] for row in results})
     initial_scores = load_initial_exam_scores(
         exam_ids=exam_ids,
@@ -243,6 +249,7 @@ def build_student_exam_history(
         canonical_rows.append({
             "result": result,
             "initial_score": initial_score,
+            "subjective_pending": int(result["id"]) in pending_result_ids,
             "exam_id": exam_id,
             "info": info,
             "session_id": session_meta.get("session_id"),
@@ -271,6 +278,7 @@ def build_student_exam_history(
                 "session": None,
             }
             for row in canonical_rows
+            if not row["subjective_pending"]
         ],
         use_session_filter=False,
         tenant=tenant,
@@ -282,7 +290,11 @@ def build_student_exam_history(
         exam_id = row["exam_id"]
         enrollment_id = result["enrollment_id"]
         achievement = achievements.get((int(enrollment_id), int(exam_id)), {})
-        is_not_submitted = achievement.get("meta_status") == "NOT_SUBMITTED"
+        subjective_pending = bool(row["subjective_pending"])
+        is_not_submitted = (
+            not subjective_pending
+            and achievement.get("meta_status") == "NOT_SUBMITTED"
+        )
         session_date = row["session_date"]
         exam_list.append({
             "_result_id": result["id"],
@@ -291,11 +303,17 @@ def build_student_exam_history(
             "exam_id": exam_id,
             "enrollment_id": enrollment_id,
             "title": row["info"]["title"],
-            "total_score": None if is_not_submitted else row["initial_score"].total_score,
+            "total_score": (
+                None
+                if is_not_submitted or subjective_pending
+                else row["initial_score"].total_score
+            ),
             "max_score": row["initial_score"].max_score,
-            "is_pass": achievement.get("is_pass"),
-            "achievement": achievement.get("achievement"),
-            "meta_status": achievement.get("meta_status"),
+            "is_pass": None if subjective_pending else achievement.get("is_pass"),
+            "achievement": None if subjective_pending else achievement.get("achievement"),
+            "meta_status": None if subjective_pending else achievement.get("meta_status"),
+            "grading_status": "subjective_pending" if subjective_pending else None,
+            "is_provisional": subjective_pending,
             "retake_count": retake_counts.get((enrollment_id, exam_id), 1),
             "session_id": row["session_id"],
             "session_title": row["session_title"],

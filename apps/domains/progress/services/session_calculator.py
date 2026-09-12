@@ -15,6 +15,7 @@ from apps.support.progress.session_calculator_dependencies import (
     get_exam_model,
     get_result_attempt_models,
     homework_score_exists,
+    pending_omr_result_ids,
 )
 
 
@@ -103,6 +104,7 @@ class SessionProgressCalculator:
                 target_id__in=[int(x) for x in exam_ids],
             )
         )
+        pending_result_ids = pending_omr_result_ids(results)
 
         if not results:
             meta = {
@@ -160,7 +162,16 @@ class SessionProgressCalculator:
         # `passed=False, score=None, no_result=True`로 두어야 세션 완료 전수 검사에서 누락되지 않는다.
         # (exam_ids=[1,2,3] 중 Result가 2개만 있는 상황에서, 남은 1개 시험이 미응시인데도
         #  나머지 2개 합격만으로 세션 완료로 판정되던 잠재 버그 방지.)
-        results_by_exam = {int(r.target_id): r for r in results}
+        pending_exam_ids = {
+            int(result.target_id)
+            for result in results
+            if int(result.id) in pending_result_ids
+        }
+        results_by_exam = {
+            int(result.target_id): result
+            for result in results
+            if int(result.id) not in pending_result_ids
+        }
 
         per_exam_rows: List[Dict[str, Any]] = []
         for eid in [int(x) for x in exam_ids]:
@@ -196,6 +207,10 @@ class SessionProgressCalculator:
                     "attempt_count": int(attempt_counts.get(eid, 0)),
                     "no_result": True,
                     "meta_status": None,
+                    "is_provisional": eid in pending_exam_ids,
+                    "grading_status": (
+                        "subjective_pending" if eid in pending_exam_ids else None
+                    ),
                 })
                 continue
 
@@ -246,7 +261,11 @@ class SessionProgressCalculator:
                 selected_pass_score = cls._safe_float(policy.exam_pass_score, 0.0)
 
         elif strategy == ProgressPolicy.ExamAggregateStrategy.LATEST:
-            latest = cls._pick_latest(results)
+            latest = cls._pick_latest([
+                result
+                for result in results
+                if int(result.id) not in pending_result_ids
+            ])
             if latest is None:
                 aggregate_score = 0.0
                 selected_pass_score = cls._safe_float(policy.exam_pass_score, 0.0)

@@ -431,11 +431,17 @@ def sync_result_from_exam_submission(submission_id: int) -> Result | None:
     )
 
     if essay_question_ids:
-        ResultItem.objects.filter(
+        existing_essay_items = ResultItem.objects.filter(
             result=result,
             question_id__in=essay_question_ids,
-            source__in=["online", "omr"],
-        ).delete()
+        )
+        if preserve_existing_subjective:
+            existing_essay_items.filter(source__in=["online", "omr"]).delete()
+        else:
+            # ResultItem is the mutable snapshot for the representative attempt.
+            # Manual essay items belong to the attempt that produced them and must
+            # not make a later OMR attempt look subjectively complete.
+            existing_essay_items.delete()
 
     for item in items_payload:
         ResultFact.objects.create(

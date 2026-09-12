@@ -52,7 +52,9 @@ from apps.support.submissions.dependencies import (
     create_exam_enrollment_assignment,
     enrollment_belongs_to_tenant,
     exam_question_number_by_id,
+    finalize_omr_result_projection,
     get_synced_exam_score,
+    lock_submission_score_edit_scope_before_write,
     rebind_representative_omr_submission,
     request_is_parent,
     student_owns_enrollment,
@@ -609,7 +611,11 @@ class SubmissionViewSet(ModelViewSet):
 
     @transaction.atomic
     def _manual_edit_post(self, request, pk=None):
-        submission: Submission = Submission.objects.select_for_update().get(pk=self.get_object().pk)
+        submission_scope: Submission = self.get_object()
+        lock_submission_score_edit_scope_before_write(submission=submission_scope)
+        submission: Submission = Submission.objects.select_for_update().get(
+            pk=submission_scope.pk
+        )
 
         identifier = request.data.get("identifier")
         answers = request.data.get("answers") or []
@@ -867,12 +873,24 @@ class SubmissionViewSet(ModelViewSet):
 
         synced_score = None
         synced_max_score = None
+        synced_result_id = None
+        projection_ready = True
+        grading_status = None
         if submission.target_type == Submission.TargetType.EXAM and submission.enrollment_id:
-            synced_score, synced_max_score = get_synced_exam_score(
+            synced_result_id, synced_score, synced_max_score = get_synced_exam_score(
                 tenant=tenant,
                 target_id=int(submission.target_id),
                 enrollment_id=int(submission.enrollment_id),
             )
+            if synced_result_id is None:
+                projection_ready = False
+                grading_status = "result_missing"
+            else:
+                finalization = finalize_omr_result_projection(
+                    result_id=synced_result_id
+                )
+                projection_ready = finalization.projection_ready
+                grading_status = finalization.pending_reason
 
         return Response(
             {
@@ -886,6 +904,8 @@ class SubmissionViewSet(ModelViewSet):
                 "score": synced_score,
                 "total_score": synced_score,
                 "max_score": synced_max_score,
+                "projection_ready": projection_ready,
+                "grading_status": grading_status,
             }
         )
 
@@ -902,6 +922,17 @@ class SubmissionViewSet(ModelViewSet):
             return Response({"detail": "Tenant required"}, status=403)
 
         with transaction.atomic():
+            submission_scope = Submission.objects.only(
+                "id",
+                "tenant_id",
+                "target_type",
+                "target_id",
+            ).get(pk=pk)
+            if submission_scope.tenant_id != getattr(tenant, "id", None):
+                return Response({"detail": "tenant mismatch"}, status=403)
+            lock_submission_score_edit_scope_before_write(
+                submission=submission_scope
+            )
             submission: Submission = Submission.objects.select_for_update().get(pk=pk)
             if submission.tenant_id != getattr(tenant, "id", None):
                 return Response({"detail": "tenant mismatch"}, status=403)
@@ -1047,7 +1078,7 @@ class SubmissionViewSet(ModelViewSet):
         synced_score = None
         synced_max_score = None
         if submission.enrollment_id:
-            synced_score, synced_max_score = get_synced_exam_score(
+            _synced_result_id, synced_score, synced_max_score = get_synced_exam_score(
                 tenant=tenant,
                 target_id=int(submission.target_id),
                 enrollment_id=int(submission.enrollment_id),

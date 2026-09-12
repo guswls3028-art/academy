@@ -68,6 +68,7 @@ def filter_live_source_links(
     live_exam_pairs: set[tuple[int, int]] = set()
     explicitly_targeted_exam_ids: set[int] = set()
     live_exam_target_pairs: set[tuple[int, int]] = set()
+    pending_omr_pairs: set[tuple[int, int]] = set()
     if exam_ids and session_ids:
         Exam = apps.get_model("exams", "Exam")
         ExamEnrollment = apps.get_model("exams", "ExamEnrollment")
@@ -95,6 +96,28 @@ def filter_live_source_links(
                 exam__tenant=tenant,
                 enrollment__tenant=tenant,
             ).values_list("exam_id", "enrollment_id")
+        }
+        Result = apps.get_model("results", "Result")
+        candidate_results = list(
+            Result.objects.filter(
+                target_type="exam",
+                target_id__in=exam_ids,
+                enrollment_id__in={
+                    int(getattr(link, "enrollment_id", 0) or 0)
+                    for link in links_list
+                },
+                enrollment__tenant=tenant,
+            )
+        )
+        from apps.domains.results.services.omr_subjective_completion import (
+            pending_omr_result_ids,
+        )
+
+        pending_result_ids = pending_omr_result_ids(candidate_results)
+        pending_omr_pairs = {
+            (int(result.target_id), int(result.enrollment_id))
+            for result in candidate_results
+            if int(result.id) in pending_result_ids
         }
 
     live_homework_pairs: set[tuple[int, int]] = set()
@@ -132,6 +155,7 @@ def filter_live_source_links(
             enrollment_id = int(getattr(link, "enrollment_id", 0) or 0)
             if (
                 (exam_id, session_id) in live_exam_pairs
+                and (exam_id, enrollment_id) not in pending_omr_pairs
                 and (
                     exam_id not in explicitly_targeted_exam_ids
                     or (exam_id, enrollment_id) in live_exam_target_pairs

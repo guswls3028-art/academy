@@ -31,6 +31,9 @@ from apps.domains.results.guards.exam_enrollment_guard import validate_exam_enro
 from apps.domains.results.guards.score_edit_lease_guard import (
     require_score_edit_lease_from_headers,
 )
+from apps.domains.results.services.omr_subjective_completion import (
+    finalize_omr_result_if_ready,
+)
 from apps.support.omr.score_shape import get_exam_score_shape
 from apps.support.results.admin_exam_dependencies import (
     dispatch_progress_pipeline,
@@ -206,6 +209,8 @@ class AdminExamSubjectiveScoreView(APIView):
             attempt.meta.pop("status", None)
             attempt.save(update_fields=["meta", "updated_at"])
 
+        finalization = finalize_omr_result_if_ready(result_id=int(result.id))
+
         _sid = int(submission_id) if submission_id else 0
         _eid = int(exam_id)
         def _dispatch_progress():
@@ -216,14 +221,17 @@ class AdminExamSubjectiveScoreView(APIView):
                     dispatch_progress_pipeline(exam_id=_eid)
             except Exception:
                 logger.exception("progress pipeline dispatch failed (exam=%s, submission=%s)", _eid, _sid)
-        transaction.on_commit(_dispatch_progress)
+        if finalization.projection_ready:
+            transaction.on_commit(_dispatch_progress)
 
         # 정책 SSOT: messaging-policy.md "저장과 발송은 분리" — 점수 저장 자체는 알림 트리거 아님.
         # exam_score_published = MANUAL_DEFAULT. 학원장이 명시적으로 발송 버튼 클릭(preview→confirm)할 때만 발송.
 
         return Response(
             {
-                "ok": True,
+                "ok": finalization.projection_ready,
+                "saved": True,
+                "projection_ready": finalization.projection_ready,
                 "exam_id": exam_id,
                 "enrollment_id": enrollment_id,
                 "objective_score": float(result.objective_score or 0.0),
@@ -231,6 +239,7 @@ class AdminExamSubjectiveScoreView(APIView):
                 "subjective_max_score": float(subjective_max),
                 "total_score": float(result.total_score or 0.0),
                 "max_score": float(result.max_score or 0.0),
+                "grading_status": finalization.pending_reason,
             },
             status=drf_status.HTTP_200_OK,
         )

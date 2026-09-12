@@ -54,6 +54,9 @@ from apps.support.omr.score_shape import get_exam_score_shape
 # ✅ OMR 스캔 이미지 presigned URL
 from apps.support.omr.scan_images import build_omr_scan_image_payload
 from apps.domains.results.services.answer_matching import format_answer_for_display
+from apps.domains.results.services.omr_subjective_completion import (
+    pending_omr_result_ids,
+)
 from apps.support.results.exam_policy_dependencies import (
     effective_exam_pass_score,
 )
@@ -323,12 +326,17 @@ class AdminExamResultDetailView(APIView):
             tenant=request.tenant,
         )
 
+        subjective_pending = bool(
+            result is not None
+            and int(result.id) in pending_omr_result_ids([result])
+        )
+
         data.update({
             "passed": achievement_data["is_pass"],
             "allow_retake": allow_retake,
             "max_attempts": max_attempts,
             "can_retake": can_retake,
-            "clinic_required": bool(clinic_required),
+            "clinic_required": bool(clinic_required and not subjective_pending),
             "edit_state": edit_state,
             "correct_answers": {
                 str(k): format_answer_for_display(v)
@@ -355,7 +363,12 @@ class AdminExamResultDetailView(APIView):
             "final_pass": achievement_data["final_pass"],
             "achievement": achievement_data["achievement"],
             "clinic_retake": achievement_data["clinic_retake"],
-            "is_provisional": achievement_data["is_provisional"],
+            "is_provisional": bool(
+                achievement_data["is_provisional"] or subjective_pending
+            ),
+            "grading_status": (
+                "subjective_pending" if subjective_pending else None
+            ),
             "meta_status": achievement_data["meta_status"],
         })
 
