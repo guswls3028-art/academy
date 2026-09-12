@@ -15,7 +15,7 @@ production deployment do not require a separate request. Release, operations,
 and cleanup assignments carry the same standing authority. Do not pause for a
 second approval at each step; record the exact source SHA, target, checks, and
 readback instead. This does not broaden the task, make an ambiguous destructive
-target safe, waive tenant or user-data protection, bypass a release window or
+target safe, waive tenant or user-data protection, bypass an explicitly applicable change window or
 continuity gate, or make an external approval true without platform readback.
 An explicit instruction to deploy, release, apply to production, or continue a
 specific rollout includes authority to submit that rollout's GitHub
@@ -25,6 +25,11 @@ before mutation, and never remove the protection, approve another queued run,
 or infer approval from the instruction alone. If GitHub rejects the review or
 the configured identity is ineligible, preserve the error and report that
 technical blocker without asking the user to repeat the same authorization.
+
+Compatible patches do not wait for a default 04:00 slot. Use the current
+[deployment timing and continuity policy](deployment-modes.md) and retain
+technical holds until their actual release conditions pass. Historical task
+windows and old automation snapshots are not current release evidence.
 
 ## Ownership model
 

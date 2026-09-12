@@ -52,6 +52,23 @@ must follow `docs/domain/matchup.md` and preserve manual cuts and approvals.
 Account/student work follows `docs/domain/parent-account.md`,
 `docs/domain/student-core.md`, and `docs/domain/student-lifecycle.md`.
 
+## Successful use and stabilization
+
+Every generally available feature must retain an authorized user's ordinary
+successful journey. A guard, disabled entry, support notice, swallowed error,
+or empty-success fallback does not complete a bug fix. Only a feature labeled
+Beta before entry may expose a documented incomplete path. Keep legitimate
+tenant, permission, data, and messaging boundaries while repairing false
+rejection or the failing operation.
+
+Trace the action through its API, persistence, worker, and consuming screens.
+Verify success, reload/downstream state, and visible failure with recovery;
+denial tests or green CI alone are insufficient. For assigned structural cleanup,
+check callers and compatibility before removing duplicate or wasteful code.
+Use `docs/operations/change-risk-and-release-bundle.md` for audit evidence.
+Read only relevant skills; do not duplicate their procedures or rerun passing
+checks without changed inputs, a failure, or an unresolved risk.
+
 ## Verification
 
 Run focused tests first, then as applicable:
@@ -79,7 +96,7 @@ step; the implementation assignment itself authorizes the owning end-to-end
 workflow. Release, operations, and cleanup assignments carry the same standing
 authority. This authority does not expand task scope, resolve an ambiguous
 destructive target, waive tenant or user-data protection, bypass a release
-window or continuity gate, or make an external approval true without platform
+window explicitly applicable to this change or continuity gate, or make an external approval true without platform
 readback. When the user explicitly instructs Codex to deploy, release, apply to
 production, or continue an in-scope rollout, that instruction also authorizes
 Codex to submit the exact rollout's GitHub `production` environment approval
@@ -111,6 +128,15 @@ after its branch is merged or fully patch-equivalent and its worktree is clean;
 `-Action Close` refuses dirty, foreign, and uniquely unmerged worktrees. Use
 `-Action Sync` only after active tasks and releases finish. The full lifecycle
 and WIP handoff rules are in `docs/operations/concurrent-codex-sessions.md`.
+
+Compatible patches have no default 04:00 deployment wait. The release owner
+may promote promptly after existing gates prove old/new API and DB compatibility,
+healthy rolling capacity, and no forced reload or interruption of active playback
+and editing. Historical time windows and HOLDs apply only when still explicitly
+in scope; unresolved interruption risk or incompatible changes need a separate
+change window. See `docs/operations/deployment-modes.md` for the timing policy.
+Verify affected boundaries and reuse applicable unchanged evidence; unrelated
+frontend findings do not automatically hold a backend-only compatible patch.
 
 ## Mandatory preproduction and zero-downtime delivery
 
