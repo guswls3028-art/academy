@@ -171,6 +171,7 @@ class HomeworkAssignmentManageView(APIView):
             ).values_list("enrollment_id", flat=True)
         )
         removed_ids = sorted(existing_ids - incoming_ids)
+        added_ids = sorted(incoming_ids - existing_ids)
 
         # Replace only the currently editable (active session roster) rows.
         # Inactive students are hidden from this editor, but their historical
@@ -208,6 +209,14 @@ class HomeworkAssignmentManageView(APIView):
                 enrollment_ids=removed_ids,
                 user_id=getattr(request.user, "id", None),
                 reason="homework_assignment_removed",
+            )
+
+        if added_ids:
+            schedule_homework_target_progress = import_module(
+                "apps.domains.progress.dispatcher"
+            ).schedule_homework_target_progress
+            schedule_homework_target_progress(
+                session_id=int(homework.session_id), enrollment_ids=added_ids,
             )
 
         return Response(

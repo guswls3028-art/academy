@@ -13,6 +13,7 @@ from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
 from django.core.management.color import no_style
 from django.db import connection, transaction
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework_simplejwt.token_blacklist.models import OutstandingToken
 
@@ -388,15 +389,14 @@ class Command(BaseCommand):
                 self._lock_tenant_code(tenant_code)
                 existing = self._exact_tenant_or_fail_on_case_variant(tenant_code)
                 if existing is not None:
-                    evidence = self._cleanup_ephemeral_evidence(existing)
                     deleted = {
                         "tenant_id": existing.id,
                         "counts": self._tenant_counts(existing),
                         "users": existing.users.count(),
-                        **evidence["deleted"],
                     }
+                    evidence = self._delete_scenario_tenant(existing)
+                    deleted.update(evidence["deleted"])
                     residue = evidence["remaining"]
-                    existing.delete()
 
             remaining = self._remaining_for_code(tenant_code)
             video_residue = self._video_residue_for_code(tenant_code)
@@ -482,8 +482,7 @@ class Command(BaseCommand):
                 raise CommandError("--login-uat requires --reset when the tenant already exists.")
             reset_counts = self._tenant_counts(existing) if existing and options["reset"] else None
             if existing and options["reset"]:
-                self._cleanup_ephemeral_evidence(existing)
-                existing.delete()
+                self._delete_scenario_tenant(existing)
 
             tenant, _ = Tenant.objects.get_or_create(
                 code=tenant_code,
@@ -883,6 +882,49 @@ class Command(BaseCommand):
         }
 
     @staticmethod
+    def _delete_scenario_tenant(tenant) -> dict[str, dict[str, int]]:
+        """Remove owned payroll facts before their protected WorkType parent."""
+        if not connection.in_atomic_block:
+            raise RuntimeError("Scenario deletion requires transaction.atomic().")
+        # Hold parent rows against new FK links until tenant deletion commits.
+        for name in ("Staff", "WorkType"):
+            model = apps.get_model("staffs", name)
+            list(model.objects.filter(tenant=tenant).order_by("pk").select_for_update().values_list("pk", flat=True))
+        record_ids = []
+        payroll_relations = (
+            ("WorkRecord", ("staff", "work_type")),
+            ("StaffWorkType", ("staff", "work_type")),
+            ("ExpenseRecord", ("staff",)),
+            ("WorkMonthLock", ("staff",)),
+            ("PayrollSnapshot", ("staff",)),
+        )
+        for name, relations in payroll_relations:
+            model = apps.get_model("staffs", name)
+            owned_ids = list(
+                model.objects.filter(tenant=tenant).order_by("pk")
+                .select_for_update().values_list("pk", flat=True)
+            )
+            if name == "WorkRecord":
+                record_ids = owned_ids
+            related_scope = Q(tenant=tenant)
+            exact_scope = {"tenant": tenant}
+            for relation in relations:
+                related_scope |= Q(**{f"{relation}__tenant": tenant})
+                exact_scope[f"{relation}__tenant"] = tenant
+            if model.objects.filter(related_scope).exclude(**exact_scope).exists():
+                raise CommandError("Cross-tenant payroll references prevent scenario deletion.")
+        # Validate the whole bounded payroll graph before even token/audit deletion.
+        evidence = Command._cleanup_ephemeral_evidence(tenant)
+        # PROTECT is checked while Django collects the tenant cascade, before
+        # any collected WorkRecord is deleted. Keep the product FK unchanged.
+        WorkRecord = apps.get_model("staffs", "WorkRecord")
+        deleted, _ = WorkRecord.objects.filter(tenant=tenant, pk__in=record_ids).delete()
+        if deleted != len(record_ids):
+            raise CommandError("Scenario payroll deletion count mismatch.")
+        tenant.delete()
+        return evidence
+
+    @staticmethod
     def _cleanup_ephemeral_evidence(tenant) -> dict[str, dict[str, int]]:
         """Delete only transient evidence owned by one exact disposable scenario."""
 
@@ -1187,6 +1229,7 @@ class Command(BaseCommand):
             "students": ("students", "Student"),
             "parents": ("parents", "Parent"),
             "staffs": ("staffs", "Staff"),
+            "work_records": ("staffs", "WorkRecord"),
             "lectures": ("lectures", "Lecture"),
             "sessions": ("lectures", "Session"),
             "enrollments": ("enrollment", "Enrollment"),

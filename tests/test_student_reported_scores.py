@@ -9,6 +9,7 @@ from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.db import transaction
 from django.test import TestCase
 from rest_framework.test import APIRequestFactory, force_authenticate
 
@@ -25,6 +26,8 @@ from apps.domains.inventory.views import (
 from apps.domains.parents.models import Parent
 from apps.domains.results.models import StudentReportedScore
 from apps.domains.students.models import Student
+from apps.domains.submissions.models import SubmissionStorageCleanupIntent
+from apps.domains.submissions.services.lifecycle import process_submission_storage_cleanup_intents
 from apps.domains.results.views.admin_student_performance_view import (
     AdminStudentPerformanceView,
 )
@@ -728,55 +731,58 @@ class StudentReportedScoreTest(TestCase, ClinicTestMixin):
         self.assertEqual(voided.data["status"], "voided")
         self.assertEqual(self._console().data["students"][0]["source_summaries"]["school"]["scored_count"], 0)
 
-        unavailable_delete_request = self.factory.delete(
-            f"/storage/inventory/files/{file_id}/?scope=student&student_ps={self.student.ps_number}"
-        )
-        unavailable_delete_request.tenant = self.tenant
-        with (
-            patch(
-                "apps.domains.inventory.views.JWTAuthentication.authenticate",
-                return_value=(self.student_user, None),
-            ),
-            patch("apps.domains.inventory.views.delete_object_r2_storage", new=None),
-        ):
-            unavailable_delete = FileDeleteView.as_view()(unavailable_delete_request, file_id=file_id)
-        self.assertEqual(unavailable_delete.status_code, 503)
-        self.assertTrue(InventoryFile.objects.filter(id=file_id).exists())
-        self.assertEqual(StudentReportedScore.objects.get(id=score_id).evidence_file_id, file_id)
-
-        failed_delete_request = self.factory.delete(
-            f"/storage/inventory/files/{file_id}/?scope=student&student_ps={self.student.ps_number}"
-        )
-        failed_delete_request.tenant = self.tenant
-        with (
-            patch(
-                "apps.domains.inventory.views.JWTAuthentication.authenticate",
-                return_value=(self.student_user, None),
-            ),
-            patch(
-                "apps.domains.inventory.views.delete_object_r2_storage",
-                side_effect=RuntimeError("provider unavailable"),
-            ),
-        ):
-            failed_delete = FileDeleteView.as_view()(failed_delete_request, file_id=file_id)
-        self.assertEqual(failed_delete.status_code, 502)
-        self.assertTrue(InventoryFile.objects.filter(id=file_id).exists())
-        self.assertEqual(StudentReportedScore.objects.get(id=score_id).evidence_file_id, file_id)
-
         delete_request = self.factory.delete(
             f"/storage/inventory/files/{file_id}/?scope=student&student_ps={self.student.ps_number}"
         )
         delete_request.tenant = self.tenant
+        original_key = InventoryFile.objects.get(id=file_id).r2_key
         with (
             patch(
                 "apps.domains.inventory.views.JWTAuthentication.authenticate",
                 return_value=(self.student_user, None),
             ),
-            patch("apps.domains.inventory.views.delete_object_r2_storage") as delete_r2,
+            patch("apps.infrastructure.storage.r2.delete_object_r2_storage") as delete_r2,
+            self.captureOnCommitCallbacks(execute=True),
+        ):
+            with self.assertRaisesMessage(RuntimeError, "outer rollback"):
+                with transaction.atomic():
+                    response = FileDeleteView.as_view()(delete_request, file_id=file_id)
+                    self.assertEqual(response.status_code, 204)
+                    raise RuntimeError("outer rollback")
+        delete_r2.assert_not_called()
+        self.assertTrue(InventoryFile.objects.filter(id=file_id).exists())
+        self.assertEqual(StudentReportedScore.objects.get(id=score_id).evidence_file_id, file_id)
+        self.assertFalse(SubmissionStorageCleanupIntent.objects.filter(object_key=original_key).exists())
+
+        with (
+            patch(
+                "apps.domains.inventory.views.JWTAuthentication.authenticate",
+                return_value=(self.student_user, None),
+            ),
+            patch("apps.infrastructure.storage.r2.delete_object_r2_storage", new=None),
+            self.captureOnCommitCallbacks(execute=True),
         ):
             deleted = FileDeleteView.as_view()(delete_request, file_id=file_id)
-        self.assertEqual(deleted.status_code, 204)
-        delete_r2.assert_called_once()
+            self.assertEqual(deleted.status_code, 204)  # Outer TestCase commit is still pending.
+            self.assertEqual(SubmissionStorageCleanupIntent.objects.get(object_key=original_key).status, "pending")
+        self.assertFalse(InventoryFile.objects.filter(id=file_id).exists())
+        self.assertIsNone(StudentReportedScore.objects.get(id=score_id).evidence_file_id)
+        intent = SubmissionStorageCleanupIntent.objects.get(object_key=original_key)
+        self.assertEqual(intent.status, "failed")
+
+        with patch(
+            "apps.infrastructure.storage.r2.delete_object_r2_storage", side_effect=RuntimeError("provider unavailable"),
+        ):
+            process_submission_storage_cleanup_intents(intent_ids=[intent.id])
+        intent.refresh_from_db()
+        self.assertEqual(intent.status, "failed")
+        self.assertEqual(intent.attempt_count, 2)
+        self.assertEqual(intent.last_error, "storage_delete_failed")
+        with patch("apps.infrastructure.storage.r2.delete_object_r2_storage") as delete_r2:
+            process_submission_storage_cleanup_intents(intent_ids=[intent.id])
+        delete_r2.assert_called_once_with(key=original_key)
+        intent.refresh_from_db()
+        self.assertEqual(intent.status, "cleaned")
         audit_row = StudentReportedScore.objects.get(id=score_id)
         self.assertEqual(audit_row.status, "voided")
         self.assertIsNone(audit_row.evidence_file_id)

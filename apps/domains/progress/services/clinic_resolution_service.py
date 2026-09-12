@@ -30,6 +30,9 @@ from apps.support.clinic.session_dependencies import (
 from apps.support.progress.clinic_resolution_notification_dependencies import (
     send_clinic_resolution_notification,
 )
+from apps.support.progress.session_calculator_dependencies import (
+    homework_progress_enrollment_ids,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +257,8 @@ class ClinicResolutionService:
                 if latest.resolved_at:
                     # A factual retake/pass or unrelated waiver is stronger than
                     # this review control and must not be reopened here.
+                    if source_type == "homework":
+                        _dispatch_progress_for_link(latest)
                     return latest
                 link = latest
             else:
@@ -283,6 +288,8 @@ class ClinicResolutionService:
         # closure. The correction row records this review, but the teacher
         # toggle must not replace or later reopen an already-resolved source.
         if latest and latest.resolved_at and not latest_is_teacher_resolution:
+            if source_type == "homework":
+                _dispatch_progress_for_link(latest)
             return latest
 
         link = latest
@@ -402,12 +409,24 @@ class ClinicResolutionService:
         if normalized_enrollment_ids is not None:
             link_qs = link_qs.filter(enrollment_id__in=normalized_enrollment_ids)
 
+        affected_pairs: set[tuple[int, int]] = set()
+        if source_type == "homework":
+            # Assignment removal is a progress event even without a failed link.
+            # Whole-source removal captures the roster before its rows are deleted.
+            homework_enrollment_ids = (
+                normalized_enrollment_ids
+                if normalized_enrollment_ids is not None
+                else homework_progress_enrollment_ids(
+                    tenant_id=tenant_id, session_id=session_id, homework_id=source_id,
+                )
+            )
+            affected_pairs.update((int(enrollment_id), session_id) for enrollment_id in homework_enrollment_ids)
+
         links = list(link_qs.order_by("id"))
-        if not links:
+        if not links and not affected_pairs:
             return 0
 
         now = timezone.now()
-        affected_pairs: set[tuple[int, int]] = set()
         count = 0
         for link in links:
             _append_history(link, action="resolve_source_removed", at=now)
