@@ -805,6 +805,43 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
         self.assertEqual(result["residue"]["activity_audits"], 0)
         self.assertEqual(atomic.depth, 0)
 
+        aggregate = {**command._video_residue_for_code.return_value, "videos": 2}
+        scoped = {**aggregate, "videos": 1, "video_accesses": 2, "proctored_video_accesses": 2,
+                  "video_progresses": 2, "playback_sessions": 4, "playback_events": 4}
+        command._video_residue_for_code.return_value = aggregate
+
+        def synthetic_state(code, tenant_id, video_id):
+            self.assertEqual((code, tenant_id, video_id), (tenant, 72, 301))
+            self.assertEqual(atomic.depth, 1)
+            return scoped
+
+        command._synthetic_long_video_state.side_effect = synthetic_state
+        scoped_env = {**env, "QA_TENANT_ID": "72", "QA_VIDEO_ID": "301", "QA_SYNTHETIC_LONG_VIDEO": "true"}
+        with patch.dict(sys.modules, modules), patch.dict(os.environ, scoped_env, clear=True):
+            result = namespace["run"]()
+        self.assertEqual(result["video_state"], aggregate)
+        self.assertEqual(result["synthetic_video_state"], scoped)
+        self.assertEqual(result["synthetic_video_id"], 301)
+        self.assertEqual(result["tenant_id"], 72)
+        command._synthetic_long_video_state.assert_called_once_with(tenant, 72, 301)
+        self.assertEqual(atomic.depth, 0)
+
+        for changed in (
+            {"QA_TENANT_ID": "0"}, {"QA_TENANT_ID": "73"}, {"QA_SYNTHETIC_LONG_VIDEO": "false"},
+            {"QA_ACTION": "Setup"}, {"QA_ACTION": "Cleanup"}, {"QA_VIDEO_ID": "-1"},
+            {"QA_VIDEO_ID": "01"}, {"QA_VIDEO_ID": str(2**63)}, {"QA_VIDEO_ID": "$(id)"},
+        ):
+            command._synthetic_long_video_state.reset_mock()
+            with self.subTest(changed=changed), patch.dict(sys.modules, modules), \
+                    patch.dict(os.environ, {**scoped_env, **changed}, clear=True), self.assertRaises(AssertionError):
+                namespace["run"]()
+            command._synthetic_long_video_state.assert_not_called()
+        command._remaining_for_code.return_value = {"tenants": 0, "users": 0}
+        with patch.dict(sys.modules, modules), patch.dict(os.environ, scoped_env, clear=True), \
+                self.assertRaises(AssertionError):
+            namespace["run"]()
+        command._synthetic_long_video_state.assert_not_called()
+
     def test_fixed_video_state_contract_is_numeric_and_contains_no_identity_fields(self):
         session = json.loads(
             (ROOT / "scripts/v1/templates/ssm/frontend_development_qa.json").read_text()
@@ -1294,7 +1331,7 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
                          "187f6ac218435d3b3f938d903153c5785db3529ace89f4e79ea9b6e1bde8ddb6")
         for path, expected in (
             ("iam/trust_frontend_development_qa.json", "aa2c1a60b63ad287c2e8caba7257beaafe5d602df66659c3093f917ad670713a"),
-            ("ssm/frontend_development_qa.json", "cac26765c4df42bc6bfe3962f40d42361395b9a83c3a0ee90e07a54e0bdac548"),
+            ("ssm/frontend_development_qa.json", "300cb5fb9ea700a2fbb7d1002df8d6c6ef3ed05578fb7041cb23c29766df3af1"),
             ("ssm/frontend_development_api_port.json", "974b6bf4e518533ee0ecd14c5e82b0a5f0538813e41253940cd46a6cb5e8d173"),
         ):
             with self.subTest(path=path):
@@ -1311,6 +1348,7 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
                 "Action",
                 "TenantCode",
                 "TenantId",
+                "VideoId",
                 "ReleaseId",
                 "ApiDigest",
                 "OwnershipCapability",
@@ -1334,6 +1372,7 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
                 "allowedPattern": "^(false|true)$",
             },
         )
+        self.assertEqual(session["parameters"]["VideoId"], session["parameters"]["TenantId"])
         for parameter in session["parameters"].values():
             for unsafe in ("'; touch /tmp/escape; '", "$(id)", "{{ssm:/academy/api/env}}", "x\ny", "../production"):
                 self.assertIsNone(re.fullmatch(parameter["allowedPattern"], unsafe))
@@ -1346,6 +1385,7 @@ class DevelopmentParameterBoundaryTests(unittest.TestCase):
         self.assertEqual(shell_script.splitlines()[0], "set -eu")
         self.assertNotEqual(agent_argv[0], "set")
         self.assertIn("-e QA_TENANT_ID={{TenantId}}", shell_script)
+        self.assertIn("-e QA_VIDEO_ID={{VideoId}}", shell_script)
         python = shell_script.split("<<'ACADEMY_QA_PY'\n", 1)[1].rsplit("ACADEMY_QA_PY", 1)[0]
         compile(python, "fixed-development-session", "exec")
         self.assertLess(

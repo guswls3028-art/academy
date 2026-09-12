@@ -383,6 +383,95 @@ class SetupYmathRealuseScenarioTests(TestCase):
             },
         )
 
+    def test_long_video_runtime_scope_preserves_global_cleanup_with_retained_learning_video(self):
+        setup = json.loads(self._call_command(synthetic_long_video=True).splitlines()[-1])
+        tenant = Tenant.objects.get(pk=setup["tenant_id"])
+        video = Video.objects.get(pk=setup["synthetic_long_video"]["video_id"])
+        accesses = list(VideoAccess.objects.filter(video=video).select_related("enrollment__student"))
+        for ordinal, access in enumerate(accesses):
+            VideoProgress.objects.create(video=video, enrollment=access.enrollment, progress=0.8, last_position=720)
+            for attempt in range(2):
+                session_id = f"qa-scope-{ordinal}-{attempt}"
+                VideoPlaybackSession.objects.create(
+                    video=video, enrollment=access.enrollment, session_id=session_id,
+                    device_id=f"qa-scope-device-{ordinal}", status=VideoPlaybackSession.Status.ENDED,
+                )
+                VideoPlaybackEvent.objects.create(
+                    video=video, enrollment=access.enrollment, session_id=session_id,
+                    user_id=access.enrollment.student.user_id,
+                    event_type=VideoPlaybackEvent.EventType.FULLSCREEN_ENTER,
+                )
+        learning = Video.objects.create(
+            tenant=tenant, session=video.session, order=2, title="QA learning fixture",
+            source_type=Video.SourceType.YOUTUBE, youtube_video_id="VnqgmOJaMGc",
+        )
+        enrollment = accesses[0].enrollment
+        VideoAccess.objects.create(video=learning, enrollment=enrollment)
+        VideoProgress.objects.create(video=learning, enrollment=enrollment, progress=0.1, last_position=10)
+        VideoPlaybackSession.objects.create(
+            video=learning, enrollment=enrollment, session_id="qa-learning-session",
+            device_id="qa-learning-device", status=VideoPlaybackSession.Status.ACTIVE,
+        )
+        VideoPlaybackEvent.objects.create(
+            video=learning, enrollment=enrollment, session_id="qa-learning-session",
+            user_id=enrollment.student.user_id, event_type=VideoPlaybackEvent.EventType.PLAYER_ERROR,
+            violated=True,
+        )
+        learning.delete()
+        self.assertFalse(Video.objects.filter(pk=learning.pk).exists())
+        self.assertTrue(Video.all_with_deleted.filter(pk=learning.pk).exists())
+        aggregate = Command._video_residue_for_code(tenant.code)
+        self.assertEqual(aggregate["videos"], 2)
+        self.assertEqual(aggregate["video_progresses"], 3)
+        self.assertEqual(aggregate["playback_sessions"], 5)
+        self.assertEqual(aggregate["active_playback_sessions"], 1)
+        self.assertEqual(aggregate["player_errors"], 1)
+        self.assertEqual(aggregate["violated_events"], 1)
+        self.assertEqual(
+            Command._synthetic_long_video_state(tenant.code, tenant.id, video.id),
+            {
+                "videos": 1, "video_accesses": 2, "proctored_video_accesses": 2,
+                "video_progresses": 2, "playback_sessions": 4, "active_playback_sessions": 0,
+                "playback_events": 4, "player_errors": 0, "violated_events": 0,
+            },
+        )
+        out = StringIO()
+        call_command("setup_ymath_realuse_scenario", tenant_code=tenant.code, destroy=True, stdout=out)
+        cleanup = json.loads(out.getvalue().splitlines()[-1])
+        self.assertEqual(cleanup["remaining"], {"tenants": 0, "users": 0})
+        self.assertEqual(cleanup["video_residue"], dict.fromkeys(aggregate, 0))
+        self.assertFalse(Video.all_with_deleted.filter(pk__in=[video.pk, learning.pk]).exists())
+
+    def test_long_video_runtime_scope_rejects_wrong_identity_without_mutation(self):
+        setup = json.loads(self._call_command(synthetic_long_video=True).splitlines()[-1])
+        tenant = Tenant.objects.get(pk=setup["tenant_id"])
+        video = Video.objects.get(pk=setup["synthetic_long_video"]["video_id"])
+        other = json.loads(self._call_command(
+            synthetic_long_video=True, tenant_code="qa-ymath-realuse-scope-other",
+        ).splitlines()[-1])
+        for target in (
+            (tenant.code, 0, video.id), (tenant.code, True, video.id),
+            (tenant.code, tenant.id, 0), (tenant.code, tenant.id, True),
+            (tenant.code, tenant.id, "1"), (tenant.code, tenant.id, 2**63),
+            (tenant.code, other["tenant_id"], video.id),
+            (tenant.code, tenant.id, other["synthetic_long_video"]["video_id"]),
+            ("qa-ymath-realuse-absent", tenant.id, video.id),
+        ):
+            with self.subTest(target=target), self.assertRaises(CommandError):
+                Command._synthetic_long_video_state(*target)
+        for changed in (
+            {"deleted_at": timezone.now()}, {"hls_path": "foreign/master.m3u8"},
+            {"duration": 899}, {"source_type": Video.SourceType.YOUTUBE},
+            {"status": Video.Status.PENDING}, {"file_key": "unexpected-upload"},
+        ):
+            original = {key: getattr(video, key) for key in changed}
+            Video.all_with_deleted.filter(pk=video.pk).update(**changed)
+            with self.subTest(field=next(iter(changed))), self.assertRaises(CommandError):
+                Command._synthetic_long_video_state(tenant.code, tenant.id, video.id)
+            Video.all_with_deleted.filter(pk=video.pk).update(**original)
+        self.assertEqual(Command._synthetic_long_video_state(tenant.code, tenant.id, video.id), setup["video_state"])
+        self.assertEqual(Command._video_residue_for_code(tenant.code), setup["video_state"])
+
     def test_rejects_non_scenario_tenant_code(self):
         with self.assertRaisesMessage(CommandError, "tenant-code must match"):
             self._call_command(tenant_code="ymath")

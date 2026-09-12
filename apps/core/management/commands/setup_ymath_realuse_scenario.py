@@ -837,11 +837,34 @@ class Command(BaseCommand):
     @staticmethod
     def _video_residue_for_code(tenant_code: str) -> dict[str, int]:
         Video = apps.get_model("video", "Video")
+        return Command._video_state_for_scope(
+            Video.all_with_deleted.filter(tenant__code__iexact=tenant_code),
+            {"video__tenant__code__iexact": tenant_code},
+        )
+
+    @staticmethod
+    def _synthetic_long_video_state(tenant_code: str, tenant_id: int, video_id: int) -> dict[str, int]:
+        if any(type(value) is not int or not 0 < value <= 9223372036854775807 for value in (tenant_id, video_id)):
+            raise CommandError("Synthetic long-video target must use positive integer IDs.")
+        tenant = Command._exact_tenant_or_fail_on_case_variant(tenant_code)
+        if tenant is None or tenant.pk != tenant_id:
+            raise CommandError("Synthetic long-video tenant identity mismatch.")
+        Video = apps.get_model("video", "Video")
+        videos = Video.objects.filter(
+            pk=video_id, tenant_id=tenant_id, session__lecture__tenant_id=tenant_id,
+            source_type=Video.SourceType.UPLOADED, status=Video.Status.READY, file_key="",
+            hls_path=SYNTHETIC_LONG_VIDEO_HLS_PATH, duration=SYNTHETIC_LONG_VIDEO_DURATION_SECONDS,
+        )
+        if not videos.exists():
+            raise CommandError("Synthetic long-video fixture identity mismatch.")
+        return Command._video_state_for_scope(videos, {"video_id": video_id, "video__tenant_id": tenant_id})
+
+    @staticmethod
+    def _video_state_for_scope(videos, video_scope: dict) -> dict[str, int]:
         VideoAccess = apps.get_model("video", "VideoAccess")
         VideoProgress = apps.get_model("video", "VideoProgress")
         VideoPlaybackSession = apps.get_model("video", "VideoPlaybackSession")
         VideoPlaybackEvent = apps.get_model("video", "VideoPlaybackEvent")
-        video_scope = {"video__tenant__code__iexact": tenant_code}
         events = VideoPlaybackEvent.objects.filter(**video_scope)
         sessions = VideoPlaybackSession.objects.filter(**video_scope)
         return {
@@ -855,7 +878,7 @@ class Command(BaseCommand):
             ).count(),
             "video_accesses": VideoAccess.objects.filter(**video_scope).count(),
             "video_progresses": VideoProgress.objects.filter(**video_scope).count(),
-            "videos": Video.all_with_deleted.filter(tenant__code__iexact=tenant_code).count(),
+            "videos": videos.count(),
             "violated_events": events.filter(violated=True).count(),
         }
 
