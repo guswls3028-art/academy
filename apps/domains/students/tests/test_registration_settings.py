@@ -3,7 +3,8 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.db import OperationalError
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
+from django.urls import resolve
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps.core.models import Tenant, TenantMembership
@@ -28,7 +29,7 @@ class RegistrationSettingsTests(TestCase):
 
     def _settings(self, method="get", data=None, *, tenant=None, user=None):
         request = getattr(self.factory, method)(
-            "/api/v1/students/registration-requests/settings/", data, format="json",
+            "/api/v1/students/registration_requests/settings/", data, format="json",
         )
         request.tenant = tenant or Tenant.objects.get(pk=self.tenant.pk)
         force_authenticate(request, user=user or self.admin)
@@ -39,7 +40,7 @@ class RegistrationSettingsTests(TestCase):
 
     def _signup(self, suffix):
         request = self.factory.post(
-            "/api/v1/students/registration-requests/",
+            "/api/v1/students/registration_requests/",
             {
                 "name": f"검증학생{suffix}", "username": f"AUTOAPPROVE{suffix}",
                 "initial_password": "signup-test-password",
@@ -188,3 +189,27 @@ class RegistrationSettingsTests(TestCase):
                     self.assertEqual(response.status_code, 403)
                     save.assert_not_called()
         self.assertEqual(self._settings()[0].data, {"auto_approve": False})
+
+
+class RegistrationSettingsUrlTests(SimpleTestCase):
+    def test_request_helpers_use_registered_settings_and_signup_routes(self):
+        probe = RegistrationSettingsTests()
+        probe.factory = APIRequestFactory()
+        for method, action in (
+            ("get", "registration_settings"),
+            ("patch", "registration_settings"),
+            ("post", "create"),
+        ):
+            with self.subTest(method=method):
+                # Capture the real helper path before it accesses the DB or view.
+                with patch.object(
+                    probe.factory, method, side_effect=RuntimeError("request path captured"),
+                ) as request_builder:
+                    with self.assertRaisesRegex(RuntimeError, "request path captured"):
+                        if method == "post":
+                            probe._signup(1)
+                        else:
+                            probe._settings(method)
+                match = resolve(request_builder.call_args.args[0])
+                self.assertIs(match.func.cls, RegistrationRequestViewSet)
+                self.assertEqual(match.func.actions[method], action)
