@@ -73,7 +73,7 @@ class HomeworkApprovalProgressTests(TestCase):
         )
         student = Student.objects.create(
             tenant=self.tenant, user=user, name=suffix, ps_number=f"HW-{suffix}",
-            omr_code=f"HW-{suffix}",
+            omr_code=f"{user.pk:08d}"[-8:],
         )
         enrollment = Enrollment.objects.create(
             tenant=self.tenant, lecture=self.lecture, student=student, status="ACTIVE",
