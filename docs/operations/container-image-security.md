@@ -171,12 +171,14 @@ ECR basic finding 응답은 설치 패키지 inventory나 `fixedVersion`을 제�
 여섯 repository에 적용하고, 삭제한 13개 identity가 세 OCR repository 각각에
 재유입될 때 차단됨을 확인한다.
 
-수정 PR을 병합한 뒤 새 head의 공식 `workflow_dispatch` 전체 release로 새로운
-immutable 후보와 완료 scan을 만들어야 한다. 예전 run의 재실행은 예전 checkout의
+수정 PR을 병합한 뒤 새 head의 공식 전체 release로 새로운 immutable 후보와
+완료 scan을 만들어야 한다. main push의 변경 감지가 전체 build를 선택하면 그
+run을 사용하며, 그렇지 않으면 release owner가 기존 run과 겹치지 않게
+`workflow_dispatch` 전체 release를 진행한다. 예전 run의 재실행은 예전 checkout의
 기준선을 다시 사용한다. 실패 job만 재실행하면 attempt별 baseline artifact와
 image tag도 이전 성공 build와 달라지므로 복구 경로로 사용하지 않는다. 새 run도
 기존 development, isolated preprod/종료, production continuity gate를 모두
-통과해야 하며 이 기준선 PR 자체는 배포하지 않는다.
+통과해야 하며 기준선 변경이나 과거 scan만으로 운영 적용을 완료 처리하지 않는다.
 
 ### 이전 후보의 판단 근거
 
