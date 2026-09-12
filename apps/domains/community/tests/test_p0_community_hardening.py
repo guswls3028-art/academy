@@ -411,20 +411,27 @@ class TestParentCommunityReadOnly(CommunityHardeningFixture):
         with patch(
             "apps.infrastructure.storage.r2.delete_object_r2_storage"
         ) as delete_file:
-            delete_attachment_response = delete_attachment(
-                self._request(
-                    "delete",
-                    self.parent_user,
-                    (
-                        f"/api/v1/community/posts/{qna.id}/attachments/"
-                        f"{attachment.id}/"
+            with self.captureOnCommitCallbacks(execute=True):
+                delete_attachment_response = delete_attachment(
+                    self._request(
+                        "delete",
+                        self.parent_user,
+                        (
+                            f"/api/v1/community/posts/{qna.id}/attachments/"
+                            f"{attachment.id}/"
+                        ),
+                        HTTP_X_STUDENT_ID=str(self.student.id),
                     ),
-                    HTTP_X_STUDENT_ID=str(self.student.id),
-                ),
-                pk=qna.id,
-                att_id=attachment.id,
-            )
-        self.assertEqual(delete_attachment_response.status_code, 204)
+                    pk=qna.id,
+                    att_id=attachment.id,
+                )
+                delete_file.assert_not_called()
+                self.assertFalse(PostAttachment.objects.filter(pk=attachment.id).exists())
+        # TestCase's outer transaction was still pending when the response was
+        # formed; the callback above proves completion only after that decision.
+        self.assertEqual(delete_attachment_response.status_code, 502)
+        self.assertEqual(delete_attachment_response.data["code"], "community_storage_cleanup_pending")
+        self.assertEqual(delete_attachment_response.data["storage_cleanup"], {"pending": 1, "failed": 0, "cleaned": 0})
         delete_file.assert_called_once_with(key=attachment.r2_key)
 
         destroy = PostViewSet.as_view({"delete": "destroy"})
