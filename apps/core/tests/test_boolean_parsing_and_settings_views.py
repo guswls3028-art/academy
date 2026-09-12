@@ -40,7 +40,11 @@ class TestSettingsBooleanParsing(SimpleTestCase):
             tenant=self.tenant,
         )
         viewset = RegistrationRequestViewSet()
-        response = viewset.registration_settings(request)
+        with patch(
+            "apps.domains.students.views.registration_views.transaction.atomic",
+            return_value=nullcontext(),
+        ):
+            response = viewset.registration_settings(request)
 
         self.assertEqual(response.status_code, 200)
         self.assertFalse(self.tenant.student_registration_auto_approve)

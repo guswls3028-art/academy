@@ -488,13 +488,21 @@ class RegistrationRequestViewSet(ModelViewSet):
             if auto_approve is not None:
                 # parse_bool: "false"/"0" 등 문자열을 안전하게 boolean으로 변환.
                 # bool("false") == True 이슈 방지.
-                tenant.student_registration_auto_approve = parse_bool(
+                auto_approve = parse_bool(
                     auto_approve, field_name="auto_approve",
                 )
+                previous_auto_approve = tenant.student_registration_auto_approve
                 try:
-                    tenant.save(update_fields=["student_registration_auto_approve"])
+                    with transaction.atomic():
+                        tenant.student_registration_auto_approve = auto_approve
+                        tenant.save(update_fields=["student_registration_auto_approve"])
                 except Exception:
-                    pass
+                    tenant.student_registration_auto_approve = previous_auto_approve
+                    logger.exception("registration_settings_save_failed tenant_id=%s", tenant.pk)
+                    return Response({
+                        "code": "registration_settings_save_failed",
+                        "detail": "가입 신청 설정을 저장하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+                    }, status=503)
             try:
                 auto_approve = getattr(tenant, "student_registration_auto_approve", False)
             except Exception:
