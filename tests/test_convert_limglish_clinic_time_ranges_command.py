@@ -15,6 +15,7 @@ from rest_framework.test import APIClient, APITestCase
 from apps.domains.clinic.management.commands import convert_limglish_clinic_time_ranges
 from apps.domains.clinic.models import Session, SessionParticipant
 from apps.domains.clinic.serializers import ClinicSessionSerializer
+from apps.domains.clinic.services import lifecycle as clinic_lifecycle
 from apps.domains.clinic.tests import ClinicAPITestMixin, ClinicTestMixin
 
 
@@ -303,6 +304,26 @@ class ConvertLimglishClinicTimeRangesCommandTest(TestCase, ClinicTestMixin):
         self.session.refresh_from_db()
         self.assertEqual(self.limglish["tenant"].clinic_booking_mode, "fixed_slot")
         self.assertEqual(self.session.booking_mode, "fixed_slot")
+
+    def test_plan_uses_bulk_writer_session_lock_order_when_ids_conflict(self):
+        earlier_session = self.make_clinic_session(
+            self.limglish["tenant"],
+            date=self.from_date,
+            start_time=datetime.time(17, 0),
+            location="created-after-18",
+        )
+
+        plan = convert_limglish_clinic_time_ranges._build_plan(
+            tenant=self.limglish["tenant"],
+            from_date=self.from_date,
+            lock=False,
+        )
+
+        self.assertLess(self.session.id, earlier_session.id)
+        self.assertEqual(
+            [session.id for session in plan["sessions"]],
+            [earlier_session.id, self.session.id],
+        )
 
 
 class ClinicSessionPolicyWriteRaceAPITest(APITestCase, ClinicAPITestMixin):
@@ -596,6 +617,120 @@ class ClinicConversionPostgresConcurrencyTest(TransactionTestCase, ClinicAPITest
         self.assertEqual(len(responses), 1)
         return responses[0]
 
+    def _race_new_reservation_with_change(self, new_reservation_writer):
+        new_reservation_has_student = threading.Event()
+        change_has_tenant = threading.Event()
+        responses = {}
+        errors = []
+        student = self.data["students"][0]
+        replacement = self.make_clinic_session(
+            self.tenant,
+            date=self.from_date,
+            start_time=datetime.time(15, 0),
+            location="change-fk-race",
+        )
+        new_reservation_session = self.make_clinic_session(
+            self.tenant,
+            date=self.from_date + datetime.timedelta(days=1),
+            start_time=datetime.time(15, 0),
+            location="new-reservation-fk-race",
+        )
+        old_booking = self.make_participant(
+            self.tenant,
+            self.session,
+            student,
+            status=SessionParticipant.Status.PENDING,
+            source=SessionParticipant.Source.STUDENT_REQUEST,
+        )
+        tenant_model = self.tenant.__class__
+        original_lock_student = clinic_lifecycle._lock_active_student_for_booking
+        original_get = QuerySet.get
+
+        def gate_new_reservation_after_student_lock(*args, **kwargs):
+            locked_student = original_lock_student(*args, **kwargs)
+            if (
+                threading.current_thread().name == "clinic-new-reservation"
+                and not new_reservation_has_student.is_set()
+            ):
+                new_reservation_has_student.set()
+                if not change_has_tenant.wait(10):
+                    raise AssertionError("change writer did not lock the tenant")
+            return locked_student
+
+        def observe_change_tenant_lock(queryset, *args, **kwargs):
+            result = original_get(queryset, *args, **kwargs)
+            if (
+                threading.current_thread().name == "clinic-booking-change"
+                and queryset.model is tenant_model
+                and queryset.query.select_for_update
+            ):
+                change_has_tenant.set()
+            return result
+
+        def create_new_reservation():
+            close_old_connections()
+            try:
+                client = APIClient()
+                client.force_authenticate(user=student.user)
+                responses["create"] = new_reservation_writer(
+                    client,
+                    new_reservation_session,
+                )
+            except Exception as exc:  # pragma: no cover - asserted by caller
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        def change_booking():
+            close_old_connections()
+            try:
+                if not new_reservation_has_student.wait(10):
+                    raise AssertionError("new reservation did not lock the student")
+                client = APIClient()
+                client.force_authenticate(user=student.user)
+                responses["change"] = client.post(
+                    f"/api/v1/clinic/participants/{old_booking.id}/change-booking/",
+                    {"new_session_id": replacement.id},
+                    format="json",
+                    **self._headers(self.tenant),
+                )
+            except Exception as exc:  # pragma: no cover - asserted by caller
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        with (
+            patch.object(
+                clinic_lifecycle,
+                "_lock_active_student_for_booking",
+                side_effect=gate_new_reservation_after_student_lock,
+            ),
+            patch.object(QuerySet, "get", observe_change_tenant_lock),
+            patch(
+                "apps.domains.clinic.views.participant_views._send_clinic_notification",
+                return_value={"requested": 2, "failed": 0, "send_to": "both"},
+            ),
+        ):
+            threads = [
+                threading.Thread(
+                    target=create_new_reservation,
+                    name="clinic-new-reservation",
+                ),
+                threading.Thread(
+                    target=change_booking,
+                    name="clinic-booking-change",
+                ),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=20)
+
+        self.assertFalse(any(thread.is_alive() for thread in threads), "race threads hung")
+        self.assertEqual(errors, [])
+        self.assertEqual(set(responses), {"create", "change"})
+        return responses
+
     def test_concurrent_create_cannot_escape_conversion_plan(self):
         response = self._race_conversion_with_writer(lambda client: client.post(
             "/api/v1/clinic/sessions/",
@@ -689,3 +824,29 @@ class ClinicConversionPostgresConcurrencyTest(TransactionTestCase, ClinicAPITest
         self.assertEqual(self.tenant.clinic_booking_mode, "time_range")
         self.assertEqual(self.tenant.clinic_booking_interval_minutes, 30)
         self.assertEqual(self.tenant.clinic_booking_max_stay_minutes, 600)
+
+    def test_single_create_and_booking_change_use_fk_compatible_tenant_lock(self):
+        responses = self._race_new_reservation_with_change(
+            lambda client, session: client.post(
+                "/api/v1/clinic/participants/",
+                {"session": session.id},
+                format="json",
+                **self._headers(self.tenant),
+            )
+        )
+
+        self.assertEqual(responses["create"].status_code, 201)
+        self.assertEqual(responses["change"].status_code, 200)
+
+    def test_bulk_create_and_booking_change_use_fk_compatible_tenant_lock(self):
+        responses = self._race_new_reservation_with_change(
+            lambda client, session: client.post(
+                "/api/v1/clinic/participants/bulk-create/",
+                {"session_ids": [session.id]},
+                format="json",
+                **self._headers(self.tenant),
+            )
+        )
+
+        self.assertEqual(responses["create"].status_code, 201)
+        self.assertEqual(responses["change"].status_code, 200)
