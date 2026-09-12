@@ -105,9 +105,45 @@ def get_submission_for_grading(*, submission_id: int) -> Any | None:
 
     return Submission.objects.filter(id=int(submission_id)).only(
         "id",
+        "tenant_id",
+        "target_type",
+        "target_id",
         "source",
         "meta",
     ).first()
+
+
+def lock_exam_and_score_edit_scope_for_grading(*, exam_id: int, tenant_id: int) -> list[int]:
+    """Lock Exam then its score-edit sessions before grading-owned rows."""
+
+    from apps.domains.exams.models import Exam
+    from apps.support.results.progress_read_dependencies import (
+        lock_score_edit_scope_for_exam,
+    )
+
+    exam = (
+        Exam.objects.select_for_update(no_key=True, of=("self",))
+        .select_related("tenant")
+        .filter(
+            id=int(exam_id),
+            tenant_id=int(tenant_id),
+        )
+        .first()
+    )
+    if exam is None:
+        return []
+    return lock_score_edit_scope_for_exam(exam_id=int(exam.id), tenant=exam.tenant)
+
+
+def lock_score_edit_scope_before_submission_grading(*, submission: Any) -> list[int]:
+    """Acquire the shared Exam -> Session order before grading result rows."""
+
+    if submission is None or str(submission.target_type) != "exam":
+        return []
+    return lock_exam_and_score_edit_scope_for_grading(
+        exam_id=int(submission.target_id),
+        tenant_id=int(submission.tenant_id),
+    )
 
 
 def is_omr_manual_review_required(submission: Any) -> bool:

@@ -16,6 +16,10 @@ from apps.domains.results.utils.initial_exam_score import (
     load_initial_exam_scores,
     project_initial_exam_score,
 )
+from apps.domains.results.services.omr_subjective_completion import (
+    pending_omr_enrollment_ids_for_exams,
+    pending_omr_result_ids,
+)
 from apps.support.results.progress_read_dependencies import (
     progress_policy_meta_for_lecture,
     session_by_id,
@@ -107,12 +111,20 @@ def build_session_results_snapshot(*, session_id: int) -> Dict[str, Any]:
     strategy = meta["strategy"]
     pass_source = meta["pass_source"]
 
+    exams = list(get_exams_for_session(session))
+    pending_enrollment_ids = pending_omr_enrollment_ids_for_exams(
+        exam_ids=[int(exam.id) for exam in exams],
+        tenant_id=int(session.lecture.tenant_id),
+    )
+
     # 세션 모수/통과율(집계 단일 진실)
     sp_qs = session_progress_queryset_for_session(session)
     participant_count = sp_qs.count()
 
-    pass_count = sp_qs.filter(exam_passed=True).count()
-    pass_rate = (pass_count / participant_count) if participant_count else 0.0
+    pass_eligible_qs = sp_qs.exclude(enrollment_id__in=pending_enrollment_ids)
+    pass_denominator = pass_eligible_qs.count()
+    pass_count = pass_eligible_qs.filter(exam_passed=True).count()
+    pass_rate = (pass_count / pass_denominator) if pass_denominator else 0.0
 
     # clinic_rate(단일 진실)
     clinic_count = len(
@@ -124,7 +136,6 @@ def build_session_results_snapshot(*, session_id: int) -> Dict[str, Any]:
     clinic_rate = (clinic_count / participant_count) if participant_count else 0.0
 
     # 시험 단위 통계 (Result 기반, enrollment 중복 방어)
-    exams = list(get_exams_for_session(session))
     exam_rows: List[Dict[str, Any]] = []
 
     for ex in exams:
@@ -143,6 +154,7 @@ def build_session_results_snapshot(*, session_id: int) -> Dict[str, Any]:
             exam_ids=[exid],
             enrollment_ids=[result.enrollment_id for result in results],
         )
+        pending_result_ids = pending_omr_result_ids(results)
         projected_scores = [
             project_initial_exam_score(
                 state=initial_scores.get((exid, int(result.enrollment_id))),
@@ -155,6 +167,7 @@ def build_session_results_snapshot(*, session_id: int) -> Dict[str, Any]:
                 ),
             )
             for result in results
+            if int(result.id) not in pending_result_ids
         ]
         scores = [
             projected.total_score

@@ -20,6 +20,9 @@ from apps.domains.results.utils.initial_exam_score import (
     load_initial_exam_scores,
     project_initial_exam_score,
 )
+from apps.domains.results.services.omr_subjective_completion import (
+    pending_omr_result_ids,
+)
 from apps.support.results.admin_exam_dependencies import get_regular_active_exam_for_tenant
 
 
@@ -98,8 +101,11 @@ class AdminExamSummaryView(APIView):
             exam_ids=[exam_id],
             enrollment_ids=[result.enrollment_id for result in results],
         )
+        pending_result_ids = pending_omr_result_ids(results)
         scored_rows = []
         for result in results:
+            if int(result.id) in pending_result_ids:
+                continue
             initial_state = initial_scores.get((exam_id, int(result.enrollment_id)))
             legacy_scored = bool(
                 result.attempt_id is None

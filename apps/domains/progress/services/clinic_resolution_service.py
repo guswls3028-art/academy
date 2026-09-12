@@ -9,6 +9,7 @@
 4. 면제 (WAIVED)
 5. 원본 시험/과제 제거 (SOURCE_REMOVED)
 6. 명시적 시험 미응시 전환 (NOT_SUBMITTED, 알림 없음)
+7. 과거 부분 채점 투영 철회 (GRADING_RETRACTED, 알림 없음)
 
 절대 금지:
 - 예약(booking)으로 해소
@@ -533,6 +534,69 @@ class ClinicResolutionService:
             enrollment_id,
             exam_id,
             attempt_id,
+        )
+        return len(links)
+
+    @staticmethod
+    @transaction.atomic
+    def resolve_by_pending_grading(
+        *,
+        tenant_id: int,
+        enrollment_id: int,
+        exam_id: int,
+    ) -> int:
+        """Audit-close automatic clinic projections from an incomplete OMR score."""
+
+        tenant_id = int(tenant_id)
+        enrollment_id = int(enrollment_id)
+        exam_id = int(exam_id)
+        source_filter = (
+            Q(source_type="exam", source_id=exam_id)
+            | Q(source_type__isnull=True, meta__exam_id=exam_id)
+        )
+        links = list(
+            ClinicLink.objects.select_for_update()
+            .filter(
+                tenant_id=tenant_id,
+                enrollment_id=enrollment_id,
+                is_auto=True,
+                resolved_at__isnull=True,
+            )
+            .filter(source_filter)
+            .order_by("session_id", "id")
+        )
+        if not links:
+            return 0
+
+        now = timezone.now()
+        for link in links:
+            _append_history(link, action="resolve_pending_grading", at=now)
+            link.resolved_at = now
+            link.resolution_type = ClinicLink.ResolutionType.GRADING_RETRACTED
+            link.resolution_evidence = {
+                "grading_status": "subjective_pending",
+                "exam_id": exam_id,
+                "enrollment_id": enrollment_id,
+                "transitioned_at": now.isoformat(),
+            }
+            link.save(
+                update_fields=[
+                    "resolved_at",
+                    "resolution_type",
+                    "resolution_evidence",
+                    "resolution_history",
+                    "updated_at",
+                ]
+            )
+            _deactivate_today_plan(link)
+
+        logger.info(
+            "clinic_resolution: GRADING_RETRACTED resolved %d links "
+            "(tenant=%s, enrollment=%s, exam=%s)",
+            len(links),
+            tenant_id,
+            enrollment_id,
+            exam_id,
         )
         return len(links)
 

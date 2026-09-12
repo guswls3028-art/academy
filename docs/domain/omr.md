@@ -190,9 +190,25 @@ submission의 저장된 DONE 결과에 답안이 있고 기존 답안이 없으�
 덮어쓰지 않는다. 자동 채점 동기화는 최신 `Result`/`ResultItem`뿐 아니라 문항
 통계의 append-only 원본인 `ResultFact`도 같은 transaction에서 문항별로 남긴다.
 따라서 점수는 보이지만 문항 분석만 비는 부분 성공 상태를 허용하지 않는다.
-수동 검토가 필요하지 않은 OMR은 이 동기화 직후 legacy `ExamResult`도 `FINAL`로
-확정한 뒤 진행도와 수업 분석을 갱신한다. 수동 검토 표시가 있는 OMR만 DRAFT를
-유지한다.
+수동 검토가 필요하지 않은 객관식 전용 OMR은 이 동기화 직후 legacy `ExamResult`도
+`FINAL`로 확정한 뒤 진행도와 수업 분석을 갱신한다. 실제 서술형 문항이 있는 혼합형
+OMR은 객관식 저장 뒤 `DRAFT`와 `subjective_pending`을 유지하고, 모든 서술형 점수를
+교사가 입력한 뒤에만 `FINAL`로 전환해 학생 공개·석차·클리닉에 반영한다. 그 밖에
+수동 검토 표시가 있는 OMR도 DRAFT를 유지한다.
+
+새 대표 OMR이 `subjective_pending`이 되면 채점 worker도 진행도 파이프라인을 실행해
+이전 대표 결과의 완료·통과·클리닉 투영을 즉시 철회한다. 교직원이 서술형 점수를 저장해
+`FINAL`이 되면 같은 파이프라인이 다시 실행되어 확정 결과만 복구한다. worker의 최초
+채점·재채점, 공개 재채점 API, 교직원 수기 저장은 모두 `Exam`을 먼저 잠그고 관련
+성적편집 `Session`들을 ID 순서로 잠근 뒤 `Submission`/`ExamResult`/`Result`/
+`ExamAttempt`를 잠근다. 동시 자동 채점이 기존 편집 lease를 무효화하면 교직원 요청은
+409로 닫히며, 화면이 최신 성적을 다시 읽고 lease를 재취득한 뒤 저장을 재시도한다.
+제출 관리의 수기 OMR 보정과 중복 스캔 채택도 mutable `Submission`과 답안 또는 대표
+attempt를 잠그기 전에 같은 `Exam` -> `Session` 순서를 따른다. 공개 재채점은 목록을
+읽은 뒤 기다리는 동안 제출 상태가 바뀔 수 있으므로, 각 `Submission`을 잠근 직후 현재
+상태를 다시 확인하고 더 이상 재채점 대상이 아닌 행은 변경 없이 건너뛴다.
+이 순서를 바꾸면 최초 결과의 FK 생성이나 공개 재채점과 수기 입력이 서로의 잠금을
+기다리는 교착이 생길 수 있으므로 각 경로를 PostgreSQL 동시성 회귀로 고정한다.
 
 단일정답 문항에서 워커가 강한 복수마킹을 `status=ok, marking=multi`로 보내더라도
 정답과 완전히 일치하는 다중정답 키가 아니면 `ANSWER_SCORE_AMBIGUOUS`로 검토를

@@ -51,6 +51,16 @@ def grade_submission_objective(submission_id: int, *, force_regrade: bool = Fals
     return grade_submission(int(submission_id), force_regrade=force_regrade)
 
 
+def lock_submission_score_edit_scope_before_write(*, submission) -> list[int]:
+    """Lock an exam submission's Exam -> Session scope before mutable rows."""
+
+    from apps.support.results.grading_dependencies import (
+        lock_score_edit_scope_before_submission_grading,
+    )
+
+    return lock_score_edit_scope_before_submission_grading(submission=submission)
+
+
 def rebind_representative_omr_submission(
     *,
     exam_id: int,
@@ -204,6 +214,9 @@ def regrade_exam_submissions(*, tenant, exam_id: int, actor: str) -> dict[str, A
     from apps.domains.results.models import ExamAttempt, Result
     from apps.domains.submissions.models import Submission
     from apps.domains.submissions.services.lifecycle import reopen_for_regrade
+    from apps.support.results.grading_dependencies import (
+        lock_exam_and_score_edit_scope_for_grading,
+    )
 
     regradable_statuses = {
         Submission.Status.DONE,
@@ -230,7 +243,14 @@ def regrade_exam_submissions(*, tenant, exam_id: int, actor: str) -> dict[str, A
             continue
         try:
             with transaction.atomic():
+                lock_exam_and_score_edit_scope_for_grading(
+                    exam_id=int(exam_id),
+                    tenant_id=int(tenant.id),
+                )
                 submission = Submission.objects.select_for_update().get(id=int(submission_id))
+                if submission.status not in regradable_statuses:
+                    skipped += 1
+                    continue
                 enrollment = Enrollment.objects.select_for_update().get(
                     id=int(submission.enrollment_id),
                     tenant=tenant,
@@ -757,7 +777,12 @@ def dispatch_ai_result_to_submissions_domain(
     )
 
 
-def get_synced_exam_score(*, tenant, target_id: int, enrollment_id: int) -> tuple[float | None, float | None]:
+def get_synced_exam_score(
+    *,
+    tenant,
+    target_id: int,
+    enrollment_id: int,
+) -> tuple[int | None, float | None, float | None]:
     try:
         from apps.domains.results.models import Result
 
@@ -768,12 +793,26 @@ def get_synced_exam_score(*, tenant, target_id: int, enrollment_id: int) -> tupl
                 enrollment_id=int(enrollment_id),
                 enrollment__tenant=tenant,
             )
-            .only("total_score", "max_score")
+            .only("id", "total_score", "max_score")
             .order_by("-id")
             .first()
         )
         if result:
-            return float(result.total_score or 0.0), float(result.max_score or 0.0)
+            return (
+                int(result.id),
+                float(result.total_score or 0.0),
+                float(result.max_score or 0.0),
+            )
     except Exception:
-        return None, None
-    return None, None
+        return None, None, None
+    return None, None, None
+
+
+def finalize_omr_result_projection(*, result_id: int):
+    """Finalize an OMR result through the results-domain service boundary."""
+
+    from apps.domains.results.services.omr_subjective_completion import (
+        finalize_omr_result_if_ready,
+    )
+
+    return finalize_omr_result_if_ready(result_id=int(result_id))

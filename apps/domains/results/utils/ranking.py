@@ -23,6 +23,9 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from apps.domains.results.utils.result_queries import latest_results_per_enrollment
 from apps.domains.results.models import Result, ExamAttempt
+from apps.domains.results.services.omr_subjective_completion import (
+    pending_omr_result_ids,
+)
 from apps.domains.results.utils.initial_exam_score import load_initial_exam_scores
 from django.db.models import Max, Subquery
 
@@ -167,6 +170,11 @@ def compute_exam_rankings(
         base_qs = base_qs.filter(
             enrollment__lecture_id__in=[int(value) for value in lecture_ids]
         )
+    pending_result_ids = pending_omr_result_ids(
+        base_qs.select_related("attempt")
+    )
+    if pending_result_ids:
+        base_qs = base_qs.exclude(id__in=pending_result_ids)
 
     # NOT_SUBMITTED attempt 제외
     attempt_ids = list(
@@ -247,6 +255,11 @@ def compute_exam_rankings_batch(
         .values("last_id")
     )
     latest_results = Result.objects.filter(id__in=Subquery(latest_ids))
+    pending_result_ids = pending_omr_result_ids(
+        latest_results.select_related("attempt")
+    )
+    if pending_result_ids:
+        latest_results = latest_results.exclude(id__in=pending_result_ids)
 
     # NOT_SUBMITTED attempt 제외
     attempt_ids = list(
