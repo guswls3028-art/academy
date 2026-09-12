@@ -1,15 +1,23 @@
 import datetime
 import json
+import threading
 from io import StringIO
+from unittest.mock import patch
 
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.test import TestCase
+from django.db import close_old_connections, connection
+from django.test import TestCase, TransactionTestCase, override_settings
+from django.utils import timezone
+from rest_framework.test import APIClient, APITestCase
 
-from apps.domains.clinic.models import SessionParticipant
-from apps.domains.clinic.tests import ClinicTestMixin
+from apps.domains.clinic.management.commands import convert_limglish_clinic_time_ranges
+from apps.domains.clinic.models import Session, SessionParticipant
+from apps.domains.clinic.serializers import ClinicSessionSerializer
+from apps.domains.clinic.tests import ClinicAPITestMixin, ClinicTestMixin
 
 
+@override_settings(CLINIC_MIDNIGHT_TIME_RANGE_WRITES_ENABLED=True)
 class ConvertLimglishClinicTimeRangesCommandTest(TestCase, ClinicTestMixin):
     def setUp(self):
         self.from_date = datetime.date.today()
@@ -121,6 +129,40 @@ class ConvertLimglishClinicTimeRangesCommandTest(TestCase, ClinicTestMixin):
         self.assertEqual(second["target_session_ids"], [])
         self.assertEqual(second["target_participant_count"], 0)
         self.assertFalse(second["tenant_default_change_required"])
+        with override_settings(CLINIC_MIDNIGHT_TIME_RANGE_WRITES_ENABLED=False):
+            no_op_output = StringIO()
+            call_command(
+                "convert_limglish_clinic_time_ranges",
+                "--from-date",
+                self.from_date.isoformat(),
+                "--execute",
+                "--confirm",
+                second["required_confirmation_token"],
+                stdout=no_op_output,
+            )
+        no_op = json.loads(no_op_output.getvalue())
+        self.assertEqual(no_op["converted_session_count"], 0)
+        self.assertEqual(no_op["backfilled_participant_count"], 0)
+
+    @override_settings(CLINIC_MIDNIGHT_TIME_RANGE_WRITES_ENABLED=False)
+    def test_execute_requires_reader_first_midnight_write_activation(self):
+        report = self._dry_run()
+
+        with self.assertRaisesMessage(CommandError, "reader-first release"):
+            call_command(
+                "convert_limglish_clinic_time_ranges",
+                "--from-date",
+                self.from_date.isoformat(),
+                "--execute",
+                "--confirm",
+                report["required_confirmation_token"],
+                stdout=StringIO(),
+            )
+
+        self.limglish["tenant"].refresh_from_db()
+        self.session.refresh_from_db()
+        self.assertEqual(self.limglish["tenant"].clinic_booking_mode, "fixed_slot")
+        self.assertEqual(self.session.booking_mode, "fixed_slot")
 
     def test_unsupported_session_past_midnight_fails_closed_without_partial_writes(self):
         self.session.duration_minutes = 420
@@ -240,3 +282,262 @@ class ConvertLimglishClinicTimeRangesCommandTest(TestCase, ClinicTestMixin):
 
         with self.assertRaisesMessage(CommandError, "exactly one"):
             self._dry_run()
+
+    def test_execute_rolls_back_when_locked_postcondition_still_has_targets(self):
+        report = self._dry_run()
+
+        with patch.object(Session.objects, "bulk_update", return_value=0):
+            with self.assertRaisesMessage(CommandError, "postcondition"):
+                call_command(
+                    "convert_limglish_clinic_time_ranges",
+                    "--from-date",
+                    self.from_date.isoformat(),
+                    "--execute",
+                    "--confirm",
+                    report["required_confirmation_token"],
+                    stdout=StringIO(),
+                )
+
+        self.limglish["tenant"].refresh_from_db()
+        self.session.refresh_from_db()
+        self.assertEqual(self.limglish["tenant"].clinic_booking_mode, "fixed_slot")
+        self.assertEqual(self.session.booking_mode, "fixed_slot")
+
+
+class ClinicSessionPolicyWriteRaceAPITest(APITestCase, ClinicAPITestMixin):
+    def setUp(self):
+        self.data = self.setup_api_tenant("limglish", student_count=1)
+        self.tenant = self.data["tenant"]
+        self.session = self.data["clinic_session"]
+        self.session.date = datetime.date.today() + datetime.timedelta(days=1)
+        self.session.save(update_fields=["date", "updated_at"])
+        self.client.force_authenticate(user=self.data["admin_user"])
+
+    def _flip_tenant_policy_after_first_validation(self):
+        original_is_valid = ClinicSessionSerializer.is_valid
+        flipped = False
+
+        def is_valid_then_flip(serializer, *args, **kwargs):
+            nonlocal flipped
+            result = original_is_valid(serializer, *args, **kwargs)
+            if not flipped:
+                flipped = True
+                self.tenant.__class__.objects.filter(pk=self.tenant.pk).update(
+                    clinic_booking_mode="time_range",
+                    clinic_booking_interval_minutes=60,
+                    clinic_booking_max_stay_minutes=600,
+                    clinic_allow_multi_slot_booking_default=False,
+                )
+            return result
+
+        return patch.object(ClinicSessionSerializer, "is_valid", is_valid_then_flip)
+
+    def test_create_rejects_stale_tenant_policy_instead_of_writing_old_default(self):
+        with self._flip_tenant_policy_after_first_validation():
+            response = self.client.post(
+                "/api/v1/clinic/sessions/",
+                {
+                    "date": self.session.date,
+                    "start_time": "15:00",
+                    "duration_minutes": 60,
+                    "location": "stale-create",
+                    "max_participants": 10,
+                },
+                format="json",
+                **self._headers(self.tenant),
+            )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertFalse(Session.objects.filter(
+            tenant=self.tenant,
+            location="stale-create",
+        ).exists())
+
+    def test_patch_rejects_stale_session_instead_of_reverting_conversion(self):
+        original_is_valid = ClinicSessionSerializer.is_valid
+        flipped = False
+
+        def is_valid_then_convert(serializer, *args, **kwargs):
+            nonlocal flipped
+            result = original_is_valid(serializer, *args, **kwargs)
+            if not flipped:
+                flipped = True
+                Session.objects.filter(pk=self.session.pk).update(
+                    booking_mode="time_range",
+                    booking_interval_minutes=60,
+                    booking_max_stay_minutes=600,
+                    allow_multi_slot_booking=False,
+                    allow_time_preference=False,
+                    updated_at=timezone.now(),
+                )
+            return result
+
+        with patch.object(ClinicSessionSerializer, "is_valid", is_valid_then_convert):
+            response = self.client.patch(
+                f"/api/v1/clinic/sessions/{self.session.id}/",
+                {"title": "stale patch"},
+                format="json",
+                **self._headers(self.tenant),
+            )
+
+        self.assertEqual(response.status_code, 400, response.data)
+        self.session.refresh_from_db()
+        self.assertEqual(self.session.booking_mode, "time_range")
+        self.assertNotEqual(self.session.title, "stale patch")
+
+    def test_locked_patch_response_keeps_participant_projections(self):
+        self.make_participant(
+            self.tenant,
+            self.session,
+            self.data["students"][0],
+            status=SessionParticipant.Status.BOOKED,
+        )
+
+        response = self.client.patch(
+            f"/api/v1/clinic/sessions/{self.session.id}/",
+            {"title": "projection-safe patch"},
+            format="json",
+            **self._headers(self.tenant),
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["participant_count"], 1)
+        self.assertEqual(response.data["booked_count"], 1)
+
+
+@override_settings(CLINIC_MIDNIGHT_TIME_RANGE_WRITES_ENABLED=True)
+class ClinicConversionPostgresConcurrencyTest(TransactionTestCase, ClinicAPITestMixin):
+    reset_sequences = True
+
+    def setUp(self):
+        if connection.vendor != "postgresql":
+            self.skipTest("conversion writer locking requires PostgreSQL")
+        self.from_date = datetime.date.today() + datetime.timedelta(days=1)
+        self.data = self.setup_api_tenant("limglish", student_count=1)
+        self.tenant = self.data["tenant"]
+        self.session = self.data["clinic_session"]
+        self.session.date = self.from_date
+        self.session.start_time = datetime.time(18, 0)
+        self.session.duration_minutes = 360
+        self.session.save(update_fields=[
+            "date",
+            "start_time",
+            "duration_minutes",
+            "updated_at",
+        ])
+
+    def _dry_run_token(self):
+        output = StringIO()
+        call_command(
+            "convert_limglish_clinic_time_ranges",
+            "--from-date",
+            self.from_date.isoformat(),
+            stdout=output,
+        )
+        return json.loads(output.getvalue())["required_confirmation_token"]
+
+    def _race_conversion_with_writer(self, writer):
+        conversion_locked = threading.Event()
+        writer_validated = threading.Event()
+        token = self._dry_run_token()
+        responses = []
+        errors = []
+        original_build_plan = convert_limglish_clinic_time_ranges._build_plan
+        original_is_valid = ClinicSessionSerializer.is_valid
+
+        def gated_build_plan(*args, **kwargs):
+            plan = original_build_plan(*args, **kwargs)
+            if kwargs.get("lock") and not conversion_locked.is_set():
+                conversion_locked.set()
+                if not writer_validated.wait(10):
+                    raise AssertionError("writer did not validate before conversion release")
+            return plan
+
+        def observed_is_valid(serializer, *args, **kwargs):
+            result = original_is_valid(serializer, *args, **kwargs)
+            writer_validated.set()
+            return result
+
+        def convert():
+            close_old_connections()
+            try:
+                with patch.object(
+                    convert_limglish_clinic_time_ranges,
+                    "_build_plan",
+                    side_effect=gated_build_plan,
+                ):
+                    call_command(
+                        "convert_limglish_clinic_time_ranges",
+                        "--from-date",
+                        self.from_date.isoformat(),
+                        "--execute",
+                        "--confirm",
+                        token,
+                        stdout=StringIO(),
+                    )
+            except Exception as exc:  # pragma: no cover - asserted by caller
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        def write():
+            close_old_connections()
+            try:
+                if not conversion_locked.wait(10):
+                    raise AssertionError("conversion did not acquire locks")
+                client = APIClient()
+                client.force_authenticate(user=self.data["admin_user"])
+                with patch.object(ClinicSessionSerializer, "is_valid", observed_is_valid):
+                    responses.append(writer(client))
+            except Exception as exc:  # pragma: no cover - asserted by caller
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        threads = [
+            threading.Thread(target=convert, name="clinic-conversion"),
+            threading.Thread(target=write, name="clinic-session-writer"),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=20)
+        self.assertFalse(any(thread.is_alive() for thread in threads), "race threads hung")
+        self.assertEqual(errors, [])
+        self.assertEqual(len(responses), 1)
+        return responses[0]
+
+    def test_concurrent_create_cannot_escape_conversion_plan(self):
+        response = self._race_conversion_with_writer(lambda client: client.post(
+            "/api/v1/clinic/sessions/",
+            {
+                "date": self.from_date,
+                "start_time": "15:00",
+                "duration_minutes": 60,
+                "location": "concurrent-stale-create",
+                "max_participants": 10,
+            },
+            format="json",
+            **self._headers(self.tenant),
+        ))
+
+        self.assertEqual(response.status_code, 400, response.data)
+        self.assertFalse(Session.objects.filter(
+            tenant=self.tenant,
+            location="concurrent-stale-create",
+        ).exists())
+        self.session.refresh_from_db()
+        self.assertEqual(self.session.booking_mode, "time_range")
+
+    def test_concurrent_patch_cannot_revert_converted_session(self):
+        response = self._race_conversion_with_writer(lambda client: client.patch(
+            f"/api/v1/clinic/sessions/{self.session.id}/",
+            {"title": "concurrent stale patch"},
+            format="json",
+            **self._headers(self.tenant),
+        ))
+
+        self.assertEqual(response.status_code, 400, response.data)
+        self.session.refresh_from_db()
+        self.assertEqual(self.session.booking_mode, "time_range")
+        self.assertNotEqual(self.session.title, "concurrent stale patch")

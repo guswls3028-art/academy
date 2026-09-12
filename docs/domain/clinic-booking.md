@@ -94,6 +94,13 @@
   따라서 15:00–22:00과 21:00–00:00은 지원하지만, 다음 날 00:30처럼 자정을
   넘겨 계속 운영하는 범위는 실패 폐쇄한다. 학생의 실제 예약 종료 `00:00`도
   같은 규칙으로 다음 날 자정으로 계산한다.
+- 자정 종료 write는 reader-first 배포 경계다. 새 reader와 DB 제약을 먼저 배포하는
+  동안 `CLINIC_MIDNIGHT_TIME_RANGE_WRITES_ENABLED` 기본값은 `false`이며, 단일·일괄
+  세션 생성과 학생/교직원 예약 모두 새 `00:00` write를 거절한다. 모든 API/worker가
+  자정 reader가 포함된 정확한 release로 수렴한 것을 확인한 뒤 같은 설정을 `true`로
+  활성화하고 health-gated refresh를 완료해야만 write와 limglish 전환을 진행한다.
+  이미 저장된 자정 세션의 읽기와 비시간 필드 수정은 플래그를 다시 내린 상태에서도
+  막지 않는다.
 - 단일·일괄 세션 생성은 요청에 예약 정책이 생략돼도 tenant 기본값을 먼저 적용한
   유효 정책으로 간격·최대 체류·운영 종료 경계를 검사한다. 따라서 저장 뒤에야
   `time_range`가 되는 호출도 지원하지 않는 자정 이후 세션을 만들 수 없다.
@@ -156,7 +163,14 @@ python manage.py convert_limglish_clinic_time_ranges --from-date 2026-09-10 --ex
   출력하며 이름·전화번호·메모 같은 개인정보를 출력하지 않는다.
 - 실행은 같은 기준일로 다시 계산한 확인 토큰이 정확히 일치할 때만 진행한다.
   tenant·session·participant를 transaction 안에서 잠가 dry-run 뒤 대상이
-  달라졌으면 실패 폐쇄한다.
+  달라졌으면 실패 폐쇄한다. 일반 단일·일괄 session 생성과 PATCH도 먼저 같은 tenant
+  정책 row를 잠그며, PATCH는 잠근 session을 다시 읽는다. 요청 validation 이후 정책이나
+  session `updated_at`이 바뀌었으면 옛 객체를 저장하지 않고 새로고침·재시도를 요구한다.
+  변환 write 뒤에는 같은 잠금 안에서 계획을 다시 계산해 대상이 0인지 확인하며 하나라도
+  남으면 transaction 전체를 롤백한다.
+- 자정 종료 대상이 하나라도 있으면 reader-first release의 API/worker 수렴과
+  `CLINIC_MIDNIGHT_TIME_RANGE_WRITES_ENABLED=true`가 먼저 필요하다. 플래그 기본 OFF인
+  첫 reader 배포에서 변환 명령을 실행해 rolling overlap을 우회할 수 없다.
 - 60분 단위의 고정 일정만 변환하고, 같은 날 종료 또는 정확한 다음 날 `00:00`
   종료만 허용한다. 모든 기존 참가자의 현재 또는 변환 후 실제 범위도 세션 안에 있고,
   세션 시작 기준 60분 경계에 맞으며, 새 최대 체류 600분 이하여야 한다. 하나라도

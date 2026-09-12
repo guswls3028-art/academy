@@ -4,6 +4,7 @@ import datetime
 from dataclasses import dataclass
 from typing import Any
 
+from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -1084,6 +1085,14 @@ def _validated_booking_range(
         raise ValidationError(
             {"booking_time": "예약 시작과 종료 시간을 함께 입력해 주세요."}
         )
+    if (
+        booking_start_time > datetime.time.min
+        and booking_end_time == datetime.time.min
+        and not settings.CLINIC_MIDNIGHT_TIME_RANGE_WRITES_ENABLED
+    ):
+        raise ValidationError({
+            "booking_time": "자정 종료 시간 범위 예약은 안전 배포 완료 후 활성화됩니다."
+        })
 
     session_start, session_end = session_window(session)
     booking_start, booking_end = booking_window(

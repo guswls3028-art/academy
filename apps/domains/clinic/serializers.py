@@ -1,12 +1,16 @@
 # PATH: apps/domains/clinic/serializers.py
 
 from datetime import datetime, timedelta
+from django.conf import settings
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from .models import Session, SessionParticipant, Test, Submission
 from .services.lifecycle import booking_availability_for_session
-from .time_ranges import is_supported_time_range_values
+from .time_ranges import (
+    ends_at_next_day_midnight_values,
+    is_supported_time_range_values,
+)
 from apps.core.permissions import is_effective_staff
 from apps.support.clinic.session_dependencies import (
     active_students_for_clinic_tenant,
@@ -144,6 +148,36 @@ class ClinicSessionSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"duration_minutes": "시간 범위 세션은 같은 날 또는 정확히 다음 날 00:00에 끝나야 합니다."}
             )
+        ends_at_midnight = (
+            mode == "time_range"
+            and session_date is not None
+            and start_time is not None
+            and ends_at_next_day_midnight_values(
+                session_date=session_date,
+                start_time=start_time,
+                duration_minutes=duration,
+            )
+        )
+        existing_unchanged_midnight = (
+            instance is not None
+            and instance.booking_mode == "time_range"
+            and ends_at_next_day_midnight_values(
+                session_date=instance.date,
+                start_time=instance.start_time,
+                duration_minutes=instance.duration_minutes,
+            )
+            and session_date == instance.date
+            and start_time == instance.start_time
+            and duration == instance.duration_minutes
+        )
+        if (
+            ends_at_midnight
+            and not existing_unchanged_midnight
+            and not settings.CLINIC_MIDNIGHT_TIME_RANGE_WRITES_ENABLED
+        ):
+            raise serializers.ValidationError({
+                "duration_minutes": "자정 종료 시간 범위 예약은 안전 배포 완료 후 활성화됩니다."
+            })
         return attrs
 
     def get_participant_count(self, obj: Session):
@@ -698,6 +732,18 @@ class ClinicSessionBulkCreateSerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 {"duration_minutes": "시간 범위 세션은 같은 날 또는 정확히 다음 날 00:00에 끝나야 합니다."}
             )
+        if (
+            mode == "time_range"
+            and ends_at_next_day_midnight_values(
+                session_date=attrs["dates"][0],
+                start_time=attrs["start_time"],
+                duration_minutes=attrs["duration_minutes"],
+            )
+            and not settings.CLINIC_MIDNIGHT_TIME_RANGE_WRITES_ENABLED
+        ):
+            raise serializers.ValidationError({
+                "duration_minutes": "자정 종료 시간 범위 예약은 안전 배포 완료 후 활성화됩니다."
+            })
         return attrs
 
 

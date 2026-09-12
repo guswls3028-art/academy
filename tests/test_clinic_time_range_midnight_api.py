@@ -1,6 +1,6 @@
 import datetime
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
@@ -10,6 +10,7 @@ from apps.domains.clinic.services.lifecycle import booking_availability_for_sess
 from apps.domains.clinic.tests import ClinicAPITestMixin
 
 
+@override_settings(CLINIC_MIDNIGHT_TIME_RANGE_WRITES_ENABLED=True)
 class ClinicTimeRangeMidnightAPITest(APITestCase, ClinicAPITestMixin):
     def setUp(self):
         self.data = self.setup_api_tenant("clinic_midnight_range", student_count=2)
@@ -223,6 +224,63 @@ class ClinicTimeRangeMidnightAPITest(APITestCase, ClinicAPITestMixin):
         self.assertEqual(response.status_code, 400, response.data)
         self.session.refresh_from_db()
         self.assertEqual(self.session.duration_minutes, 360)
+
+    @override_settings(CLINIC_MIDNIGHT_TIME_RANGE_WRITES_ENABLED=False)
+    def test_midnight_session_and_booking_writes_wait_for_reader_first_activation(self):
+        self.client.force_authenticate(user=self.data["admin_user"])
+        create = self.client.post(
+            "/api/v1/clinic/sessions/",
+            {
+                "date": self.session.date,
+                "start_time": "18:00",
+                "duration_minutes": 360,
+                "location": "activation-gated-create",
+                "max_participants": 10,
+                "booking_mode": "time_range",
+                "booking_interval_minutes": 60,
+                "booking_max_stay_minutes": 600,
+            },
+            format="json",
+            **self._headers(),
+        )
+        bulk = self.client.post(
+            "/api/v1/clinic/sessions/bulk-create/",
+            {
+                "dates": [self.session.date],
+                "start_time": "18:00",
+                "duration_minutes": 360,
+                "location": "activation-gated-bulk",
+                "max_participants": 10,
+                "booking_mode": "time_range",
+                "booking_interval_minutes": 60,
+                "booking_max_stay_minutes": 600,
+            },
+            format="json",
+            **self._headers(),
+        )
+        existing_update = self.client.patch(
+            f"/api/v1/clinic/sessions/{self.session.id}/",
+            {"title": "existing midnight reader-safe update"},
+            format="json",
+            **self._headers(),
+        )
+        shifted_midnight_update = self.client.patch(
+            f"/api/v1/clinic/sessions/{self.session.id}/",
+            {"start_time": "19:00", "duration_minutes": 300},
+            format="json",
+            **self._headers(),
+        )
+        booking = self._book(self.students[0], start="22:00", end="00:00")
+
+        self.assertEqual(create.status_code, 400, create.data)
+        self.assertEqual(bulk.status_code, 400, bulk.data)
+        self.assertEqual(existing_update.status_code, 200, existing_update.data)
+        self.assertEqual(shifted_midnight_update.status_code, 400, shifted_midnight_update.data)
+        self.assertEqual(booking.status_code, 400, booking.data)
+        self.assertFalse(SessionParticipant.objects.filter(
+            tenant=self.tenant,
+            session=self.session,
+        ).exists())
 
 
 class ClinicTimeRangeMidnightConstraintTest(TestCase, ClinicAPITestMixin):

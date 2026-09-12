@@ -81,6 +81,26 @@ class SessionViewSet(viewsets.ModelViewSet):
         if self.action in staff_only_actions:
             return [IsAuthenticated(), TenantResolvedAndStaff()]
         return [IsAuthenticated(), TenantResolvedAndMember()]
+
+    @staticmethod
+    def _booking_policy_signature(tenant):
+        return (
+            tenant.clinic_booking_mode,
+            tenant.clinic_booking_interval_minutes,
+            tenant.clinic_booking_max_stay_minutes,
+            tenant.clinic_allow_multi_slot_booking_default,
+        )
+
+    def _lock_current_booking_policy(self, tenant, expected_signature):
+        locked_tenant = tenant.__class__.objects.select_for_update().get(pk=tenant.pk)
+        if self._booking_policy_signature(locked_tenant) != expected_signature:
+            raise serializers.ValidationError({
+                "booking_policy": (
+                    "클리닉 예약 정책이 변경되었습니다. 화면을 새로고침한 뒤 다시 시도해 주세요."
+                )
+            })
+        return locked_tenant
+
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_class = SessionFilter
     search_fields = ["location"]
@@ -203,36 +223,71 @@ class SessionViewSet(viewsets.ModelViewSet):
             raise serializers.ValidationError(
                 {"tenant": "테넌트 컨텍스트가 필요합니다. (호스트 또는 X-Tenant-Code 확인)"}
             )
-        created_by = self.request.user if self.request.user.is_authenticated else None
-        save_kwargs = {
-            "tenant": tenant,
-            "created_by": created_by,
-        }
-        effective_booking_mode = serializer.validated_data.get(
-            "booking_mode",
-            tenant.clinic_booking_mode,
-        )
-        if "allow_multi_slot_booking" not in serializer.validated_data:
-            save_kwargs["allow_multi_slot_booking"] = (
-                False
-                if effective_booking_mode == "time_range"
-                else bool(tenant.clinic_allow_multi_slot_booking_default)
+        expected_signature = self._booking_policy_signature(tenant)
+        with transaction.atomic():
+            tenant = self._lock_current_booking_policy(tenant, expected_signature)
+            self.request.tenant = tenant
+            current_serializer = self.get_serializer(data=self.request.data)
+            current_serializer.is_valid(raise_exception=True)
+            created_by = self.request.user if self.request.user.is_authenticated else None
+            save_kwargs = {
+                "tenant": tenant,
+                "created_by": created_by,
+            }
+            effective_booking_mode = current_serializer.validated_data.get(
+                "booking_mode",
+                tenant.clinic_booking_mode,
             )
-        if "booking_mode" not in serializer.validated_data:
-            save_kwargs["booking_mode"] = tenant.clinic_booking_mode
-        if "booking_interval_minutes" not in serializer.validated_data:
-            save_kwargs["booking_interval_minutes"] = tenant.clinic_booking_interval_minutes
-        if "booking_max_stay_minutes" not in serializer.validated_data:
-            save_kwargs["booking_max_stay_minutes"] = tenant.clinic_booking_max_stay_minutes
-        try:
-            serializer.save(**save_kwargs)
-        except IntegrityError as e:
-            err_str = str(e)
-            if "uniq_clinic_session_per_tenant_time_loc" in err_str:
-                raise serializers.ValidationError(
-                    {"non_field_errors": "같은 날짜·시간·장소·학년의 클리닉이 이미 있습니다. 다른 시간, 장소, 또는 학년을 선택해주세요."}
+            if "allow_multi_slot_booking" not in current_serializer.validated_data:
+                save_kwargs["allow_multi_slot_booking"] = (
+                    False
+                    if effective_booking_mode == "time_range"
+                    else bool(tenant.clinic_allow_multi_slot_booking_default)
                 )
-            raise
+            if "booking_mode" not in current_serializer.validated_data:
+                save_kwargs["booking_mode"] = tenant.clinic_booking_mode
+            if "booking_interval_minutes" not in current_serializer.validated_data:
+                save_kwargs["booking_interval_minutes"] = tenant.clinic_booking_interval_minutes
+            if "booking_max_stay_minutes" not in current_serializer.validated_data:
+                save_kwargs["booking_max_stay_minutes"] = tenant.clinic_booking_max_stay_minutes
+            try:
+                current_serializer.save(**save_kwargs)
+            except IntegrityError as e:
+                err_str = str(e)
+                if "uniq_clinic_session_per_tenant_time_loc" in err_str:
+                    raise serializers.ValidationError(
+                        {"non_field_errors": "같은 날짜·시간·장소·학년의 클리닉이 이미 있습니다. 다른 시간, 장소, 또는 학년을 선택해주세요."}
+                    )
+                raise
+            serializer.instance = current_serializer.instance
+
+    def perform_update(self, serializer):
+        tenant = getattr(self.request, "tenant", None)
+        if not tenant:
+            raise serializers.ValidationError(
+                {"tenant": "테넌트 컨텍스트가 필요합니다. (호스트 또는 X-Tenant-Code 확인)"}
+            )
+        expected_signature = self._booking_policy_signature(tenant)
+        expected_updated_at = serializer.instance.updated_at
+        with transaction.atomic():
+            tenant = self._lock_current_booking_policy(tenant, expected_signature)
+            locked_session = Session.objects.select_for_update().get(
+                pk=serializer.instance.pk,
+                tenant=tenant,
+            )
+            if locked_session.updated_at != expected_updated_at:
+                raise serializers.ValidationError({
+                    "session": "클리닉 일정이 변경되었습니다. 화면을 새로고침한 뒤 다시 시도해 주세요."
+                })
+            self.request.tenant = tenant
+            current_serializer = self.get_serializer(
+                locked_session,
+                data=self.request.data,
+                partial=self.request.method == "PATCH",
+            )
+            current_serializer.is_valid(raise_exception=True)
+            updated_session = current_serializer.save()
+            serializer.instance = self.get_queryset().get(pk=updated_session.pk)
 
     def perform_destroy(self, instance):
         """
@@ -490,13 +545,20 @@ class SessionViewSet(viewsets.ModelViewSet):
         - IntegrityError(중복)는 건너뜀
         - tenant는 request.tenant에서 강제 설정
         """
-        from ..serializers import ClinicSessionBulkCreateSerializer
-
         tenant = getattr(request, "tenant", None)
         if not tenant:
             raise serializers.ValidationError(
                 {"tenant": "테넌트 컨텍스트가 필요합니다."}
             )
+
+        expected_signature = self._booking_policy_signature(tenant)
+        with transaction.atomic():
+            tenant = self._lock_current_booking_policy(tenant, expected_signature)
+            request.tenant = tenant
+            return self._bulk_create_with_locked_policy(request, tenant)
+
+    def _bulk_create_with_locked_policy(self, request, tenant):
+        from ..serializers import ClinicSessionBulkCreateSerializer
 
         ser = ClinicSessionBulkCreateSerializer(
             data=request.data,

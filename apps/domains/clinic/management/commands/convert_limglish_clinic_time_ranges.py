@@ -4,6 +4,7 @@ import datetime
 import hashlib
 import json
 
+from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils import timezone
@@ -12,6 +13,7 @@ from apps.core.models import Tenant
 from apps.domains.clinic.models import Session, SessionParticipant
 from apps.domains.clinic.time_ranges import (
     booking_window,
+    ends_at_next_day_midnight_values,
     is_supported_time_range_session,
     session_window,
 )
@@ -86,6 +88,15 @@ def _build_plan(*, tenant, from_date: datetime.date, lock: bool) -> dict:
     range_backfill_session_id_set = {
         session.id for session in sessions if session.booking_mode != "time_range"
     }
+    midnight_session_ids = [
+        session.id
+        for session in sessions
+        if ends_at_next_day_midnight_values(
+            session_date=session.date,
+            start_time=session.start_time,
+            duration_minutes=session.duration_minutes,
+        )
+    ]
     target_participant_ids = []
     fingerprint_participants = []
     for participant in participants:
@@ -179,6 +190,7 @@ def _build_plan(*, tenant, from_date: datetime.date, lock: bool) -> dict:
         "session_by_id": session_by_id,
         "target_session_ids": target_session_ids,
         "target_participant_ids": target_participant_ids,
+        "midnight_session_ids": midnight_session_ids,
         "tenant_default_change_required": tenant_default_change_required,
         "fingerprint_sha256": hashlib.sha256(
             json.dumps(fingerprint, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -194,6 +206,7 @@ def _public_report(*, plan: dict, from_date: datetime.date, mode: str) -> dict:
         "from_date": from_date.isoformat(),
         "target_session_ids": plan["target_session_ids"],
         "target_participant_count": len(plan["target_participant_ids"]),
+        "midnight_session_count": len(plan["midnight_session_ids"]),
         "tenant_default_change_required": plan["tenant_default_change_required"],
         "fingerprint_sha256": plan["fingerprint_sha256"],
         "required_confirmation_token": plan["confirmation_token"],
@@ -227,6 +240,19 @@ class Command(BaseCommand):
             plan = _build_plan(tenant=tenant, from_date=from_date, lock=True)
             if options["confirm"] != plan["confirmation_token"]:
                 raise CommandError("--confirm does not match the current exact conversion plan")
+            if (
+                plan["midnight_session_ids"]
+                and any((
+                    plan["target_session_ids"],
+                    plan["target_participant_ids"],
+                    plan["tenant_default_change_required"],
+                ))
+                and not settings.CLINIC_MIDNIGHT_TIME_RANGE_WRITES_ENABLED
+            ):
+                raise CommandError(
+                    "midnight conversion requires the reader-first release to be live on every "
+                    "API/worker and CLINIC_MIDNIGHT_TIME_RANGE_WRITES_ENABLED=true"
+                )
 
             participant_by_id = {
                 participant.id: participant for participant in plan["participants"]
@@ -277,6 +303,25 @@ class Command(BaseCommand):
                 "clinic_booking_max_stay_minutes",
                 "clinic_allow_multi_slot_booking_default",
             ])
+
+            try:
+                postcondition = _build_plan(
+                    tenant=tenant,
+                    from_date=from_date,
+                    lock=True,
+                )
+            except CommandError as exc:
+                raise CommandError(
+                    f"conversion postcondition failed: {exc}"
+                ) from exc
+            if any((
+                postcondition["target_session_ids"],
+                postcondition["target_participant_ids"],
+                postcondition["tenant_default_change_required"],
+            )):
+                raise CommandError(
+                    "conversion postcondition still has target rows; all writes were rolled back"
+                )
 
         report = _public_report(plan=plan, from_date=from_date, mode="execute")
         report.update({
