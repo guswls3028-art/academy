@@ -172,9 +172,13 @@ ECR basic finding 응답은 설치 패키지 inventory나 `fixedVersion`을 제�
 재유입될 때 차단됨을 확인한다.
 
 수정 PR을 병합한 뒤 새 head의 공식 전체 release로 새로운 immutable 후보와
-완료 scan을 만들어야 한다. main push의 변경 감지가 전체 build를 선택하면 그
-run을 사용하며, 그렇지 않으면 release owner가 기존 run과 겹치지 않게
-`workflow_dispatch` 전체 release를 진행한다. 예전 run의 재실행은 예전 checkout의
+완료 scan을 만들어야 한다. main push가 전체 build를 선택하고 migration gate도
+허용하는 후보만 그 run을 사용한다. contract migration이 포함되면 자동 push는
+계속 차단되며, [배포 방식](deployment-modes.md)의 구버전 호환성 조건을 확인한
+release owner가 기존 run 종료 뒤 정확한 main SHA에서
+`workflow_dispatch`와 `allow_contract_migrations=true`로 전체 release를 진행한다.
+그 밖에 전체 build가 선택되지 않은 경우도 겹치지 않는 새 dispatch를 사용한다.
+예전 run의 재실행은 예전 checkout의
 기준선을 다시 사용한다. 실패 job만 재실행하면 attempt별 baseline artifact와
 image tag도 이전 성공 build와 달라지므로 복구 경로로 사용하지 않는다. 새 run도
 기존 development, isolated preprod/종료, production continuity gate를 모두
