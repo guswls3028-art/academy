@@ -1,11 +1,13 @@
 # 실패 은폐·정상 이용 복구 점검
 
-**상태:** 1차 정적 리뷰, repo-confirmed / runtime-unverified. 제품 수정·운영 재현 미실시.
-**기준:** 2026-09-12, backend `ea0b3ae7866773d0f0a9d8b44056bb3cd68202ab`,
+**상태:** 자동승인 저장 실패는 backend 수리·전체 CI 확인, 실화면/운영 미검증.
+나머지 4개 후보는 미해결, repo-confirmed / runtime-unverified 상태를 유지한다.
+**최초 발견 기준:** 2026-09-12, backend `ea0b3ae7866773d0f0a9d8b44056bb3cd68202ab`,
 frontend `a13ad36ed7d4a8e976c3d0d2874da73e825d21a0`.
 
 이 문서는 긴급 픽스 이후 지휘통제 release owner가 안정화 작업 범위를 배정할
-후보다. 전체 기능을 점검했거나 아래 문제가 운영에서 재현됐다는 기록이 아니다.
+후보와 배정 이후 검증 상태를 기록한다. 전체 기능을 점검했거나 아래 문제가 운영에서
+재현됐다는 기록이 아니다.
 성공 기준은 [변경 위험·실사용 감사 계약](../operations/change-risk-and-release-bundle.md),
 배포 시점은 [배포 시점과 연속성](../operations/deployment-modes.md)을 따른다.
 현재 수정 중인 클리닉·성적·OMR·급여 파일은 해당 소유자가 공유한 exact diff를
@@ -29,6 +31,21 @@ frontend `a13ad36ed7d4a8e976c3d0d2874da73e825d21a0`.
   최종 처리→목록/reload/허용 학생 노출. 반복 준비의 중복 생성과 교차 tenant 접근도 검증한다.
 
 ### P1: 가입 자동승인 설정의 저장 실패가 성공 응답으로 변환
+
+- **현재 상태:** [PR #457](https://github.com/guswls3028-art/academy-backend/pull/457)의
+  `80d3b7018142417789129b98dd76862d609efcd9`에서 backend 저장 실패를 수리했다.
+  저장 트랜잭션 rollback과 요청 객체의 이전 값 복원 후 안전한 `503` 오류를 반환한다.
+  현재 동작과 권한·boolean·신규 가입 경계의 정본은 [학생 생성](../domain/student-creation.md)이다.
+- **검증 근거:** 같은 SHA의 [전체 CI 34698306794](https://github.com/guswls3028-art/academy-backend/actions/runs/34698306794)가
+  SUCCESS다. static/migration, Django smoke/deployment, PostgreSQL transaction/tenant
+  job은 통과했고 조건부 native security arm64 image job은 SKIPPED다. 저장 전/후 예외,
+  rollback, 재시도 후 GET·신규 가입 승인/대기, 역할·tenant 경계의 회귀가 포함됐다.
+  이는 이 문서 통합 후보의 새 CI나 실제 브라우저·운영 검증 결과가 아니다.
+- **남은 검증:** 실제 관리자 화면에서 저장 실패 안내·기존 캐시/입력 보존, 재시도와
+  새로고침, 합성 신규 가입의 승인/대기 반영을 확인해야 한다. 운영 반영과 합성 QA
+  잔여 0도 아직 확인하지 않았으므로 완료로 닫지 않는다.
+
+아래는 최초 발견 기준 SHA의 근거와 당시 수정 경계이며, 수리 후 현재 코드 설명이 아니다.
 
 - `apps/domains/students/views/registration_views.py:494-504`는 `tenant.save()`의
   예외를 `pass`한 뒤 메모리 객체의 요청값을 200으로 반환한다.
