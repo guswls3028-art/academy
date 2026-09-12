@@ -833,6 +833,19 @@ Backend support alone is not proof that the currently deployed frontend uses it.
 Frontend lifecycle ownership:
 `academy-frontend/src/app_student/domains/video/playback/player/HEADLESS_REFACTOR.md`.
 
+Migration0023 is explicitly classified as `contract`: the guard requires review
+for its CHECK constraints and the non-null FK on the newly created receipt table.
+Its compatibility is specific, not a guard exemption: existing/old-process session
+inserts retain database default1, only1/2 are allowed, the receipt table starts
+empty, and forward/reverse DDL remains atomic with bounded lock/statement timeouts.
+PR validation uses `--allow-contract-review`; an ordinary automatic main push must
+still refuse this migration. After rechecking these old/new API and database
+conditions on the exact release main SHA, the release owner must use the official
+`workflow_dispatch` with `allow_contract_migrations=true`, retaining all normal
+development/preproduction/rolling health and continuity gates. Follow
+[deployment modes](../operations/deployment-modes.md); metadata alone is not
+permission to execute or proof of safe current runtime conditions.
+
 Activation is reader-first: migrate and finish every serving BE instance before
 deploying a client that opts into2. There is no global activation flag. An old
 bootstrap response keeps that session on1; an accidentally old server receiving

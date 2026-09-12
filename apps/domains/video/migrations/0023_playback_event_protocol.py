@@ -2,6 +2,17 @@ import django.db.models.deletion
 from django.db import migrations, models
 
 
+ACADEMY_MIGRATION_PHASE = "contract"
+ACADEMY_MIGRATION_REASON = (
+    "Existing and old-process session inserts remain protocol1 through a retained "
+    "DB default1 and an allowed1/2 CHECK. The non-null FK and receipt constraints "
+    "apply only to a newly created empty receipt table. Atomic DDL uses bounded "
+    "lock/statement timeouts; all compatible BE consumers must deploy before FE "
+    "opts into protocol2. Explicit contract deployment requires this rolling "
+    "compatibility to be reverified. No existing audit or counter is rewritten."
+)
+
+
 def set_ddl_timeouts(apps, schema_editor):
     if schema_editor.connection.vendor == "postgresql":
         with schema_editor.connection.cursor() as cursor:
