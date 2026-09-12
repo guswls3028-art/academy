@@ -6,7 +6,8 @@ from datetime import timedelta
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import models, transaction
-from django.db.utils import IntegrityError
+from django.db.utils import DatabaseError, IntegrityError
+from django.http import JsonResponse
 from django.utils import timezone
 
 from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
@@ -44,15 +45,19 @@ from apps.core.permissions import IsStudent, TenantResolvedAndStaff
 from academy.adapters.db.django import repositories_video as video_repo
 from apps.support.video.view_dependencies import (
     clinic_highlight_map_for_video_stats,
+    get_public_video_session,
     get_or_create_public_video_session,
     get_staff_for_video_upload,
     lock_session_for_video_upload,
+    prepare_legacy_public_video_upload_session,
 )
 from ..models import (
     Video,
     VideoFolder,
 )
-from ..serializers import VideoSerializer, VideoDetailSerializer, VideoFolderSerializer
+from ..serializers import (
+    PublicVideoSessionSerializer, VideoSerializer, VideoDetailSerializer, VideoFolderSerializer,
+)
 from ..policy import is_video_progress_complete, normalize_video_max_speed
 from ..services.access_resolver import resolve_access_modes_prefetched
 from ..services.video_encoding import REASON_SUBMIT_FAILED, create_job_and_submit_batch
@@ -657,6 +662,7 @@ class VideoViewSet(VideoPlaybackMixin, ModelViewSet):
         )
 
         # 시스템 강의(공개 영상 컨테이너)인 경우 visibility=PUBLIC 자동 설정
+        session = prepare_legacy_public_video_upload_session(session)
         is_public = getattr(session.lecture, "is_system", False)
         folder_id = request.data.get("folder")
         if folder_id not in (None, ""):
@@ -789,6 +795,7 @@ class VideoViewSet(VideoPlaybackMixin, ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
+        session = prepare_legacy_public_video_upload_session(session)
         is_public = getattr(session.lecture, "is_system", False)
         folder_id = request.data.get("folder")
         if folder_id not in (None, ""):
@@ -872,19 +879,27 @@ class VideoViewSet(VideoPlaybackMixin, ModelViewSet):
     # ==================================================
     # public_session — 공개 영상 업로드/목록용 세션 (테넌트당 1개)
     # ==================================================
-    @transaction.atomic
+    @extend_schema(
+        methods=["GET"],
+        responses={200: {
+            "allOf": [{"$ref": "#/components/schemas/PublicVideoSession"}], "nullable": True,
+        }, 503: OpenApiResponse(description="Read failed; not an unprepared container.")},
+    )
+    @extend_schema(
+        methods=["POST"], request=None,
+        responses={200: PublicVideoSessionSerializer, 503: OpenApiResponse(description="Preparation failed; retry is safe.")},
+    )
     @action(
         detail=False,
-        methods=["get"],
+        methods=["get", "post"],
         url_path="public-session",
         url_name="public-session",
     )
     def public_session(self, request):
         """
-        테넌트당 공개 영상 전용 시스템 Lecture + Session을 get_or_create 하고
-        session_id, lecture_id 를 반환합니다.
-        이 세션에 올린 영상은 visibility=PUBLIC으로 설정되어
-        프로그램(테넌트)에 등록된 모든 학생이 시청 가능합니다.
+        GET은 기존 ID를 조회하고 미준비 상태는 null을 반환합니다.
+        POST는 테넌트당 공개 영상 시스템 Lecture + Session을 준비합니다.
+        구형 컨테이너 정규화도 POST에서만 수행합니다.
         """
         tenant = getattr(request, "tenant", None)
         if not tenant:
@@ -892,9 +907,19 @@ class VideoViewSet(VideoPlaybackMixin, ModelViewSet):
                 {"detail": "테넌트를 확인할 수 없습니다. X-Tenant-Code 헤더가 필요합니다. 같은 도메인(예: tchul.com)으로 접속했는지 확인하세요."},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        lecture, session = get_or_create_public_video_session(
-            tenant=tenant,
-        )
+        try:
+            if request.method == "POST":
+                lecture, session = get_or_create_public_video_session(tenant=tenant)
+            else:
+                lecture, session = get_public_video_session(tenant=tenant)
+        except DatabaseError:
+            logger.exception("public_video_session_failed tenant_id=%s method=%s", tenant.pk, request.method)
+            return Response(
+                {"code": "public_video_session_failed", "detail": "공개 영상 공간을 준비하거나 불러오지 못했습니다. 잠시 후 다시 시도해 주세요."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        if lecture is None or session is None:
+            return JsonResponse(None, safe=False)
         return Response(
             {"session_id": session.id, "lecture_id": lecture.id},
             status=status.HTTP_200_OK,

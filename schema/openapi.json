@@ -11290,6 +11290,23 @@
         ],
         "type": "object"
       },
+      "PublicVideoSession": {
+        "properties": {
+          "lecture_id": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "session_id": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "lecture_id",
+          "session_id"
+        ],
+        "type": "object"
+      },
       "PublicViewCount": {
         "properties": {
           "view_count": {
@@ -36357,18 +36374,56 @@
     },
     "/api/v1/media/videos/public-session/": {
       "get": {
-        "description": "테넌트당 공개 영상 전용 시스템 Lecture + Session을 get_or_create 하고\nsession_id, lecture_id 를 반환합니다.\n이 세션에 올린 영상은 visibility=PUBLIC으로 설정되어\n프로그램(테넌트)에 등록된 모든 학생이 시청 가능합니다.",
+        "description": "GET은 기존 ID를 조회하고 미준비 상태는 null을 반환합니다.\nPOST는 테넌트당 공개 영상 시스템 Lecture + Session을 준비합니다.\n구형 컨테이너 정규화도 POST에서만 수행합니다.",
         "operationId": "media_videos_public_session_retrieve",
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SealedVideo"
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/PublicVideoSession"
+                    }
+                  ],
+                  "nullable": true
                 }
               }
             },
             "description": ""
+          },
+          "503": {
+            "description": "Read failed; not an unprepared container."
+          }
+        },
+        "security": [
+          {
+            "jwtAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "tags": [
+          "media"
+        ]
+      },
+      "post": {
+        "description": "GET은 기존 ID를 조회하고 미준비 상태는 null을 반환합니다.\nPOST는 테넌트당 공개 영상 시스템 Lecture + Session을 준비합니다.\n구형 컨테이너 정규화도 POST에서만 수행합니다.",
+        "operationId": "media_videos_public_session_create",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicVideoSession"
+                }
+              }
+            },
+            "description": ""
+          },
+          "503": {
+            "description": "Preparation failed; retry is safe."
           }
         },
         "security": [
