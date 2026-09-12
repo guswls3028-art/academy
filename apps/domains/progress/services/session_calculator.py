@@ -15,6 +15,7 @@ from apps.support.progress.session_calculator_dependencies import (
     get_exam_model,
     get_result_attempt_models,
     homework_score_exists,
+    homework_teacher_approval_passed,
 )
 
 
@@ -342,11 +343,9 @@ class SessionProgressCalculator:
                 )
 
             elif policy.homework_pass_type == ProgressPolicy.HomeworkPassType.TEACHER_APPROVAL:
-                obj.homework_passed = homework_score_exists(
+                obj.homework_passed = homework_teacher_approval_passed(
                     enrollment_id=enrollment_id,
-                    session_id=session.id,
-                    attempt_index=1,
-                    teacher_approved=True,
+                    session=session,
                 )
         else:
             obj.homework_passed = True

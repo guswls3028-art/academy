@@ -46,6 +46,18 @@ def dispatch_progress_pipeline(
     )
 
 
+def schedule_homework_target_progress(*, session_id: int, enrollment_ids: Iterable[int]) -> None:
+    """Refresh validated homework roster additions only after the edit commits."""
+    from apps.domains.progress.services.clinic_resolution_service import (
+        _dispatch_progress_for_enrollment_session,
+    )
+
+    for enrollment_id in sorted({int(value) for value in enrollment_ids}):
+        _dispatch_progress_for_enrollment_session(
+            enrollment_id=enrollment_id, session_id=int(session_id),
+        )
+
+
 def resolve_removed_source_clinic_links(
     *,
     tenant_id: int,
