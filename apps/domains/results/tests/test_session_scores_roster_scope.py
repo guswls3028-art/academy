@@ -1656,6 +1656,14 @@ class SessionScoresRosterScopeTests(TestCase):
         clinic_session.save(update_fields=["date", "updated_at"])
         participant.status = session_participant_model.Status.ATTENDED
         participant.save(update_fields=["status", "updated_at"])
+        newer_requirement_row = read_row()
+        self.assertTrue(newer_requirement_row["clinic_required"])
+        self.assertTrue(newer_requirement_row["name_highlight_clinic_target"])
+
+        # Ongoing attendance may survive midnight for its original assessment,
+        # but an older clinic cannot cover a requirement created after it.
+        self.session.date = timezone.localdate() - datetime.timedelta(days=2)
+        self.session.save(update_fields=["date", "updated_at"])
         self.assertFalse(read_row()["name_highlight_clinic_target"])
 
         participant.completed_at = timezone.now()
