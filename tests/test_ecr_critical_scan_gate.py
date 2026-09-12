@@ -193,44 +193,34 @@ def test_high_baseline_is_exact_and_allows_non_increase() -> None:
     assert gate.evaluate_high_budget("academy-base", findings, baselines, known) == 3
 
 
+@pytest.mark.parametrize("repository", sorted(gate.REPOSITORIES))
+def test_completed_candidate_scans_match_reduced_high_baseline(repository: str) -> None:
+    # Run 34687613434: all six exact candidate digests completed with these
+    # three High identities, not a fixture derived from the policy under test.
+    findings = _scan(
+        _finding("CVE-2026-11822", "sqlite3", "3.46.1-7+deb13u1", "HIGH"),
+        _finding("CVE-2026-11824", "sqlite3", "3.46.1-7+deb13u1", "HIGH"),
+        _finding("CVE-2026-5928", "glibc", "2.41-12+deb13u3", "HIGH"),
+    )
+    baselines, known = gate.load_high_baselines(
+        Path(__file__).parents[1] / "docs" / "ssot" / "ecr-high-risk-baseline.json",
+        date(2026, 9, 12),
+    )
+
+    assert gate.evaluate_high_budget(repository, findings, baselines, known) == 3
+    assert baselines[repository] == 3
+
+
 def test_current_high_acceptances_are_exact_and_time_bounded() -> None:
     path = Path(__file__).parents[1] / "docs" / "ssot" / "ecr-high-risk-baseline.json"
     document = json.loads(path.read_text(encoding="utf-8"))
     accepted = document["acceptedHighFindings"]
 
-    libssh2 = [entry for entry in accepted if entry["packageName"] == "libssh2"]
-    glib = [entry for entry in accepted if entry["packageName"] == "glib2.0"]
-    openssl = [entry for entry in accepted if entry["packageName"] == "openssl"]
-    assert len(accepted) == 16
-    assert {entry["cve"] for entry in libssh2} == {
-        "CVE-2026-58050",
-        "CVE-2026-58051",
-        "CVE-2026-66032",
-        "CVE-2026-66033",
-        "CVE-2026-66034",
-        "CVE-2026-66035",
-    }
+    assert len(accepted) == 3
     assert {entry["expiresOn"] for entry in accepted} == {"2026-09-19"}
     assert all(
-        entry["repositories"]
-        == ["academy-api", "academy-ai-worker-cpu", "academy-tools-worker"]
-        for entry in libssh2
+        set(entry["repositories"]) == gate.REPOSITORIES for entry in accepted
     )
-    assert {entry["cve"] for entry in glib} == {
-        "CVE-2026-16118",
-        "CVE-2026-58010",
-        "CVE-2026-58011",
-        "CVE-2026-58012",
-        "CVE-2026-58013",
-        "CVE-2026-58014",
-        "CVE-2026-58015",
-    }
-    assert all(
-        entry["repositories"]
-        == ["academy-api", "academy-ai-worker-cpu", "academy-tools-worker"]
-        for entry in glib
-    )
-    assert openssl == []
     assert all(
         entry["vendorTracker"]
         == f"https://security-tracker.debian.org/tracker/{entry['cve']}"
@@ -244,46 +234,45 @@ def test_current_high_acceptances_are_exact_and_time_bounded() -> None:
         ("CVE-2026-11822", "sqlite3", "3.46.1-7+deb13u1"),
         ("CVE-2026-11824", "sqlite3", "3.46.1-7+deb13u1"),
         ("CVE-2026-5928", "glibc", "2.41-12+deb13u3"),
+    }
+
+
+@pytest.mark.parametrize(
+    "repository", ["academy-api", "academy-ai-worker-cpu", "academy-tools-worker"]
+)
+@pytest.mark.parametrize(
+    ("cve", "package", "version"),
+    [
+        ("CVE-2026-16118", "glib2.0", "2.84.4-3~deb13u3"),
         ("CVE-2026-58010", "glib2.0", "2.84.4-3~deb13u3"),
         ("CVE-2026-58011", "glib2.0", "2.84.4-3~deb13u3"),
         ("CVE-2026-58012", "glib2.0", "2.84.4-3~deb13u3"),
         ("CVE-2026-58013", "glib2.0", "2.84.4-3~deb13u3"),
         ("CVE-2026-58014", "glib2.0", "2.84.4-3~deb13u3"),
         ("CVE-2026-58015", "glib2.0", "2.84.4-3~deb13u3"),
-        ("CVE-2026-16118", "glib2.0", "2.84.4-3~deb13u3"),
         ("CVE-2026-58050", "libssh2", "1.11.1-1+deb13u1"),
         ("CVE-2026-58051", "libssh2", "1.11.1-1+deb13u1"),
         ("CVE-2026-66032", "libssh2", "1.11.1-1+deb13u1"),
         ("CVE-2026-66033", "libssh2", "1.11.1-1+deb13u1"),
         ("CVE-2026-66034", "libssh2", "1.11.1-1+deb13u1"),
         ("CVE-2026-66035", "libssh2", "1.11.1-1+deb13u1"),
-    }
+    ],
+)
+def test_retired_ocr_high_identity_cannot_return_within_budget(
+    repository: str, cve: str, package: str, version: str
+) -> None:
+    baselines, known = gate.load_high_baselines(
+        Path(__file__).parents[1] / "docs" / "ssot" / "ecr-high-risk-baseline.json",
+        date(2026, 9, 12),
+    )
+    findings = _scan(
+        _finding("CVE-2026-11822", "sqlite3", "3.46.1-7+deb13u1", "HIGH"),
+        _finding("CVE-2026-11824", "sqlite3", "3.46.1-7+deb13u1", "HIGH"),
+        _finding(cve, package, version, "HIGH"),
+    )
 
-    baselines, known = gate.load_high_baselines(path, date(2026, 8, 23))
-    api_findings = _scan(
-        *(
-            _finding(cve, package, version, "HIGH")
-            for repository, cve, package, version in sorted(known)
-            if repository == "academy-api"
-        )
-    )
-    assert gate.evaluate_high_budget("academy-api", api_findings, baselines, known) == 16
-    tools_findings = _scan(
-        *(
-            _finding(cve, package, version, "HIGH")
-            for repository, cve, package, version in sorted(known)
-            if repository == "academy-tools-worker"
-        )
-    )
-    assert (
-        gate.evaluate_high_budget(
-            "academy-tools-worker",
-            tools_findings,
-            baselines,
-            known,
-        )
-        == 16
-    )
+    with pytest.raises(gate.GateError, match="unreviewed High ECR finding"):
+        gate.evaluate_high_budget(repository, findings, baselines, known)
 
 
 def test_expired_high_acceptance_blocks_before_scanning() -> None:
@@ -302,8 +291,8 @@ def test_high_acceptance_remains_valid_through_expiry_day() -> None:
         Path(__file__).parents[1] / "docs" / "ssot" / "ecr-high-risk-baseline.json",
         date(2026, 9, 19),
     )
-    assert baselines["academy-api"] == 16
-    assert len([key for key in reviewed if key[0] == "academy-api"]) == 16
+    assert baselines["academy-api"] == 3
+    assert len([key for key in reviewed if key[0] == "academy-api"]) == 3
 
 
 def test_base_image_requires_security_fixed_openssl() -> None:
