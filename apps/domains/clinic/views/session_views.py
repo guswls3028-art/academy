@@ -92,7 +92,9 @@ class SessionViewSet(viewsets.ModelViewSet):
         )
 
     def _lock_current_booking_policy(self, tenant, expected_signature):
-        locked_tenant = tenant.__class__.objects.select_for_update().get(pk=tenant.pk)
+        locked_tenant = tenant.__class__.objects.select_for_update(no_key=True).get(
+            pk=tenant.pk
+        )
         if self._booking_policy_signature(locked_tenant) != expected_signature:
             raise serializers.ValidationError({
                 "booking_policy": (

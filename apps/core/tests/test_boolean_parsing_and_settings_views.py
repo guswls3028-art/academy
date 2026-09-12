@@ -25,6 +25,7 @@ class TestParseBool(SimpleTestCase):
 class TestSettingsBooleanParsing(SimpleTestCase):
     def setUp(self):
         self.tenant = SimpleNamespace(
+            pk=1,
             student_registration_auto_approve=True,
             clinic_use_daily_random=True,
             clinic_auto_approve_booking=True,
@@ -51,7 +52,16 @@ class TestSettingsBooleanParsing(SimpleTestCase):
             data={"use_daily_random": "false", "auto_approve_booking": "false"},
             tenant=self.tenant,
         )
-        with patch("apps.domains.clinic.views.settings_views.transaction.atomic", return_value=nullcontext()):
+        with (
+            patch(
+                "apps.domains.clinic.views.settings_views.transaction.atomic",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "apps.domains.clinic.views.settings_views.Tenant.objects.select_for_update"
+            ) as select_for_update,
+        ):
+            select_for_update.return_value.get.return_value = self.tenant
             response = ClinicSettingsView().patch(request)
 
         self.assertEqual(response.status_code, 200)

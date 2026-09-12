@@ -44,7 +44,7 @@ def _confirmation_token(payload: dict) -> str:
 def _exact_tenant(*, lock: bool):
     queryset = Tenant.objects
     if lock:
-        queryset = queryset.select_for_update()
+        queryset = queryset.select_for_update(no_key=True)
     matches = list(queryset.filter(code=TENANT_CODE))
     if len(matches) != 1:
         raise CommandError(f"tenant code {TENANT_CODE!r} must resolve exactly one row")
@@ -52,7 +52,9 @@ def _exact_tenant(*, lock: bool):
 
 
 def _build_plan(*, tenant, from_date: datetime.date, lock: bool) -> dict:
-    sessions = Session.objects.filter(tenant=tenant, date__gte=from_date).order_by("id")
+    sessions = Session.objects.filter(tenant=tenant, date__gte=from_date).order_by(
+        "date", "start_time", "id"
+    )
     if lock:
         sessions = sessions.select_for_update()
     sessions = list(sessions)

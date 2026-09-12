@@ -6,6 +6,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
+from apps.core.models import Tenant
 from apps.core.parsing import parse_bool
 from apps.core.permissions import TenantResolvedAndStaff
 from apps.core.services.tenant_access import get_authorized_tenant_role
@@ -69,7 +70,7 @@ class ClinicSettingsView(APIView):
             raise PermissionDenied("예약 정책은 대표 또는 관리자만 변경할 수 있습니다.")
 
         with transaction.atomic():
-            tenant = tenant.__class__.objects.select_for_update().get(pk=tenant.pk)
+            tenant = Tenant.objects.select_for_update().get(pk=tenant.pk)
             update_fields = []
             if "use_daily_random" in request.data:
                 tenant.clinic_use_daily_random = parse_bool(
