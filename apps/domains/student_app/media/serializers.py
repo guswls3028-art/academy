@@ -47,6 +47,10 @@ class StudentVideoListItemSerializer(serializers.Serializer):
     )
 
 
+class StudentVideoPlaybackRequestSerializer(serializers.Serializer):
+    event_protocol_version = serializers.ChoiceField(choices=[1, 2], default=1)
+
+
 class StudentVideoPlaybackSerializer(serializers.Serializer):
     """
     학생 플레이어가 신뢰하는 단일 진실 payload
@@ -61,6 +65,7 @@ class StudentVideoPlaybackSerializer(serializers.Serializer):
     playback_session_id = serializers.CharField(allow_null=True, required=False)
     playback_expires_at = serializers.IntegerField(allow_null=True, required=False)
     policy_version = serializers.IntegerField(min_value=1)
+    event_protocol_version = serializers.ChoiceField(choices=[1, 2], default=1)
 
     policy = serializers.DictField()
 

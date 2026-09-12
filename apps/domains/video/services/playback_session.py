@@ -29,6 +29,17 @@ def _session_now():
     return timezone.now()
 
 
+def _receipt_session(session_id, student_id=None):
+    # Classify ownership before student filtering; a wrong owner must not turn a
+    # known protocol2 session into a legacy Redis fallback.
+    session = VideoPlaybackSession.objects.filter(session_id=session_id, event_protocol_version=2).first()
+    if session is not None and student_id is not None and session.enrollment.student_id != student_id:
+        from rest_framework.exceptions import PermissionDenied
+
+        raise PermissionDenied("session_scope_mismatch")
+    return session
+
+
 def _cleanup_expired_sessions(student_id: int) -> None:
     video_repo.playback_session_cleanup_expired(student_id)
 
@@ -99,6 +110,20 @@ def heartbeat_session(*, student_id: int, session_id: str, ttl_seconds: int) -> 
     - Redis 사용 시: DB 쓰기 없이 Redis에만 버퍼링 (Write-Behind)
     - Redis 미사용/장애 시: 기존 DB 기반 로직
     """
+    receipt_session = _receipt_session(session_id, student_id)
+    if receipt_session is not None:
+        with transaction.atomic():
+            session = VideoPlaybackSession.objects.select_for_update().filter(pk=receipt_session.pk).first()
+            now = timezone.now()
+            if session is None or session.status != VideoPlaybackSession.Status.ACTIVE or session.is_revoked or (
+                session.expires_at is not None and session.expires_at <= now
+            ):
+                return False
+            # Only permission-revalidated renewal extends the lease. An old
+            # heartbeat can neither exceed an entitlement nor shorten a new lease.
+            session.last_seen = now
+            session.save(update_fields=["last_seen"])
+        return True
     if is_redis_available():
         ok = buffer_heartbeat_session_ttl(session_id=session_id, ttl_seconds=ttl_seconds)
         if ok:
@@ -129,6 +154,8 @@ def end_session(*, student_id: int, session_id: str) -> None:
     - Redis 사용 시: Write-Behind flush (Redis stats → DB) 후 종료
     - Redis 미사용 시: 기존 DB 기반
     """
+    if _receipt_session(session_id, student_id) is not None:
+        raise ValueError("protocol2 end requires the receipt-aware boundary")
     now = timezone.now()
 
     if is_redis_available():
@@ -164,6 +191,16 @@ def revoke_session(*, student_id: int, session_id: str) -> None:
     서버 강제 차단
     - Redis 사용 시: Write-Behind flush 후 차단
     """
+    receipt_session = _receipt_session(session_id, student_id)
+    if receipt_session is not None:
+        with transaction.atomic():
+            session = VideoPlaybackSession.objects.select_for_update().filter(pk=receipt_session.pk).first()
+            if session is not None and session.status == VideoPlaybackSession.Status.ACTIVE:
+                session.status = VideoPlaybackSession.Status.REVOKED
+                session.is_revoked = True
+                session.ended_at = timezone.now()
+                session.save(update_fields=["status", "is_revoked", "ended_at"])
+        return
     now = timezone.now()
 
     if is_redis_available():
@@ -196,6 +233,13 @@ def is_session_active(*, student_id: int, session_id: str) -> bool:
     - Redis 사용 시: session:{session_id}:meta 존재 여부 (heartbeat로 TTL 연장)
     - Redis 미사용/장애 시: DB 기반
     """
+    receipt_session = _receipt_session(session_id, student_id)
+    if receipt_session is not None:
+        return (
+            receipt_session.status == VideoPlaybackSession.Status.ACTIVE
+            and not receipt_session.is_revoked
+            and (receipt_session.expires_at is None or receipt_session.expires_at > timezone.now())
+        )
     if is_redis_available():
         if has_session_meta(session_id):
             return True
@@ -239,6 +283,8 @@ def record_session_event(
     - Redis 사용 시: DB 쓰기 없이 Redis에만 버퍼링 (Write-Behind)
     - Redis 미사용/장애 시: DB 기반
     """
+    if _receipt_session(session_id, student_id) is not None:
+        raise ValueError("protocol2 events require the receipt-aware boundary")
     if is_redis_available():
         ok, stats = buffer_session_event(
             session_id=session_id,
@@ -274,6 +320,9 @@ def get_session_violation_stats(*, session_id: str) -> Dict[str, int]:
     - Redis 사용 시: Redis에서 조회 (실시간)
     - Redis 미사용/장애 시: DB 기반
     """
+    receipt_session = _receipt_session(session_id)
+    if receipt_session is not None:
+        return {"total": receipt_session.total_count, "violated": receipt_session.violated_count}
     if is_redis_available():
         stats = get_session_violation_stats_redis(session_id)
         if stats is not None:

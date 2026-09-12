@@ -59,6 +59,7 @@ from .serializers import (
     StudentVideoForwardSkipResponseSerializer,
     StudentVideoListItemSerializer,
     StudentVideoPlaybackSerializer,
+    StudentVideoPlaybackRequestSerializer,
 )
 
 
@@ -948,13 +949,17 @@ class StudentVideoPlaybackView(APIView):
         return self._resolve_playback(request, video_id)
 
     @extend_schema(
-        request=None,
+        request=StudentVideoPlaybackRequestSerializer,
         responses={200: StudentVideoPlaybackSerializer},
     )
     def post(self, request, video_id: int):
-        return self._resolve_playback(request, video_id)
+        serializer = StudentVideoPlaybackRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        return self._resolve_playback(
+            request, video_id, event_protocol_version=serializer.validated_data["event_protocol_version"],
+        )
 
-    def _resolve_playback(self, request, video_id: int):
+    def _resolve_playback(self, request, video_id: int, *, event_protocol_version=1):
         Video, VideoPermission = _import_media_models()
         explicit_enrollment_id = _get_explicit_enrollment_id(request)
         access_check = parse_query_bool(
@@ -1133,6 +1138,7 @@ class StudentVideoPlaybackView(APIView):
         playback_session_id = None
         playback_expires_at = None
         playback_policy_version = int(getattr(video, "policy_version", 1) or 1)
+        playback_event_protocol_version = 1
         if enrollment_obj or direct_entitlement is not None:
             try:
                 if direct_entitlement is not None:
@@ -1147,10 +1153,12 @@ class StudentVideoPlaybackView(APIView):
                         enrollment=enrollment_obj,
                         user=request.user,
                         device_id=str(request.headers.get("X-Device-Id") or request.user.id),
+                        event_protocol_version=event_protocol_version,
                     )
                 playback_token = playback_grant.token
                 playback_session_id = playback_grant.session_id
                 playback_expires_at = playback_grant.expires_at
+                playback_event_protocol_version = playback_grant.event_protocol_version
                 playback_policy_version = (
                     playback_grant.policy_version or playback_policy_version
                 )
@@ -1290,6 +1298,7 @@ class StudentVideoPlaybackView(APIView):
             "playback_session_id": playback_session_id,
             "playback_expires_at": playback_expires_at,
             "policy_version": playback_policy_version,
+            "event_protocol_version": playback_event_protocol_version,
             "policy": {
                 **playback_policy,
                 "source": {

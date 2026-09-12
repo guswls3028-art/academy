@@ -486,7 +486,12 @@ class InactiveVideoEntitlementMigrationCycleTests(TransactionTestCase):
         with connection.cursor() as cursor:
             return set(connection.introspection.table_names(cursor))
 
+    def _restore_current_schema(self):
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes("video"))
+
     def test_apply_rollback_apply_preserves_current_unique_constraint(self):
+        self.addCleanup(self._restore_current_schema)
         self._migrate(self.migrate_from)
         self.assertNotIn(self.table_name, self._table_names())
 

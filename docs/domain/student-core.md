@@ -739,10 +739,131 @@ same transaction that marks every ACTIVE monitored playback session for that
 lecture `REVOKED`. A concurrent playback grant uses the same lecture-first lock,
 so it either commits before close and is revoked by that close transaction, or
 observes the committed close and issues no token/session. Refresh and heartbeat
-reject existing regular-lecture tokens after close. Client disposal may still
+reject existing regular-lecture tokens after close. Legacy protocol1 disposal may still
 flush final Redis violation/total counters, but its ACTIVE-only status update
 cannot downgrade a server `REVOKED` row to `ENDED`. System-library lectures are
 excluded from this close-time revocation compatibility path.
+
+### Receipt-aware playback audit and finalization (protocol2)
+
+The normal student/selected-child parent `POST .../playback/` bootstrap, and
+`POST /api/v1/media/playback/start/`, accept optional `event_protocol_version: 2`.
+Omission remains protocol1. The grant response, signed playback token, and
+monitored `VideoPlaybackSession.event_protocol_version` agree; renewal preserves
+the protocol and session identity. FREE_REVIEW/direct access stays protocol1
+without a monitored session. The existing GET access check remains read-only;
+GET without `access_check=true` is still not a playback bootstrap.
+
+Protocol1 retains its existing events/end and Redis write-behind semantics.
+Existing sessions and historical counters are not upgraded, rewritten or merged.
+Migration0023 adds a persistent database default1, not only a Python default:
+old API processes inserting without the column continue to create protocol1.
+A database CHECK allows only1/2. The new receipt table inherits exact tenant,
+student, enrollment and video scope through its playback-session FK.
+
+Protocol2 clients use distinct URLs so an old API cannot ignore the final event
+payload and return a misleading200:
+
+- `POST /api/v1/media/playback/v2/events/`: `{token, batch: {batch_id, events}}`.
+- `POST /api/v1/media/playback/v2/end/`: `{token, batches: [...]}`; `batches` is
+  required, with an explicit empty list when every prior event is acknowledged.
+
+Each batch has a stable UUID,1-50 events and at most8KiB of normalized UTF-8 JSON.
+Finalization accepts0-8 batches and at most200 events; the entire HTTP request,
+including token and framing, must fit48KiB. Unknown envelope/event fields,
+duplicate batch IDs, invalid JSON payloads, missing final batches and overflow
+fail before mutation. A v2 session cannot use legacy events/end, and a v1
+session cannot use the new URLs. This separation is intentional compatibility,
+not an unavailable generally offered feature: clients select only the protocol
+explicitly returned by their successful bootstrap.
+
+`VideoPlaybackEventBatch` stores exact session+UUID uniqueness, a normalized
+payload SHA256, event/violation counts and creation time. A token renewal or
+server timestamp does not change the immutable batch identity. Same ID and
+payload acknowledge the existing receipt without another write, including after
+ENDED/REVOKED/EXPIRED; another payload under that ID conflicts. A previously
+unknown batch after terminal status or expiry is rejected. All calls still
+require valid signed token, authenticated user, resolved tenant and the exact
+currently selected student/owned child; a duplicate is not a way to use another
+tenant, child, session or payload.
+
+The v2 service takes the existing lecture -> lesson -> enrollment -> video ->
+optional inactive-entitlement scope locks before the exact playback-session
+lock. It commits new receipts, audit rows, DB counters and final status in one
+transaction. An admitted batch holds the session lock until its audit is durable,
+so concurrent end cannot publish partial final counters. A final request carries
+the same still-unacknowledged batches as in-flight ordinary requests: whichever
+commits first stores the evidence, and the later request only acknowledges exact
+receipts. This closes pre-admission overtaking without accepting arbitrary events
+for an ended token. Current policy resolution must succeed; it cannot silently
+substitute an empty policy. The existing violation threshold may make finalization
+REVOKED, never falsely ENDED. Known receipts/empty disposal take only the exact
+session lock and do not reopen closed access or acquire upper locks afterward.
+
+For protocol2 the DB is also authoritative for the session lease, active state,
+violation counts and revocation. Grant/heartbeat/renewal do not create or refresh
+Redis session metadata, and events/end/revoke never import stale Redis counts.
+Heartbeat updates only `last_seen`; only the existing permission-revalidated
+renewal may extend `expires_at`. A heartbeat cannot outlive a short inactive
+entitlement or shrink a newer lease when an older still-valid token arrives late.
+Protocol2 generic lifecycle helpers identify the stored protocol before owner
+filtering so a wrong student cannot fall through to a legacy Redis path.
+Lecture-close and expiry remain status-only DB operations, preserving counters.
+These changes do not alter video progress, attendance or learning-completion policy.
+
+Successful events201/finalization200 return `protocol_version: 2`, current
+`session_status`, `inserted_count` and `acknowledgements` containing each exact
+`batch_id`, `event_count`, and `duplicate`. Inserted count is zero for a replay,
+not the number acknowledged. Validation/scope/conflict responses are not success.
+Unexpected policy/DB failures roll back the whole operation and return503 with
+`detail=playback_events_unavailable` and a correlation `request_id`; server logs
+retain the corresponding exception for investigation. Clients must keep immutable
+pending batches until these exact acknowledgements, preserve them on retryable
+failure, and show pending/retry rather than claiming a save. They must not drop
+the old300-event queue prefix, clear non409 failures, or fall back to token-only
+end for a protocol2 session.
+
+The coordinated frontend HLS/YouTube controllers must drain oversized pending
+queues during normal navigation and measure final request bytes, with at most
+48KiB of owned simultaneous keepalive bodies per document. Auth generation,
+tenant, selected-child and session isolation still apply; BFCache persisted
+pagehide is not a final end. No offline credential store, unbounded unload batch,
+arbitrary expired-token replay or guaranteed delivery after OS kill is provided.
+Backend support alone is not proof that the currently deployed frontend uses it.
+Frontend lifecycle ownership:
+`academy-frontend/src/app_student/domains/video/playback/player/HEADLESS_REFACTOR.md`.
+
+Migration0023 is explicitly classified as `contract`: the guard requires review
+for its CHECK constraints and the non-null FK on the newly created receipt table.
+Its compatibility is specific, not a guard exemption: existing/old-process session
+inserts retain database default1, only1/2 are allowed, the receipt table starts
+empty, and forward/reverse DDL remains atomic with bounded lock/statement timeouts.
+PR validation uses `--allow-contract-review`; an ordinary automatic main push must
+still refuse this migration. After rechecking these old/new API and database
+conditions on the exact release main SHA, the release owner must use the official
+`workflow_dispatch` with `allow_contract_migrations=true`, retaining all normal
+development/preproduction/rolling health and continuity gates. Follow
+[deployment modes](../operations/deployment-modes.md); metadata alone is not
+permission to execute or proof of safe current runtime conditions.
+
+Activation is reader-first: migrate and finish every serving BE instance before
+deploying a client that opts into2. There is no global activation flag. An old
+bootstrap response keeps that session on1; an accidentally old server receiving
+a v2 URL returns an error, not a silent legacy success. Once2 sessions are issued,
+BE rollback must retain v2 support until those sessions and renewable clients
+drain, or use a compatible roll-forward. FE rollback alone does not stop already
+open tabs; never force-reload them or assume a fixed TTL drains renewal.
+
+Focused verification: `tests/test_video_final_event_atomicity_pg.py` uses actual
+PostgreSQL connections and real DRF endpoints for both arrival orders, end lock
+waiting, concurrent duplicates, rollback/retry, scope/parent isolation, terminal
+state and DB-default compatibility. Redis-boundary mocks prove no-call/legacy
+routing, not a live Redis deployment. Preserve existing
+`tests/test_video_access_security.py`, inactive/direct-entitlement regressions,
+and full official PostgreSQL CI. Completion additionally requires the coordinated
+FE to perform actual fullscreen -> event acknowledgement -> finalization ->
+DB/readback through reload/navigation on desktop and390px in isolated development,
+followed by exact synthetic-data cleanup; APIRequestFactory is not HTTP-login E2E.
 
 Add for frontend account/student UI changes:
 

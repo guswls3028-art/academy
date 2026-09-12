@@ -2762,6 +2762,14 @@
         ],
         "type": "object"
       },
+      "EventProtocolVersionEnum": {
+        "description": "* `1` - 1\n* `2` - 2",
+        "enum": [
+          1,
+          2
+        ],
+        "type": "integer"
+      },
       "EventTypeEnum": {
         "description": "* `VISIBILITY_HIDDEN` - 탭 숨김\n* `VISIBILITY_VISIBLE` - 탭 노출\n* `FOCUS_LOST` - 포커스 이탈\n* `FOCUS_GAINED` - 포커스 복귀\n* `SEEK_ATTEMPT` - 탐색 시도\n* `SPEED_CHANGE_ATTEMPT` - 배속 변경 시도\n* `FULLSCREEN_ENTER` - 전체화면 진입\n* `FULLSCREEN_EXIT` - 전체화면 종료\n* `PLAYER_ERROR` - 플레이어 오류",
         "enum": [
@@ -9694,6 +9702,14 @@
           "access_mode": {
             "$ref": "#/components/schemas/StudentVideoEffectiveAccessMode"
           },
+          "event_protocol_version": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/EventProtocolVersionEnum"
+              }
+            ],
+            "default": 1
+          },
           "monitoring_enabled": {
             "type": "boolean"
           },
@@ -9727,6 +9743,121 @@
           "playback_session_id",
           "playback_token",
           "policy_version"
+        ],
+        "type": "object"
+      },
+      "PlaybackV2Acknowledgement": {
+        "properties": {
+          "batch_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "duplicate": {
+            "type": "boolean"
+          },
+          "event_count": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "batch_id",
+          "duplicate",
+          "event_count"
+        ],
+        "type": "object"
+      },
+      "PlaybackV2BatchRequest": {
+        "properties": {
+          "batch_id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/PlaybackV2EventRequest"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "batch_id",
+          "events"
+        ],
+        "type": "object"
+      },
+      "PlaybackV2EndRequestRequest": {
+        "properties": {
+          "batches": {
+            "items": {
+              "$ref": "#/components/schemas/PlaybackV2BatchRequest"
+            },
+            "type": "array"
+          },
+          "token": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "batches",
+          "token"
+        ],
+        "type": "object"
+      },
+      "PlaybackV2EventRequest": {
+        "properties": {
+          "occurred_at": {
+            "type": "integer"
+          },
+          "payload": {},
+          "type": {
+            "$ref": "#/components/schemas/EventTypeEnum"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "PlaybackV2EventsRequestRequest": {
+        "properties": {
+          "batch": {
+            "$ref": "#/components/schemas/PlaybackV2BatchRequest"
+          },
+          "token": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "batch",
+          "token"
+        ],
+        "type": "object"
+      },
+      "PlaybackV2Response": {
+        "properties": {
+          "acknowledgements": {
+            "items": {
+              "$ref": "#/components/schemas/PlaybackV2Acknowledgement"
+            },
+            "type": "array"
+          },
+          "inserted_count": {
+            "type": "integer"
+          },
+          "protocol_version": {
+            "type": "integer"
+          },
+          "session_status": {
+            "$ref": "#/components/schemas/SessionStatusEnum"
+          }
+        },
+        "required": [
+          "acknowledgements",
+          "inserted_count",
+          "protocol_version",
+          "session_status"
         ],
         "type": "object"
       },
@@ -13019,6 +13150,16 @@
           "updated_at"
         ],
         "type": "object"
+      },
+      "SessionStatusEnum": {
+        "description": "* `ACTIVE` - 활성\n* `ENDED` - 종료\n* `REVOKED` - 차단\n* `EXPIRED` - 만료",
+        "enum": [
+          "ACTIVE",
+          "ENDED",
+          "REVOKED",
+          "EXPIRED"
+        ],
+        "type": "string"
       },
       "SessionTypeEnum": {
         "description": "* `REGULAR` - 정규\n* `SUPPLEMENT` - 보강",
@@ -16663,6 +16804,14 @@
       "StudentVideoPlayback": {
         "description": "학생 플레이어가 신뢰하는 단일 진실 payload",
         "properties": {
+          "event_protocol_version": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/EventProtocolVersionEnum"
+              }
+            ],
+            "default": 1
+          },
           "hls_url": {
             "nullable": true,
             "type": "string"
@@ -16715,6 +16864,19 @@
             "$ref": "#/components/schemas/StudentVideoAccessCheck"
           }
         ]
+      },
+      "StudentVideoPlaybackRequestRequest": {
+        "properties": {
+          "event_protocol_version": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/EventProtocolVersionEnum"
+              }
+            ],
+            "default": 1
+          }
+        },
+        "type": "object"
       },
       "Submission": {
         "properties": {
@@ -35266,6 +35428,102 @@
         ]
       }
     },
+    "/api/v1/media/playback/v2/end/": {
+      "post": {
+        "operationId": "media_playback_v2_end_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlaybackV2EndRequestRequest"
+              }
+            },
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/PlaybackV2EndRequestRequest"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/PlaybackV2EndRequestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlaybackV2Response"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "jwtAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "tags": [
+          "media"
+        ]
+      }
+    },
+    "/api/v1/media/playback/v2/events/": {
+      "post": {
+        "operationId": "media_playback_v2_events_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlaybackV2EventsRequestRequest"
+              }
+            },
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/PlaybackV2EventsRequestRequest"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/PlaybackV2EventsRequestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlaybackV2Response"
+                }
+              }
+            },
+            "description": ""
+          }
+        },
+        "security": [
+          {
+            "jwtAuth": []
+          },
+          {
+            "sessionAuth": []
+          }
+        ],
+        "tags": [
+          "media"
+        ]
+      }
+    },
     "/api/v1/media/video-permissions/": {
       "get": {
         "description": "Video access overrides (API: video-permissions for backward compat).",
@@ -44802,6 +45060,25 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StudentVideoPlaybackRequestRequest"
+              }
+            },
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/StudentVideoPlaybackRequestRequest"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/StudentVideoPlaybackRequestRequest"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {

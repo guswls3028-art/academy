@@ -22,6 +22,8 @@ from .views.playback_views import (
     PlaybackHeartbeatView,
     PlaybackEndView,
     PlaybackEventBatchView,
+    PlaybackV2EventBatchView,
+    PlaybackV2EndView,
 )
 from .views.admin_social_views import (
     AdminVideoCommentListView,
@@ -94,6 +96,8 @@ urlpatterns += [
     path("playback/heartbeat/", PlaybackHeartbeatView.as_view()),
     path("playback/end/", PlaybackEndView.as_view()),
     path("playback/events/", PlaybackEventBatchView.as_view()),
+    path("playback/v2/events/", PlaybackV2EventBatchView.as_view()),
+    path("playback/v2/end/", PlaybackV2EndView.as_view()),
 ]
 
 # ========================================================

@@ -745,6 +745,9 @@ class VideoPlaybackSession(TimestampModel):
     session_id = models.CharField(max_length=64, db_index=True)
     device_id = models.CharField(max_length=128, db_index=True)
 
+    # Retain the DB default: old API processes omit this column during rolling deployment.
+    event_protocol_version = models.PositiveSmallIntegerField(default=1, db_default=1)
+
     status = models.CharField(
         max_length=16,
         choices=Status.choices,
@@ -767,7 +770,11 @@ class VideoPlaybackSession(TimestampModel):
             models.UniqueConstraint(
                 fields=["session_id"],
                 name="uniq_video_playback_session_id",
-            )
+            ),
+            models.CheckConstraint(
+                condition=models.Q(event_protocol_version__in=[1, 2]),
+                name="playback_event_protocol_valid",
+            ),
         ]
         indexes = [
             models.Index(fields=["status", "started_at"]),
@@ -781,7 +788,37 @@ class VideoPlaybackSession(TimestampModel):
 
 
 # ========================================================
-# Video Playback Event (v1: Audit only)
+# Video Playback Event Batch (v2: exact-session idempotency)
+# ========================================================
+
+class VideoPlaybackEventBatch(models.Model):
+    playback_session = models.ForeignKey(
+        VideoPlaybackSession, on_delete=models.CASCADE, related_name="event_batches",
+    )
+    batch_id = models.UUIDField()
+    payload_sha256 = models.CharField(max_length=64)
+    event_count = models.PositiveSmallIntegerField()
+    violated_count = models.PositiveSmallIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["playback_session", "batch_id"], name="playback_batch_identity_unique",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(event_count__gte=1, event_count__lte=50),
+                name="playback_batch_count_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(violated_count__lte=models.F("event_count")),
+                name="playback_batch_violations_valid",
+            ),
+        ]
+
+
+# ========================================================
+# Video Playback Event (audit)
 # ========================================================
 
 class VideoPlaybackEvent(TimestampModel):

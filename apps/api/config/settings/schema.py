@@ -20,6 +20,8 @@ SPECTACULAR_SETTINGS = {
     "COMPONENT_SPLIT_REQUEST": True,
     "DISABLE_ERRORS_AND_WARNINGS": True,
     "ENUM_NAME_OVERRIDES": {
+        "EventTypeEnum": "apps.domains.video.models.VideoPlaybackEvent.EventType",
+        "TypeEnum": [("exam", "exam"), ("homework", "homework")],
         "ExamGradingMode": "apps.domains.exams.models.Exam.GradingMode",
         "HomeworkGradingMode": "apps.domains.homework_results.models.Homework.GradingMode",
         "InactiveVideoEntitlementAccessMode": [
