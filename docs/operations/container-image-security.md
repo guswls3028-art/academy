@@ -129,6 +129,63 @@
    상한을 같은 PR에서 내려야 한다. 알 수 없는 항목, 누락된 기존 항목,
    identity/count 불일치 중 어느 것도 development/preprod로 진행할 수 없다.
 
+### 현재 기준선: 2026-09-12 완료 스캔
+
+후보 run [`34687613434`](https://github.com/guswls3028-art/academy-backend/actions/runs/34687613434)
+(source `a36a02bf9fba1b24adf2d561598f2ebcd463404f`, immutable tag
+`sha-a36a02bf9fba1b24adf2d561598f2ebcd463404f-run-34687613434-1`)의 여섯
+이미지를 `ap-northeast-2` ECR에서 digest로 직접 조회했다. 아래 scan은 모두
+`COMPLETE`이며 각각 Critical 1건, High 3건이다. AI에서 먼저 검출한 stale
+baseline 때문에 release는 development/preprod/production을 모두 건너뛰었고
+shared lock 반환 job은 성공했다. 이 증거는 운영 적용이나 실제 업무 성공을
+뜻하지 않는다.
+
+| Repository | Exact digest | Scan completed (UTC, 2026-09-12) |
+|---|---|---|
+| academy-base | `sha256:9ba1411263ed92d1acf58f9e168b814f76882ca6d3f910eb8b1e5c9226c6d832` | 10:46:26 |
+| academy-api | `sha256:df46e15a3cab016f870866916e5330fad7ffae7816fa926184d0b39be26c16f9` | 10:52:49 |
+| academy-video-worker | `sha256:2a24151e539a35a2770bb4514f2edfa075627f22a357cbff268048128f578f6f` | 10:52:02 |
+| academy-messaging-worker | `sha256:75ff3977f70ddc58bdc50a44a712e2730991eca61a4c79701efc222228e3f5ca` | 10:48:27 |
+| academy-ai-worker-cpu | `sha256:32057ee189e939726cbcc67fde29bdc5d4f1eb65cbaef224c11a3f3bab427543` | 11:08:08 |
+| academy-tools-worker | `sha256:3bf3d7db489ef78912fbb6d0865f9a3e706ef47df0c635aff0e2d3463ede974a` | 10:51:16 |
+
+여섯 repository에 남은 High exact identity는 `sqlite3` `3.46.1-7+deb13u1`의
+`CVE-2026-11822`, `CVE-2026-11824`와 `glibc` `2.41-12+deb13u3`의
+`CVE-2026-5928`뿐이다. Critical도 기존 acceptance인 `CVE-2026-5450` / `glibc` /
+`2.41-12+deb13u3` 하나뿐이며 새 예외는 없다.
+
+API·AI·Tools 각각에서 기존 High 13개가 모두 사라졌다. 삭제 대상은
+`glib2.0` `2.84.4-3~deb13u3`의 `CVE-2026-16118`, `CVE-2026-58010`부터
+`CVE-2026-58015`까지 7개와, `libssh2` `1.11.1-1+deb13u1`의
+`CVE-2026-58050`, `CVE-2026-58051`, `CVE-2026-66032`부터 `CVE-2026-66035`까지
+6개다. 따라서 이 13개 acceptance를 제거하고 세 repository의 High 상한을
+16에서 3으로 낮춘다. Base·Video·Messaging의 상한 3, 남은 세 acceptance의
+identity·repository·근거·`2026-09-19` 만료일, Critical acceptance 및 판정 코드는
+그대로 유지한다. 삭제한 identity가 같은 총수 안에서 다시 나타나도 신규 High로
+실패하며, 감소·증가·다른 package/version·만료도 기존대로 실패 폐쇄한다.
+
+ECR basic finding 응답은 설치 패키지 inventory나 `fixedVersion`을 제공하지
+않으므로, finding 부재를 패키지 제거 또는 vendor 수정의 증거로 확대 해석하지
+않는다. 이는 완료된 exact 후보 scan에 근거한 기준선 축소이며 package/build
+입력 변경이 아니다. 회귀 검증은 baseline에서 생성하지 않은 세 High fixture를
+여섯 repository에 적용하고, 삭제한 13개 identity가 세 OCR repository 각각에
+재유입될 때 차단됨을 확인한다.
+
+수정 PR을 병합한 뒤 새 head의 공식 전체 release로 새로운 immutable 후보와
+완료 scan을 만들어야 한다. main push가 전체 build를 선택하고 migration gate도
+허용하는 후보만 그 run을 사용한다. contract migration이 포함되면 자동 push는
+계속 차단되며, [배포 방식](deployment-modes.md)의 구버전 호환성 조건을 확인한
+release owner가 기존 run 종료 뒤 정확한 main SHA에서
+`workflow_dispatch`와 `allow_contract_migrations=true`로 전체 release를 진행한다.
+그 밖에 전체 build가 선택되지 않은 경우도 겹치지 않는 새 dispatch를 사용한다.
+예전 run의 재실행은 예전 checkout의
+기준선을 다시 사용한다. 실패 job만 재실행하면 attempt별 baseline artifact와
+image tag도 이전 성공 build와 달라지므로 복구 경로로 사용하지 않는다. 새 run도
+기존 development, isolated preprod/종료, production continuity gate를 모두
+통과해야 하며 기준선 변경이나 과거 scan만으로 운영 적용을 완료 처리하지 않는다.
+
+### 이전 후보의 판단 근거
+
 2026-08-20 후보 `sha-31d3845d9...-run-32316780655-1`의 완료된 ECR scan을
 재검토했다. Base·Video·Messaging은 glibc 1건과 Perl 3건으로 Critical 4건,
 API·AI·Tools는 여기에 GLib 1건이 더해져 Critical 5건이었다. Debian 공식

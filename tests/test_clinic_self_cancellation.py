@@ -36,9 +36,8 @@ class ClinicSelfCancellationAPITest(APITestCase, ClinicAPITestMixin):
         self.tenant = self.data["tenant"]
         self.student = self.data["students"][0]
         self.enrollment = self.data["enrollments"][0]
-        self.week_start = timezone.localdate() - datetime.timedelta(
-            days=timezone.localdate().weekday()
-        )
+        today = timezone.localdate()
+        self.week_start = today + datetime.timedelta(days=7 - today.weekday())
 
     def _session(self, day_offset: int, hour: int):
         return self.make_clinic_session(
