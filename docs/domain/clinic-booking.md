@@ -192,7 +192,7 @@ python manage.py convert_limglish_clinic_time_ranges --from-date 2026-09-10 --ex
 단일 생성과 bulk는 학생을 먼저 잠그며, bulk와 limglish 변환은 여러 세션을 모두
 날짜·시작 시각·ID 순으로 잠근다. 따라서 역순으로 생성된 두 세션에서도 session 간
 교착이 없다. 일정 변경은 변환과 충돌하는 tenant row를 가장 먼저 `FOR NO KEY UPDATE`로
-잠근 뒤 학생·기존 예약·새 세션을 처리한다. 이 잠금은 변환의 `FOR UPDATE`와는
+잠근 뒤 학생·기존 예약·새 세션을 처리한다. 이 잠금은 변환의 `FOR NO KEY UPDATE`와는
 직렬화되지만 정상 신규 예약의 tenant FK `KEY SHARE`와는 호환되므로, 신규 예약 커밋과
 일정 변경이 같은 학생에서 서로 기다리지 않는다. 단일 생성, 학생 bulk, 교직원 bulk,
 일정 변경이 모두 같은 학생 row lock을 사용하므로 서로 다른 세션을 향한 동시 요청도
