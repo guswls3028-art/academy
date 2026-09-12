@@ -27,18 +27,13 @@ class RepairVideoOrderDuplicatesCommandTests(TransactionTestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        cls.executor = MigrationExecutor(connection)
-        cls.executor.migrate([("video", "0018_video_source_type_youtube")])
+        cls.addClassCleanup(cls._restore_current_schema)
+        MigrationExecutor(connection).migrate([("video", "0018_video_source_type_youtube")])
 
     @classmethod
-    def tearDownClass(cls):
-        try:
-            cls.executor.loader.build_graph()
-            cls.executor.migrate(
-                [("video", "0019_video_order_and_folder_uniqueness")]
-            )
-        finally:
-            super().tearDownClass()
+    def _restore_current_schema(cls):
+        executor = MigrationExecutor(connection)
+        executor.migrate(executor.loader.graph.leaf_nodes("video"))
 
     def setUp(self):
         self.tenant = Tenant.objects.create(
