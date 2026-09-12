@@ -210,6 +210,23 @@ SSM 실행에서는 더 좁은 `development.qa.setup` seal을 우선한다. acti
 선택된 seal 이전 감사 행은 보존한다. 두 PII-free provenance seal 자체도 tenant 삭제 후
 FK가 NULL인 보안 증거로 남는다.
 
+급여 실사용 후의 destroy와 reset은 같은 transaction 안에서 exact scenario의
+WorkRecord를 먼저 삭제한 뒤 tenant cascade를 수행한다. WorkType의 제품용
+`PROTECT`는 유지한다. 소유 Staff·WorkType과 급여 자식 행을 잠그고 WorkRecord,
+StaffWorkType, ExpenseRecord, WorkMonthLock, PayrollSnapshot 각각의 tenant와
+staff/work_type 관계의 tenant가 모두 일치하는지 확인한다. 다른 tenant에서 이
+scenario의 Staff/WorkType을 참조하는 행도 토큰·활동 감사 삭제 전에 거부한다.
+다른 tenant의 기록을 따라가서
+지우지 않는다. 삭제 전 `work_records` 수를 counts에 남긴다. 잠근 exact ID 목록의
+건수와 실제 선삭제 수가 다르면 실패한다. 후행 tenant 삭제나 reset 재생성이
+실패하면 급여 기록·토큰·활동 감사의
+선삭제도 함께 rollback하며 성공 응답으로 바꾸지 않는다. 일반 tenant 삭제나
+운영 과거 급여 데이터에는 이 scenario 전용 순서를 적용하지 않는다.
+`test_setup_ymath_realuse_scenario.py`의 `payroll_cleanup` 회귀는 실제 급여 모델
+그래프의 destroy/reset, 양방향 cross-tenant 거부, 후행 실패 rollback 및 foreign
+tenant 보존을 검증한다. SQLite 검증은 PostgreSQL의 실제 행 잠금·동시성 증거가
+아니므로 기존 격리 PostgreSQL command/lock CI를 함께 유지한다.
+
 Inspect/Setup/Cleanup 출력은 tenant/user 수와 별도로 `outstanding_tokens`,
 `activity_audits`, exact development R2 prefix의 `r2_objects`, exact `QA_TENANT`
 환경을 가진 다른 container process의 `processes`, container port 18000 LISTEN의

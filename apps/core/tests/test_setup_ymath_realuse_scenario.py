@@ -2,7 +2,8 @@ import json
 import os
 import threading
 import time
-from datetime import timedelta
+from datetime import date, time as datetime_time, timedelta
+from decimal import Decimal
 from io import StringIO
 from unittest.mock import Mock, patch
 
@@ -10,6 +11,7 @@ from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import close_old_connections, connection, transaction
+from django.db.models.deletion import ProtectedError
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from rest_framework_simplejwt.settings import api_settings
@@ -26,7 +28,10 @@ from apps.core.models import OpsAuditLog, Program, Tenant, TenantMembership
 from apps.core.models.user import user_display_username
 from apps.domains.parents.models import Parent
 from apps.domains.messaging.models import AutoSendConfig, MessageTemplate
-from apps.domains.staffs.models import Staff
+from apps.domains.staffs.models import (
+    ExpenseRecord, PayrollSnapshot, Staff, StaffWorkType, WorkMonthLock,
+    WorkRecord, WorkType,
+)
 from apps.domains.video.models import (
     AccessMode,
     Video,
@@ -734,6 +739,167 @@ class SetupYmathRealuseScenarioTests(TestCase):
         self.assertIn('"remaining": {"tenants": 0, "users": 0}', out.getvalue())
         self.assertFalse(Tenant.objects.filter(id=tenant_id).exists())
         self.assertFalse(get_user_model().objects.filter(id__in=user_ids).exists())
+
+    def _payroll_cleanup_graph(self, code, *, scenario=True):
+        if scenario:
+            self._call_command(tenant_code=code, student_count=1, session_count=1)
+            tenant = Tenant.objects.get(code=code)
+            user = tenant.users.order_by("id").first()
+        else:
+            tenant = Tenant.objects.create(code=code, name="Preserved payroll fixture")
+            user = get_user_model().objects.create_user(
+                tenant=tenant, username=f"t{tenant.id}_payroll", password="test-payroll-password",
+            )
+        staff = Staff.objects.create(tenant=tenant, user=user, name="QA payroll staff")
+        work_type = WorkType.objects.create(tenant=tenant, name="QA work", base_hourly_wage=15000)
+        assignment = StaffWorkType.objects.create(tenant=tenant, staff=staff, work_type=work_type)
+        record = WorkRecord.objects.create(
+            tenant=tenant, staff=staff, work_type=work_type, date=date(2026, 9, 13),
+            start_time=datetime_time(9), end_time=datetime_time(13), break_minutes=30,
+            resolved_hourly_wage=15000, work_hours=Decimal("3.50"), amount=52500,
+            is_manually_edited=True,
+        )
+        expense = ExpenseRecord.objects.create(
+            tenant=tenant, staff=staff, date=record.date, title="QA expense", amount=15000,
+            status="APPROVED", approved_by=user,
+        )
+        lock = WorkMonthLock.objects.create(
+            tenant=tenant, staff=staff, year=2026, month=9, locked_by=user,
+        )
+        snapshot = PayrollSnapshot.objects.create(
+            tenant=tenant, staff=staff, year=2026, month=9, work_hours=Decimal("3.50"),
+            work_amount=52500, approved_expense_amount=15000, total_amount=67500,
+            generated_by=user,
+        )
+        token = OutstandingToken.objects.get(jti=RefreshToken.for_user(user)["jti"])
+        rows = [tenant, user, staff, work_type, assignment, record, expense, lock, snapshot, token]
+        if scenario:
+            rows.append(OpsAuditLog.objects.create(
+                actor_user=user, target_user=user, target_tenant=tenant,
+                action="student_activity.screen_view",
+            ))
+        return {"tenant": tenant, "staff": staff, "work_type": work_type, "record": record, "rows": rows}
+
+    def _payroll_cleanup_state(self, graph):
+        return [list(type(row).objects.filter(pk=row.pk).values()) for row in graph["rows"]]
+
+    def test_payroll_cleanup_destroy_removes_full_owned_graph_and_preserves_foreign(self):
+        owned = self._payroll_cleanup_graph("qa-ymath-realuse-payroll-destroy")
+        foreign = self._payroll_cleanup_graph("qa-ymath-realuse-payroll-foreign")
+        historical = self._payroll_cleanup_graph("historical-payroll", scenario=False)
+        foreign_before = self._payroll_cleanup_state(foreign)
+        historical_before = self._payroll_cleanup_state(historical)
+        user_ids = list(owned["tenant"].users.values_list("id", flat=True))
+        out = StringIO()
+        call_command("setup_ymath_realuse_scenario", tenant_code=owned["tenant"].code, destroy=True, stdout=out)
+        payload = json.loads(out.getvalue().splitlines()[-1])
+        self.assertEqual(payload["deleted"]["work_records"], 1)
+        self.assertEqual(payload["remaining"], {"tenants": 0, "users": 0})
+        self.assertEqual(payload["residue"], {"activity_audits": 0, "outstanding_tokens": 0})
+        self.assertEqual(self._payroll_cleanup_state(owned), [[] for _ in owned["rows"]])
+        self.assertFalse(get_user_model().objects.filter(pk__in=user_ids).exists())
+        self.assertEqual(self._payroll_cleanup_state(foreign), foreign_before)
+        self.assertEqual(self._payroll_cleanup_state(historical), historical_before)
+
+    def test_payroll_cleanup_reset_replaces_owned_graph_and_preserves_foreign(self):
+        owned = self._payroll_cleanup_graph("qa-ymath-realuse-payroll-reset")
+        foreign = self._payroll_cleanup_graph("qa-ymath-realuse-payroll-reset-foreign")
+        foreign_before = self._payroll_cleanup_state(foreign)
+        self._call_command(tenant_code=owned["tenant"].code, reset=True, student_count=1, session_count=1)
+        rebuilt = Tenant.objects.get(code=owned["tenant"].code)
+        self.assertNotEqual(rebuilt.pk, owned["tenant"].pk)
+        self.assertEqual(rebuilt.students.count(), 1)
+        self.assertEqual(self._payroll_cleanup_state(owned), [[] for _ in owned["rows"]])
+        self.assertEqual(self._payroll_cleanup_state(foreign), foreign_before)
+
+    def test_payroll_cleanup_destroy_failure_after_predelete_rolls_back_everything(self):
+        owned = self._payroll_cleanup_graph("qa-ymath-realuse-payroll-delete-rollback")
+        before = self._payroll_cleanup_state(owned)
+
+        def fail_tenant_delete(tenant, *args, **kwargs):
+            self.assertFalse(WorkRecord.objects.filter(tenant=tenant).exists())
+            self.assertFalse(OutstandingToken.objects.filter(user__tenant=tenant).exists())
+            raise RuntimeError("forced after payroll predelete")
+
+        with patch.object(Tenant, "delete", fail_tenant_delete), self.assertRaisesMessage(
+            RuntimeError, "forced after payroll predelete",
+        ):
+            call_command("setup_ymath_realuse_scenario", tenant_code=owned["tenant"].code, destroy=True, stdout=StringIO())
+        self.assertEqual(self._payroll_cleanup_state(owned), before)
+
+    def test_payroll_cleanup_reset_rebuild_failure_restores_original_graph(self):
+        owned = self._payroll_cleanup_graph("qa-ymath-realuse-payroll-rebuild-rollback")
+        before = self._payroll_cleanup_state(owned)
+
+        def fail_rebuild(**kwargs):
+            self.assertFalse(WorkRecord.objects.filter(pk=owned["record"].pk).exists())
+            self.assertFalse(Tenant.objects.filter(pk=owned["tenant"].pk).exists())
+            raise RuntimeError("forced payroll rebuild failure")
+
+        with patch.object(Command, "_ensure_user", side_effect=fail_rebuild), self.assertRaisesMessage(
+            RuntimeError, "forced payroll rebuild failure",
+        ):
+            self._call_command(tenant_code=owned["tenant"].code, reset=True)
+        self.assertEqual(self._payroll_cleanup_state(owned), before)
+
+    def test_payroll_cleanup_refuses_cross_tenant_records_in_both_directions(self):
+        for mode in ("destroy", "reset"):
+            for direction in ("outgoing", "incoming"):
+                for relation in ("staff", "work_type"):
+                    with self.subTest(mode=mode, direction=direction, relation=relation), transaction.atomic():
+                        owned = self._payroll_cleanup_graph("qa-ymath-realuse-payroll-cross-owned")
+                        foreign = self._payroll_cleanup_graph("qa-ymath-realuse-payroll-cross-foreign")
+                        source, target = (owned, foreign) if direction == "outgoing" else (foreign, owned)
+                        WorkRecord.objects.filter(pk=source["record"].pk).update(**{relation: target[relation]})
+                        owned_before = self._payroll_cleanup_state(owned)
+                        foreign_before = self._payroll_cleanup_state(foreign)
+                        with self.assertRaisesMessage(CommandError, "Cross-tenant payroll"):
+                            self._call_command(tenant_code=owned["tenant"].code, **{mode: True})
+                        self.assertEqual(self._payroll_cleanup_state(owned), owned_before)
+                        self.assertEqual(self._payroll_cleanup_state(foreign), foreign_before)
+                        transaction.set_rollback(True)
+
+    def test_payroll_cleanup_refuses_cross_tenant_payroll_children_before_any_delete(self):
+        payroll_relations = (
+            (StaffWorkType, ("staff", "work_type")),
+            (ExpenseRecord, ("staff",)),
+            (WorkMonthLock, ("staff",)),
+            (PayrollSnapshot, ("staff",)),
+        )
+        for mode in ("destroy", "reset"):
+            for model, relations in payroll_relations:
+                for direction in ("outgoing", "incoming"):
+                    for relation in relations:
+                        with self.subTest(mode=mode, model=model.__name__, direction=direction, relation=relation), transaction.atomic():
+                            owned = self._payroll_cleanup_graph("qa-ymath-realuse-payroll-child-owned")
+                            foreign = self._payroll_cleanup_graph("qa-ymath-realuse-payroll-child-foreign")
+                            source, target = (owned, foreign) if direction == "outgoing" else (foreign, owned)
+                            child = next(row for row in source["rows"] if isinstance(row, model))
+                            model.objects.filter(pk=child.pk).update(**{relation: target[relation]})
+                            before = [self._payroll_cleanup_state(graph) for graph in (owned, foreign)]
+                            with patch.object(Command, "_cleanup_ephemeral_evidence", wraps=Command._cleanup_ephemeral_evidence) as cleanup:
+                                with self.assertRaisesMessage(CommandError, "Cross-tenant payroll"):
+                                    self._call_command(tenant_code=owned["tenant"].code, **{mode: True})
+                                cleanup.assert_not_called()
+                            self.assertEqual([self._payroll_cleanup_state(graph) for graph in (owned, foreign)], before)
+                            transaction.set_rollback(True)
+
+    def test_payroll_cleanup_rejects_non_qa_or_production_runtime_without_writes(self):
+        historical = self._payroll_cleanup_graph("historical-payroll-guard", scenario=False)
+        owned = self._payroll_cleanup_graph("qa-ymath-realuse-payroll-runtime-guard")
+        before = [self._payroll_cleanup_state(graph) for graph in (historical, owned)]
+        with self.assertRaisesMessage(CommandError, "tenant-code"):
+            self._call_command(tenant_code=historical["tenant"].code, destroy=True)
+        with override_settings(R2_AI_BUCKET="academy-ai"), self.assertRaisesMessage(CommandError, "isolated development"):
+            self._call_command(tenant_code=owned["tenant"].code, destroy=True)
+        self.assertEqual([self._payroll_cleanup_state(graph) for graph in (historical, owned)], before)
+
+    def test_payroll_cleanup_does_not_relax_product_work_type_protection(self):
+        historical = self._payroll_cleanup_graph("historical-work-type-protect", scenario=False)
+        before = self._payroll_cleanup_state(historical)
+        with self.assertRaises(ProtectedError):
+            historical["work_type"].delete()
+        self.assertEqual(self._payroll_cleanup_state(historical), before)
 
     def test_destroy_removes_only_owned_tokens_and_activity_audits_preserving_seal(self):
         tenant_code = "qa-ymath-realuse-owned-evidence"
