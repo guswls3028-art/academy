@@ -26,6 +26,9 @@ from apps.domains.results.services.answer_matching import answer_matches, correc
 from apps.domains.results.services.manual_subjective_score import (
     explicit_manual_subjective_score_for_result,
 )
+from apps.domains.results.services.omr_subjective_completion import (
+    finalize_omr_result_if_ready,
+)
 from apps.support.omr.score_shape import get_exam_score_shape
 from apps.support.results.admin_exam_item_score_dependencies import (
     dispatch_progress_pipeline,
@@ -375,6 +378,8 @@ class AdminExamItemScoreView(APIView):
             attempt.meta.pop("status", None)
             attempt.save(update_fields=["meta", "updated_at"])
 
+        finalization = finalize_omr_result_if_ready(result_id=int(result.id))
+
         # -------------------------------------------------
         # 7️⃣ progress pipeline 즉시 트리거
         # -------------------------------------------------
@@ -383,17 +388,20 @@ class AdminExamItemScoreView(APIView):
             enrollment_id=enrollment_id,
             exam_id=exam_id,
         )
-        if submission_id:
-            dispatch_progress_pipeline(submission_id=submission_id)
-        else:
-            dispatch_progress_pipeline(exam_id=int(exam_id))
+        if finalization.projection_ready:
+            if submission_id:
+                dispatch_progress_pipeline(submission_id=submission_id)
+            else:
+                dispatch_progress_pipeline(exam_id=int(exam_id))
 
         # 정책 SSOT: messaging-policy.md "저장과 발송은 분리" — 점수 저장 자체는 알림 트리거 아님.
         # exam_score_published = MANUAL_DEFAULT. 학원장이 명시적으로 발송 버튼 클릭(preview→confirm)할 때만 발송.
 
         return Response(
             {
-                "ok": True,
+                "ok": finalization.projection_ready,
+                "saved": True,
+                "projection_ready": finalization.projection_ready,
                 "exam_id": exam_id,
                 "enrollment_id": enrollment_id,
                 "question_id": question_id,
@@ -401,6 +409,7 @@ class AdminExamItemScoreView(APIView):
                 "objective_score": float(result.objective_score or 0.0),
                 "total_score": float(total_score),
                 "max_score": float(max_total),
+                "grading_status": finalization.pending_reason,
             },
             status=drf_status.HTTP_200_OK,
         )

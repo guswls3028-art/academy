@@ -27,6 +27,9 @@ from apps.domains.results.services.assessment_correction_status import (
     assessment_correction_payload,
     exam_correction_fingerprint,
 )
+from apps.domains.results.services.omr_subjective_completion import (
+    pending_omr_result_ids,
+)
 from apps.domains.results.services.answer_matching import format_answer_for_display
 from apps.domains.results.aggregations.exam_report import summarize_result_items
 from apps.domains.enrollment.selectors import learning_history_enrollments_for_student
@@ -132,14 +135,21 @@ def get_my_exam_result_data(request, exam_id: int, tenant=None) -> dict:
     # 시험 응시 기록과 교직원 성적 운영은 유지하되, 학생·학부모에게는
     # 공개 전 점수·문항·석차를 전혀 직렬화하지 않는다. 재응시 가능 여부는
     # 결과 비공개 상태에서도 서버가 계속 소유해야 중복 응시를 막을 수 있다.
-    if not bool(getattr(exam, "student_results_published", True)):
-        return {
+    subjective_pending = int(result.id) in pending_omr_result_ids([result])
+    if (
+        not bool(getattr(exam, "student_results_published", True))
+        or subjective_pending
+    ):
+        hidden = {
             "exam_id": exam_id,
             "student_results_published": False,
             "allow_retake": allow_retake,
             "max_attempts": max_attempts,
             "can_retake": can_retake,
         }
+        if subjective_pending:
+            hidden["grading_status"] = "subjective_pending"
+        return hidden
 
     clinic_required = False
     if session:

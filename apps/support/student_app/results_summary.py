@@ -235,11 +235,16 @@ def build_student_grades_summary(*, tenant: Any, student: Any) -> dict[str, Any]
         enrollment_ids=enrollment_ids,
         published_results_only=True,
     )
-    exam_ids = [int(exam["exam_id"]) for exam in exam_list]
-    result_ids = [int(exam["_result_id"]) for exam in exam_list]
+    ready_exams = [
+        exam
+        for exam in exam_list
+        if exam.get("grading_status") != "subjective_pending"
+    ]
+    exam_ids = [int(exam["exam_id"]) for exam in ready_exams]
+    result_ids = [int(exam["_result_id"]) for exam in ready_exams]
     structure_exam_id_by_result_id = {
         int(exam["_result_id"]): int(exam["_structure_exam_id"])
-        for exam in exam_list
+        for exam in ready_exams
     }
     result_analysis_map = {}
     if result_ids:
@@ -264,7 +269,7 @@ def build_student_grades_summary(*, tenant: Any, student: Any) -> dict[str, Any]
     correction_map = {}
     correction_session_ids = [
         int(exam["session_id"])
-        for exam in exam_list
+        for exam in ready_exams
         if exam.get("session_id") is not None
     ]
     if correction_session_ids and exam_ids:
@@ -295,6 +300,25 @@ def build_student_grades_summary(*, tenant: Any, student: Any) -> dict[str, Any]
         current_exam_max_score = float(exam.pop("_current_max_score"))
         exam_id = int(exam["exam_id"])
         enrollment_id = int(exam["enrollment_id"])
+        if exam.get("grading_status") == "subjective_pending":
+            exam.update({
+                "rank": None,
+                "percentile": None,
+                "cohort_size": None,
+                "cohort_avg": None,
+                "total_questions": 0,
+                "correct_count": 0,
+                "wrong_count": 0,
+                "accuracy_rate": None,
+                "wrong_question_numbers": [],
+                "correction_status": None,
+                "teacher_resolved": False,
+                "lecture_active": lecture_active_by_enrollment.get(
+                    enrollment_id,
+                    False,
+                ),
+            })
+            continue
         rank_info = exam_rank_maps.get(exam_id, {}).get(enrollment_id, {})
         item_analysis = result_analysis_map.get(result_id) or _empty_result_item_analysis()
         session_id = exam.get("session_id")

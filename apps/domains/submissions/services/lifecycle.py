@@ -202,6 +202,21 @@ def _other_storage_owner_references(
             references = references.exclude(id__in=excluded_wrong_note_pdf_ids)
         if references.exists():
             return True
+    if bucket == SubmissionStorageCleanupIntent.Bucket.STORAGE:
+        # These image owners live in JSON rather than the scalar-key registry.
+        # Inventory cascade cleanup includes both, so surviving documents and
+        # problems must protect them just like their ordinary image_key fields.
+        problem_model = django_apps.get_model("matchup", "MatchupProblem")
+        if problem_model._base_manager.filter(
+            meta__public_cleanup__public_image_key=key,
+        ).exists():
+            return True
+        document_model = django_apps.get_model("matchup", "MatchupDocument")
+        page_key_lists = document_model._base_manager.filter(
+            meta__page_image_keys__icontains=key,
+        ).values_list("meta__page_image_keys", flat=True)
+        if any(isinstance(keys, list) and key in keys for keys in page_key_lists):
+            return True
     return False
 
 
@@ -350,6 +365,53 @@ def _process_submission_storage_cleanup_safely(intent_ids: tuple[int, ...]) -> N
         process_submission_storage_cleanup_intents(intent_ids=intent_ids)
     except Exception:
         logger.exception("Submission storage cleanup callback failed before intent processing")
+
+
+def schedule_inventory_storage_cleanup(*, tenant_id: int, object_keys: Iterable[str]) -> tuple[int, ...]:
+    """Record exact detached Inventory cascade keys in the caller's transaction.
+
+    The caller validates and deletes its metadata graph in this same transaction.
+    Surviving owners are never deleted; the processor checks ownership again
+    after the outer commit and retains failed/deferred work for the existing retry.
+    """
+    if not transaction.get_connection().in_atomic_block:
+        raise RuntimeError("inventory cleanup intent requires an atomic transaction")
+    keys = tuple(object_keys)
+    prefix = f"tenants/{int(tenant_id)}/"
+    if any(not isinstance(key, str) or not key or (key.startswith("tenants/") and not key.startswith(prefix)) for key in keys):
+        raise ValueError("inventory cleanup key is outside its tenant namespace")
+    keys = sorted(set(keys))
+    bucket = SubmissionStorageCleanupIntent.Bucket.STORAGE
+    intent_ids = []
+    for key in keys:
+        _lock_object_key(bucket=bucket, key=key)
+        if _other_storage_owner_references(bucket=bucket, key=key):
+            continue
+        intent, created = SubmissionStorageCleanupIntent.objects.select_for_update().get_or_create(
+            tenant_id=tenant_id, bucket=bucket, object_key=key,
+        )
+        if not created and intent.status == SubmissionStorageCleanupIntent.Status.CLEANED:
+            intent.status = SubmissionStorageCleanupIntent.Status.PENDING
+            intent.cleaned_at = None
+            intent.last_error = ""
+            intent.save(update_fields=["status", "cleaned_at", "last_error", "updated_at"])
+        intent_ids.append(intent.id)
+    if intent_ids:
+        transaction.on_commit(
+            lambda ids=tuple(intent_ids): _process_submission_storage_cleanup_safely(ids)
+        )
+    return tuple(intent_ids)
+
+
+def inventory_storage_cleanup_status(*, tenant_id: int, intent_ids: Iterable[int]) -> dict[str, int]:
+    states = list(SubmissionStorageCleanupIntent.objects.filter(
+        tenant_id=tenant_id, id__in=tuple(intent_ids),
+    ).values_list("status", flat=True))
+    return {
+        "pending": sum(state not in {"cleaned", "failed"} for state in states),
+        "failed": states.count("failed"),
+        "cleaned": states.count("cleaned"),
+    }
 
 
 def delete_submission_storage_for_permanent_delete(

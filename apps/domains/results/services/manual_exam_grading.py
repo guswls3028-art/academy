@@ -14,6 +14,9 @@ from apps.domains.results.guards.score_edit_lease_guard import (
     require_score_edit_scope_available_for_exam,
 )
 from apps.domains.results.models import ExamAttempt, Result, ResultFact, ResultItem
+from apps.domains.results.services.omr_subjective_completion import (
+    finalize_omr_result_if_ready,
+)
 from apps.domains.results.services.exam_result_excel_import import (
     Candidate,
     CorrectnessMark,
@@ -677,6 +680,15 @@ def apply_manual_grading(
             now=now,
             is_not_submitted=False,
         )
+        finalization = finalize_omr_result_if_ready(result_id=int(result.id))
+        if not finalization.projection_ready:
+            raise ManualExamGradingError(
+                (
+                    f"{planned_row.candidate.student_name} 학생의 OMR 결과를 "
+                    "최종 확정할 수 없습니다: "
+                    f"{finalization.pending_reason or 'projection_not_ready'}"
+                )
+            )
 
     exam_id = int(exam.id)
 

@@ -45,6 +45,12 @@ class ScoreBlockSerializer(serializers.Serializer):
     final_pass = serializers.BooleanField(allow_null=True, required=False, default=None)
     achievement = serializers.CharField(allow_null=True, allow_blank=True, required=False, default=None)
     is_provisional = serializers.BooleanField(required=False, default=False)
+    grading_status = serializers.ChoiceField(
+        choices=["subjective_pending"],
+        allow_null=True,
+        required=False,
+        default=None,
+    )
     clinic_retake = serializers.DictField(allow_null=True, required=False, default=None)
     correction_status = serializers.ChoiceField(
         choices=["PENDING", "COMPLETED", "NOT_REQUIRED"],

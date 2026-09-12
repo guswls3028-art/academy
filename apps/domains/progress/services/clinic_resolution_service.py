@@ -9,6 +9,7 @@
 4. 면제 (WAIVED)
 5. 원본 시험/과제 제거 (SOURCE_REMOVED)
 6. 명시적 시험 미응시 전환 (NOT_SUBMITTED, 알림 없음)
+7. 과거 부분 채점 투영 철회 (GRADING_RETRACTED, 알림 없음)
 
 절대 금지:
 - 예약(booking)으로 해소
@@ -29,6 +30,9 @@ from apps.support.clinic.session_dependencies import (
 )
 from apps.support.progress.clinic_resolution_notification_dependencies import (
     send_clinic_resolution_notification,
+)
+from apps.support.progress.session_calculator_dependencies import (
+    homework_progress_enrollment_ids,
 )
 
 logger = logging.getLogger(__name__)
@@ -254,6 +258,8 @@ class ClinicResolutionService:
                 if latest.resolved_at:
                     # A factual retake/pass or unrelated waiver is stronger than
                     # this review control and must not be reopened here.
+                    if source_type == "homework":
+                        _dispatch_progress_for_link(latest)
                     return latest
                 link = latest
             else:
@@ -283,6 +289,8 @@ class ClinicResolutionService:
         # closure. The correction row records this review, but the teacher
         # toggle must not replace or later reopen an already-resolved source.
         if latest and latest.resolved_at and not latest_is_teacher_resolution:
+            if source_type == "homework":
+                _dispatch_progress_for_link(latest)
             return latest
 
         link = latest
@@ -402,12 +410,24 @@ class ClinicResolutionService:
         if normalized_enrollment_ids is not None:
             link_qs = link_qs.filter(enrollment_id__in=normalized_enrollment_ids)
 
+        affected_pairs: set[tuple[int, int]] = set()
+        if source_type == "homework":
+            # Assignment removal is a progress event even without a failed link.
+            # Whole-source removal captures the roster before its rows are deleted.
+            homework_enrollment_ids = (
+                normalized_enrollment_ids
+                if normalized_enrollment_ids is not None
+                else homework_progress_enrollment_ids(
+                    tenant_id=tenant_id, session_id=session_id, homework_id=source_id,
+                )
+            )
+            affected_pairs.update((int(enrollment_id), session_id) for enrollment_id in homework_enrollment_ids)
+
         links = list(link_qs.order_by("id"))
-        if not links:
+        if not links and not affected_pairs:
             return 0
 
         now = timezone.now()
-        affected_pairs: set[tuple[int, int]] = set()
         count = 0
         for link in links:
             _append_history(link, action="resolve_source_removed", at=now)
@@ -514,6 +534,69 @@ class ClinicResolutionService:
             enrollment_id,
             exam_id,
             attempt_id,
+        )
+        return len(links)
+
+    @staticmethod
+    @transaction.atomic
+    def resolve_by_pending_grading(
+        *,
+        tenant_id: int,
+        enrollment_id: int,
+        exam_id: int,
+    ) -> int:
+        """Audit-close automatic clinic projections from an incomplete OMR score."""
+
+        tenant_id = int(tenant_id)
+        enrollment_id = int(enrollment_id)
+        exam_id = int(exam_id)
+        source_filter = (
+            Q(source_type="exam", source_id=exam_id)
+            | Q(source_type__isnull=True, meta__exam_id=exam_id)
+        )
+        links = list(
+            ClinicLink.objects.select_for_update()
+            .filter(
+                tenant_id=tenant_id,
+                enrollment_id=enrollment_id,
+                is_auto=True,
+                resolved_at__isnull=True,
+            )
+            .filter(source_filter)
+            .order_by("session_id", "id")
+        )
+        if not links:
+            return 0
+
+        now = timezone.now()
+        for link in links:
+            _append_history(link, action="resolve_pending_grading", at=now)
+            link.resolved_at = now
+            link.resolution_type = ClinicLink.ResolutionType.GRADING_RETRACTED
+            link.resolution_evidence = {
+                "grading_status": "subjective_pending",
+                "exam_id": exam_id,
+                "enrollment_id": enrollment_id,
+                "transitioned_at": now.isoformat(),
+            }
+            link.save(
+                update_fields=[
+                    "resolved_at",
+                    "resolution_type",
+                    "resolution_evidence",
+                    "resolution_history",
+                    "updated_at",
+                ]
+            )
+            _deactivate_today_plan(link)
+
+        logger.info(
+            "clinic_resolution: GRADING_RETRACTED resolved %d links "
+            "(tenant=%s, enrollment=%s, exam=%s)",
+            len(links),
+            tenant_id,
+            enrollment_id,
+            exam_id,
         )
         return len(links)
 

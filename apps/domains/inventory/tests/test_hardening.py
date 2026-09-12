@@ -166,8 +166,8 @@ class InventoryHardeningViewTests(TestCase):
         )
         delete_file_request.tenant = self.tenant
         with self._auth(self.parent_user), patch(
-            "apps.domains.inventory.views.delete_object_r2_storage"
-        ) as delete_r2:
+            "apps.infrastructure.storage.r2.delete_object_r2_storage"
+        ) as delete_r2, self.captureOnCommitCallbacks(execute=True):
             deleted_file = FileDeleteView.as_view()(delete_file_request, file_id=file_id)
         self.assert_empty_no_content_response(deleted_file)
         delete_r2.assert_called_once()

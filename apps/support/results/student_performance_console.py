@@ -18,6 +18,9 @@ from apps.domains.enrollment.models import Enrollment
 from apps.domains.exams.models import Exam
 from apps.domains.lectures.models import Lecture, Session
 from apps.domains.results.models import Result, StudentReportedScore
+from apps.domains.results.services.omr_subjective_completion import (
+    pending_omr_result_ids_for_ids,
+)
 from apps.domains.results.utils.initial_exam_score import (
     load_initial_exam_scores,
     project_initial_exam_score,
@@ -310,6 +313,12 @@ def _build_student_performance_console_uncached(
         )
     )
     result_rows = list(result_query)
+    pending_result_ids = pending_omr_result_ids_for_ids(
+        row["id"] for row in result_rows
+    )
+    result_rows = [
+        row for row in result_rows if int(row["id"]) not in pending_result_ids
+    ]
     initial_scores = load_initial_exam_scores(
         exam_ids=exam_titles,
         enrollment_ids=selected_enrollment_ids,

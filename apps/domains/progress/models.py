@@ -224,6 +224,7 @@ class ClinicLink(TimestampModel):
         CARRIED_OVER = "CARRIED_OVER", "다음 차수로 이월"
         SOURCE_REMOVED = "SOURCE_REMOVED", "원본 삭제"
         NOT_SUBMITTED = "NOT_SUBMITTED", "시험 미응시 전환"
+        GRADING_RETRACTED = "GRADING_RETRACTED", "채점 미완료 투영 철회"
         BOOKING_LEGACY = "BOOKING_LEGACY", "레거시(예약 기반)"
 
     tenant = models.ForeignKey(
@@ -258,7 +259,7 @@ class ClinicLink(TimestampModel):
         blank=True,
         help_text=(
             "해소 유형: 시험통과/과제통과/수동해소/면제/원본삭제/"
-            "시험미응시/레거시"
+            "시험미응시/채점미완료투영철회/레거시"
         ),
     )
     resolution_evidence = models.JSONField(

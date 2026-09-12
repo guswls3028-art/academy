@@ -27,6 +27,12 @@ class AdminExamResultRowSerializer(serializers.Serializer):
     clinic_retake = serializers.JSONField(allow_null=True, required=False, default=None)
     is_provisional = serializers.BooleanField(required=False, default=False)
     meta_status = serializers.CharField(allow_null=True, required=False, default=None)
+    grading_status = serializers.ChoiceField(
+        choices=["subjective_pending"],
+        allow_null=True,
+        required=False,
+        default=None,
+    )
 
     submitted_at = serializers.DateTimeField(allow_null=True)
 

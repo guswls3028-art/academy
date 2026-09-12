@@ -21,7 +21,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from apps.domains.results.models import ExamResult, ExamAttempt
+from apps.domains.results.models import ExamResult, ExamAttempt, Result
+from apps.domains.results.services.omr_subjective_completion import (
+    pending_omr_result_ids,
+)
 from apps.domains.results.utils.initial_exam_score import (
     load_initial_exam_scores,
     project_initial_exam_score,
@@ -269,6 +272,22 @@ def compute_exam_achievement_bulk(
             if a.submission_id:
                 submission_by_attempt[int(a.id)] = int(a.submission_id)
 
+    result_rows = list(
+        Result.objects.filter(
+            target_type="exam",
+            target_id__in=exam_ids,
+            enrollment_id__in=enrollment_ids,
+            enrollment__tenant_id=int(tenant.id),
+        )
+    )
+    pending_result_ids = pending_omr_result_ids(result_rows)
+    pending_result_pairs = {
+        (int(result.enrollment_id), int(result.target_id))
+        for result in result_rows
+        if result.enrollment_id is not None
+        and int(result.id) in pending_result_ids
+    }
+
     # 3) ExamResult.status bulk (is_provisional 판정)
     er_status_by_pair: dict[tuple[int, int, int], str] = {}
     if submission_by_attempt:
@@ -363,6 +382,17 @@ def compute_exam_achievement_bulk(
                 x_id,
             ))
             is_provisional = bool(er_status and er_status != ExamResult.Status.FINAL)
+
+        # First-attempt scoring remains the achievement SSOT, but a newer
+        # representative OMR result can still be awaiting essay grading. In
+        # that state no final pass/remediation label may be projected yet.
+        if (e_id, x_id) in pending_result_pairs:
+            is_pass = None
+            remediated = False
+            clinic_retake = None
+            final_pass = None
+            achievement = None
+            is_provisional = True
 
         out[(e_id, x_id)] = {
             "is_pass": is_pass,

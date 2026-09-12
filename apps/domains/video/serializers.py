@@ -23,6 +23,11 @@ from .youtube import youtube_thumbnail_url
 # Video
 # ========================================================
 
+class PublicVideoSessionSerializer(serializers.Serializer):
+    session_id = serializers.IntegerField(min_value=1)
+    lecture_id = serializers.IntegerField(min_value=1)
+
+
 class VideoSerializer(serializers.ModelSerializer):
     """
     ✅ FINAL SEALED VERSION (SaaS production)

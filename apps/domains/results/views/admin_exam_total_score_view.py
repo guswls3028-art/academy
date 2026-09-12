@@ -24,6 +24,9 @@ from apps.domains.results.guards.exam_enrollment_guard import validate_exam_enro
 from apps.domains.results.guards.score_edit_lease_guard import (
     require_score_edit_lease_from_headers,
 )
+from apps.domains.results.services.omr_subjective_completion import (
+    finalize_omr_result_if_ready,
+)
 
 from apps.support.results.admin_exam_dependencies import (
     dispatch_progress_pipeline,
@@ -294,6 +297,8 @@ class AdminExamTotalScoreView(APIView):
             attempt.meta = attempt_meta
             attempt.save(update_fields=["meta", "updated_at"])
 
+        finalization = finalize_omr_result_if_ready(result_id=int(result.id))
+
         # -------------------------------------------------
         # 6️⃣ progress pipeline (best-effort, 실패해도 점수 저장은 유지)
         # Submission이 있으면 submission 기반, 없으면 exam_id 기반으로 dispatch
@@ -318,11 +323,12 @@ class AdminExamTotalScoreView(APIView):
                 "sessions_for_exam": _session_ids,
             }
 
-            if progress_submission_id:
-                dispatch_progress_pipeline(submission_id=int(progress_submission_id))
-            else:
-                dispatch_progress_pipeline(exam_id=int(exam_id))
-            progress_ok = True
+            if finalization.projection_ready:
+                if progress_submission_id:
+                    dispatch_progress_pipeline(submission_id=int(progress_submission_id))
+                else:
+                    dispatch_progress_pipeline(exam_id=int(exam_id))
+                progress_ok = True
         except Exception as exc:
             logger.exception(
                 "progress pipeline failed (exam=%s, submission=%s)",
@@ -336,7 +342,9 @@ class AdminExamTotalScoreView(APIView):
 
         return Response(
             {
-                "ok": True,
+                "ok": finalization.projection_ready,
+                "saved": True,
+                "projection_ready": finalization.projection_ready,
                 "exam_id": exam_id,
                 "enrollment_id": enrollment_id,
                 "total_score": (
@@ -346,6 +354,7 @@ class AdminExamTotalScoreView(APIView):
                 ),
                 "max_score": float(max_score),
                 "attempt_index": int(attempt.attempt_index),
+                "grading_status": finalization.pending_reason,
                 "progress": {"dispatched": progress_ok, "error": progress_error, "debug": progress_debug},
             },
             status=drf_status.HTTP_200_OK,

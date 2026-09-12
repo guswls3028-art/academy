@@ -9,6 +9,14 @@ def get_result_attempt_models():
     return Result, ExamAttempt
 
 
+def pending_omr_result_ids(results):
+    from apps.domains.results.services.omr_subjective_completion import (
+        pending_omr_result_ids as resolve_pending,
+    )
+
+    return resolve_pending(results)
+
+
 def get_exam_model():
     from apps.domains.exams.models import Exam
 
@@ -102,3 +110,74 @@ def homework_score_exists(**filters) -> bool:
     from apps.domains.homework_results.models import HomeworkScore
 
     return HomeworkScore.objects.filter(**filters).exists()
+
+
+def homework_teacher_approval_passed(*, enrollment_id: int, session) -> bool:
+    """Read the same teacher decision as the homework inspection UI, without writing scores."""
+    from apps.domains.homework.models import HomeworkAssignment
+    from apps.domains.homework_results.models import HomeworkScore
+    from apps.domains.progress.models import AssessmentCorrection
+
+    tenant_id = session.lecture.tenant_id
+    target_scope = {
+        "enrollment_id": enrollment_id,
+        "enrollment__tenant_id": tenant_id,
+        "enrollment__lecture_id": session.lecture_id,
+        "session_id": session.id,
+        "homework__tenant_id": tenant_id,
+        "homework__session_id": session.id,
+    }
+    assigned_ids = set(
+        HomeworkAssignment.objects.filter(tenant_id=tenant_id, **target_scope)
+        .exclude(homework__meta__removed_from_session_at__isnull=False)
+        .values_list("homework_id", flat=True)
+    )
+    legacy_approvals = dict(
+        HomeworkScore.objects.filter(attempt_index=1, **target_scope)
+        .exclude(homework__meta__removed_from_session_at__isnull=False)
+        .values_list("homework_id", "teacher_approved")
+    )
+    # Only current assignments are actionable in the teacher completion UI.
+    # With no assignments, retain the legacy any-approved first-attempt contract.
+    target_ids = assigned_ids or legacy_approvals.keys()
+    if not target_ids:
+        return False
+
+    decisions = dict(
+        AssessmentCorrection.objects.filter(
+            tenant_id=tenant_id,
+            enrollment_id=enrollment_id,
+            session_id=session.id,
+            source_type=AssessmentCorrection.SourceType.HOMEWORK,
+            source_id__in=target_ids,
+        ).values_list("source_id", "completed")
+    )
+    # An explicit cancellation must not fall back to an older approval flag.
+    # Homework inspection stays valid after score entry; media locks are separate.
+    aggregate = all if assigned_ids else any
+    return aggregate(
+        decisions.get(homework_id, legacy_approvals.get(homework_id, False))
+        for homework_id in target_ids
+    )
+
+
+def homework_progress_enrollment_ids(*, tenant_id: int, session_id: int, homework_id: int) -> set[int]:
+    """Capture affected assignments/history before removing a homework source."""
+    from apps.domains.homework.models import HomeworkAssignment
+    from apps.domains.homework_results.models import HomeworkScore
+
+    scope = {
+        "homework_id": homework_id,
+        "homework__tenant_id": tenant_id,
+        "homework__session_id": session_id,
+        "session_id": session_id,
+        "enrollment__tenant_id": tenant_id,
+        "enrollment__lecture__sessions__id": session_id,
+    }
+    return set(
+        HomeworkAssignment.objects.filter(tenant_id=tenant_id, **scope)
+        .values_list("enrollment_id", flat=True)
+    ) | set(
+        HomeworkScore.objects.filter(attempt_index=1, **scope)
+        .values_list("enrollment_id", flat=True)
+    )
