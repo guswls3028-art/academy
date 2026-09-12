@@ -19,17 +19,13 @@ from .services import (
     move_folder as do_move_folder,
     delete_folder_recursive as do_delete_folder_recursive,
 )
+from .services.deletion import InventoryDeleteScopeError, delete_file
 from apps.support.inventory.matchup_dependencies import (
-    cleanup_matchup_problem_images,
-    document_has_protected_matchup_problems,
-    get_matchup_document_for_inventory_file,
     promote_inventory_file_to_matchup,
     promoted_matchup_document_map,
-    protected_matchup_document_delete_detail,
 )
 from apps.support.results.student_reported_scores import (
     create_student_score_submissions,
-    inventory_file_has_reported_score,
     score_submission_map_for_inventory_files,
     serialize_reported_score,
     validate_student_score_submissions,
@@ -679,23 +675,16 @@ class FolderDeleteView(View):
         if folder.scope != scope or (scope == "student" and folder.student_ps != student_ps):
             return JsonResponse({"detail": "Forbidden"}, status=403)
 
-        if recursive:
-            # 하위 포함 한방 삭제 — 매치업 problem 이미지/원본 R2 객체/cascade DB 모두 정리
+        try:
             result = do_delete_folder_recursive(
-                tenant=tenant, folder=folder, scope=scope, student_ps=student_ps,
+                tenant=tenant, folder=folder, scope=scope, student_ps=student_ps, recursive=recursive,
             )
-            if result.get("ok") is False:
-                status = int(result.pop("status", 400))
-                return JsonResponse(result, status=status)
-            return JsonResponse(result, status=200)
-
-        if inv_repo.inventory_folder_has_children(tenant, folder):
-            return JsonResponse({"detail": "비어있지 않은 폴더는 지울 수 없습니다. 먼저 하위 파일·폴더를 비우거나 삭제하세요.", "code": "folder_not_empty"}, status=400)
-        if inv_repo.inventory_folder_has_files(tenant, folder):
-            return JsonResponse({"detail": "비어있지 않은 폴더는 지울 수 없습니다. 먼저 하위 파일·폴더를 비우거나 삭제하세요.", "code": "folder_not_empty"}, status=400)
-
-        folder.delete()
-        return HttpResponse(status=204)
+        except InventoryDeleteScopeError:
+            return JsonResponse({"detail": "삭제 범위를 확인할 수 없습니다.", "code": "inventory_delete_scope_invalid"}, status=409)
+        if result.get("ok") is False:
+            status = int(result.pop("status", 400))
+            return JsonResponse(result, status=status)
+        return JsonResponse(result, status=200) if recursive else HttpResponse(status=204)
 
     @method_decorator(_tenant_required)
     @method_decorator(_jwt_required)
@@ -749,83 +738,15 @@ class FileDeleteView(View):
         if perm_err:
             return perm_err
 
-        inv_file = inv_repo.inventory_file_get(tenant, file_id)
-        if not inv_file:
-            return JsonResponse({"detail": "Not found"}, status=404)
-        if inv_file.scope != scope or (scope == "student" and inv_file.student_ps != student_ps):
-            return JsonResponse({"detail": "Forbidden"}, status=403)
-
-        if inventory_file_has_reported_score(tenant=tenant, file_id=inv_file.id):
-            return JsonResponse(
-                {
-                    "detail": "검수 기록과 연결된 성적표 원본은 삭제할 수 없습니다.",
-                    "code": "reported_score_evidence_protected",
-                },
-                status=409,
-            )
-
-        r2_key = inv_file.r2_key
-
-        # 🔐 매치업 problem 이미지 R2 cleanup (cascade로 doc/problem 삭제 전)
-        # InventoryFile cascade → MatchupDocument → MatchupProblem만 일어남.
-        # MatchupProblem.image_key R2 객체는 누가 안 지움 → orphan 방지.
-        matchup_doc = get_matchup_document_for_inventory_file(inv_file)
-        if matchup_doc is not None:
-            try:
-                if document_has_protected_matchup_problems(matchup_doc):
-                    return JsonResponse(
-                        {
-                            "detail": protected_matchup_document_delete_detail(),
-                            "code": "protected_matchup_document",
-                        },
-                        status=409,
-                    )
-            except Exception:
-                import logging
-                logging.getLogger(__name__).exception(
-                    "matchup protected-delete check failed for inv_file %s", inv_file.id,
-                )
-                return JsonResponse(
-                    {
-                        "detail": "매치업 보호 상태 확인에 실패했습니다.",
-                        "code": "matchup_protection_check_failed",
-                    },
-                    status=500,
-                )
-            try:
-                cleanup_matchup_problem_images(matchup_doc)
-            except Exception:
-                import logging
-                logging.getLogger(__name__).warning(
-                    "matchup problem images cleanup failed for inv_file %s", inv_file.id,
-                    exc_info=True,
-                )
-
-        # 원본을 먼저 지우고 성공했을 때만 DB 연결을 해제한다. 실패를 삼키고
-        # 204를 반환하면 개인정보가 R2에 남은 채 마지막 key 참조가 사라진다.
-        if r2_key and delete_object_r2_storage is None:
-            return JsonResponse(
-                {"detail": "파일 저장소를 사용할 수 없습니다.", "code": "storage_unavailable"},
-                status=503,
-            )
-        if r2_key:
-            try:
-                delete_object_r2_storage(key=r2_key)
-            except Exception:
-                import logging
-                logging.getLogger(__name__).exception(
-                    "Failed to delete R2 object: %s", r2_key, exc_info=True
-                )
-                return JsonResponse(
-                    {
-                        "detail": "원본 파일 삭제에 실패했습니다. 잠시 후 다시 시도해 주세요.",
-                        "code": "storage_delete_failed",
-                    },
-                    status=502,
-                )
-
-        inv_file.delete()  # CASCADE: MatchupDocument → MatchupProblem 함께 삭제
-
+        try:
+            result = delete_file(tenant=tenant, file_id=file_id, scope=scope, student_ps=student_ps)
+        except InventoryDeleteScopeError:
+            return JsonResponse({"detail": "삭제 범위를 확인할 수 없습니다.", "code": "inventory_delete_scope_invalid"}, status=409)
+        if result.get("ok") is False:
+            status = int(result.pop("status", 400))
+            if result.get("deleted"):
+                result["deleted"] = True
+            return JsonResponse(result, status=status)
         return HttpResponse(status=204)
 
     @method_decorator(_tenant_required)

@@ -12,8 +12,6 @@ from ..r2_path import build_r2_key, folder_path_string, safe_filename
 from apps.core.models import Tenant
 from academy.adapters.db.django import repositories_inventory as inv_repo
 from apps.support.inventory.matchup_dependencies import (
-    cleanup_matchup_problem_images,
-    get_matchup_document_for_inventory_file,
     matchup_delete_protection_result,
 )
 from apps.support.results.student_reported_scores import inventory_files_have_any_reported_score
@@ -258,86 +256,12 @@ def delete_folder_recursive(
     folder: InventoryFolder,
     scope: str,
     student_ps: str,
+    recursive: bool = True,
 ) -> dict:
-    """폴더 + 하위 모든 폴더/파일 + R2 객체 + 매치업 cascade 한방 삭제.
+    """Delete metadata atomically; clean detached objects only after commit."""
+    from .deletion import delete_folder_recursive as delete_tree
 
-    순서:
-      1. 트리 수집 (folder + 모든 자식 폴더·파일)
-      2. 각 파일의 매치업 problem 이미지 R2 cleanup (먼저 — orphan 방지)
-      3. 각 파일의 원본 R2 객체 삭제 (하나라도 실패하면 DB cascade 중단)
-      4. 루트 폴더 .delete() — Django CASCADE로 자식 폴더 + InventoryFile +
-         매치업 doc/problem 모두 정리
-
-    Returns: {"ok": True, "deleted": {folders, files, matchup_docs, r2_objects}}
-    """
-    import logging
-    log = logging.getLogger(__name__)
-
-    folders, files = _collect_folder_tree(folder, tenant, scope, student_ps)
-    matchup_doc_count = 0
-    r2_deleted = 0
-
-    protection_result = _matchup_delete_protection_result(files)
-    if protection_result:
-        return protection_result
-    if inventory_files_have_any_reported_score(
-        tenant=tenant,
-        file_ids=[inventory_file.id for inventory_file in files],
-    ):
-        return {
-            "ok": False,
-            "detail": "검수 기록과 연결된 성적표 원본이 포함되어 폴더를 삭제할 수 없습니다.",
-            "code": "reported_score_evidence_protected",
-            "status": 409,
-        }
-
-    # 매치업 problem 이미지 cleanup (cascade 전 — InventoryFile cascade는 problem
-    # 이미지 R2 객체를 알지 못함)
-    for inv_file in files:
-        matchup_doc = get_matchup_document_for_inventory_file(inv_file)
-        if matchup_doc is not None:
-            matchup_doc_count += 1
-            try:
-                cleanup_matchup_problem_images(matchup_doc)
-            except Exception:
-                log.warning(
-                    "matchup problem images cleanup failed for inv_file %s",
-                    inv_file.id, exc_info=True,
-                )
-
-    r2_files = [inv_file for inv_file in files if inv_file.r2_key]
-    if r2_files and delete_object_r2_storage is None:
-        return {
-            "ok": False,
-            "detail": "파일 저장소를 사용할 수 없습니다.",
-            "code": "storage_unavailable",
-            "status": 503,
-        }
-    for inv_file in r2_files:
-        try:
-            delete_object_r2_storage(key=inv_file.r2_key)
-            r2_deleted += 1
-        except Exception:
-            log.exception("Failed to delete R2 object: %s", inv_file.r2_key)
-            return {
-                "ok": False,
-                "detail": "원본 파일 삭제에 실패했습니다. 잠시 후 다시 시도해 주세요.",
-                "code": "storage_delete_failed",
-                "status": 502,
-            }
-
-    # DB cascade 삭제 — 루트 .delete()로 자식 폴더/파일 + 매치업 doc/problem 한 번에 정리.
-    folder.delete()
-
-    return {
-        "ok": True,
-        "deleted": {
-            "folders": len(folders),
-            "files": len(files),
-            "matchup_docs": matchup_doc_count,
-            "r2_objects": r2_deleted,
-        },
-    }
+    return delete_tree(tenant=tenant, folder=folder, scope=scope, student_ps=student_ps, recursive=recursive)
 
 
 def move_folder(
