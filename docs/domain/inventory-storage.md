@@ -76,7 +76,7 @@ PDF/PNG/JPEG만 허용한다. 브라우저가 보내는 MIME은 서버가 다시
 `tests/test_student_reported_scores.py`의 학생·학부모 권한, sibling/tenant·폴더 경계,
 R2 업로드 성공, reload, 메타데이터 실패 exact-key 정리 회귀를 사용한다. 운영 확인은 개인 파일을 다운로드하지
 않고 tenant별 행 수, MIME/상태 집계와 R2 HEAD의 존재·크기·content-type 일치만 읽는다.
-삭제 회귀는 `apps/domains/inventory/tests/test_delete_durability.py`의 실제 outer-commit
+삭제 회귀는 `tests/test_inventory_delete_durability.py`의 실제 outer-commit
 응답, DB/intent 롤백, 연결 이미지 exact-key, global/shared/타tenant 보호, 실패 후 재시도와
 목록 재조회, 기존 학생 영구삭제 outbox 회귀를 함께 실행한다. 공급자 호출은 mock으로
 격리하며 SQLite 통과를 PostgreSQL 잠금 동시성이나 실제 R2/화면 검증으로 간주하지 않는다.
