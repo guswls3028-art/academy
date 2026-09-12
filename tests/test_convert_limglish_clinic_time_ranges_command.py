@@ -7,6 +7,7 @@ from unittest.mock import patch
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import close_old_connections, connection
+from django.db.models.query import QuerySet
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient, APITestCase
@@ -507,6 +508,94 @@ class ClinicConversionPostgresConcurrencyTest(TransactionTestCase, ClinicAPITest
         self.assertEqual(len(responses), 1)
         return responses[0]
 
+    def _race_conversion_with_public_writer(self, writer):
+        conversion_sessions_locked = threading.Event()
+        writer_lock_attempted = threading.Event()
+        token = self._dry_run_token()
+        responses = []
+        errors = []
+        tenant_model = self.tenant.__class__
+        original_fetch_all = QuerySet._fetch_all
+        original_get = QuerySet.get
+        original_tenant_save = tenant_model.save
+
+        def gate_before_conversion_participant_locks(queryset):
+            if (
+                threading.current_thread().name == "clinic-conversion"
+                and queryset.model is SessionParticipant
+                and queryset.query.select_for_update
+                and not conversion_sessions_locked.is_set()
+            ):
+                conversion_sessions_locked.set()
+                if not writer_lock_attempted.wait(10):
+                    raise AssertionError("public writer did not reach its next locked write")
+            return original_fetch_all(queryset)
+
+        def observe_writer_lock(queryset, *args, **kwargs):
+            if (
+                threading.current_thread().name == "clinic-public-writer"
+                and queryset.query.select_for_update
+                and queryset.model in {tenant_model, Session}
+            ):
+                writer_lock_attempted.set()
+            return original_get(queryset, *args, **kwargs)
+
+        def observe_writer_tenant_save(instance, *args, **kwargs):
+            if (
+                threading.current_thread().name == "clinic-public-writer"
+                and instance.pk == self.tenant.pk
+            ):
+                writer_lock_attempted.set()
+            return original_tenant_save(instance, *args, **kwargs)
+
+        def convert():
+            close_old_connections()
+            try:
+                call_command(
+                    "convert_limglish_clinic_time_ranges",
+                    "--from-date",
+                    self.from_date.isoformat(),
+                    "--execute",
+                    "--confirm",
+                    token,
+                    stdout=StringIO(),
+                )
+            except Exception as exc:  # pragma: no cover - asserted by caller
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        def write():
+            close_old_connections()
+            try:
+                if not conversion_sessions_locked.wait(10):
+                    raise AssertionError("conversion did not lock sessions")
+                client = APIClient()
+                responses.append(writer(client))
+            except Exception as exc:  # pragma: no cover - asserted by caller
+                errors.append(exc)
+            finally:
+                close_old_connections()
+
+        with (
+            patch.object(QuerySet, "_fetch_all", gate_before_conversion_participant_locks),
+            patch.object(QuerySet, "get", observe_writer_lock),
+            patch.object(tenant_model, "save", observe_writer_tenant_save),
+        ):
+            threads = [
+                threading.Thread(target=convert, name="clinic-conversion"),
+                threading.Thread(target=write, name="clinic-public-writer"),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=20)
+
+        self.assertFalse(any(thread.is_alive() for thread in threads), "race threads hung")
+        self.assertEqual(errors, [])
+        self.assertEqual(len(responses), 1)
+        return responses[0]
+
     def test_concurrent_create_cannot_escape_conversion_plan(self):
         response = self._race_conversion_with_writer(lambda client: client.post(
             "/api/v1/clinic/sessions/",
@@ -541,3 +630,62 @@ class ClinicConversionPostgresConcurrencyTest(TransactionTestCase, ClinicAPITest
         self.session.refresh_from_db()
         self.assertEqual(self.session.booking_mode, "time_range")
         self.assertNotEqual(self.session.title, "concurrent stale patch")
+
+    def test_conversion_and_public_booking_change_use_one_lock_order(self):
+        replacement = self.make_clinic_session(
+            self.tenant,
+            date=self.from_date,
+            start_time=datetime.time(15, 0),
+            location="booking-change-race",
+            max_participants=10,
+        )
+        student = self.data["students"][0]
+        old_booking = self.make_participant(
+            self.tenant,
+            self.session,
+            student,
+            status=SessionParticipant.Status.PENDING,
+            source=SessionParticipant.Source.STUDENT_REQUEST,
+        )
+
+        def change_booking(client):
+            client.force_authenticate(user=student.user)
+            with patch(
+                "apps.domains.clinic.views.participant_views._send_clinic_notification",
+                return_value={"requested": 2, "failed": 0, "send_to": "both"},
+            ):
+                return client.post(
+                    f"/api/v1/clinic/participants/{old_booking.id}/change-booking/",
+                    {
+                        "new_session_id": replacement.id,
+                        "booking_start_time": "15:00",
+                        "booking_end_time": "16:00",
+                    },
+                    format="json",
+                    **self._headers(self.tenant),
+                )
+
+        response = self._race_conversion_with_public_writer(change_booking)
+
+        self.assertEqual(response.status_code, 200, response.data)
+        old_booking.refresh_from_db()
+        self.assertEqual(old_booking.status, SessionParticipant.Status.CANCELLED)
+        self.assertEqual(response.data["session"], replacement.id)
+
+    def test_conversion_and_partial_settings_patch_preserve_latest_policy(self):
+        def patch_interval(client):
+            client.force_authenticate(user=self.data["admin_user"])
+            return client.patch(
+                "/api/v1/clinic/settings/",
+                {"booking_interval_minutes": 30},
+                format="json",
+                **self._headers(self.tenant),
+            )
+
+        response = self._race_conversion_with_public_writer(patch_interval)
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.tenant.refresh_from_db()
+        self.assertEqual(self.tenant.clinic_booking_mode, "time_range")
+        self.assertEqual(self.tenant.clinic_booking_interval_minutes, 30)
+        self.assertEqual(self.tenant.clinic_booking_max_stay_minutes, 600)
