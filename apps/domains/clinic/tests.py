@@ -2101,7 +2101,7 @@ class StudentClinicPermissionAPITest(APITestCase, ClinicAPITestMixin):
         ClinicLink.objects.filter(id=link.id).update(created_at=datetime.datetime.combine(
             yesterday, datetime.time(18), tzinfo=datetime.timezone.utc,
         ))
-        clinic = self.make_clinic_session(self.tenant, date=yesterday)
+        clinic = self.make_clinic_session(self.tenant, date=yesterday, location="날짜 기준 검증실")
         self.make_participant(
             self.tenant, clinic, self.student, enrollment=enrollment,
             status=SessionParticipant.Status.ATTENDED,
