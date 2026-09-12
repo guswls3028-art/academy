@@ -166,6 +166,9 @@ python manage.py convert_limglish_clinic_time_ranges --from-date 2026-09-10 --ex
   달라졌으면 실패 폐쇄한다. 일반 단일·일괄 session 생성과 PATCH도 먼저 같은 tenant
   정책 row를 잠그며, PATCH는 잠근 session을 다시 읽는다. 요청 validation 이후 정책이나
   session `updated_at`이 바뀌었으면 옛 객체를 저장하지 않고 새로고침·재시도를 요구한다.
+  예약 정책 설정 PATCH도 tenant row를 먼저 잠그고 최신 정책 조합을 다시 읽는다. 요청에
+  포함된 정책 필드만 저장하므로 변환과 겹친 간격 전용 PATCH가 새 mode나 최대 체류시간을
+  옛 값으로 되돌리지 않는다.
   변환 write 뒤에는 같은 잠금 안에서 계획을 다시 계산해 대상이 0인지 확인하며 하나라도
   남으면 transaction 전체를 롤백한다.
 - 자정 종료 대상이 하나라도 있으면 reader-first release의 API/worker 수렴과
@@ -184,9 +187,11 @@ python manage.py convert_limglish_clinic_time_ranges --from-date 2026-09-10 --ex
 
 ## 원자성·동시성·알림
 
-서비스는 학생을 ID 순으로 먼저 잠그고 세션을 날짜·시작 시각·ID 순으로 잠근다.
-단일 생성, 학생 bulk, 교직원 bulk, 일정 변경이 모두 같은 학생 row lock을
-사용하므로 서로 다른 세션을 향한 동시 요청도 같은 날짜 정책을 우회하지 못한다.
+일반 생성과 bulk는 학생을 ID 순으로 먼저 잠그고 세션을 날짜·시작 시각·ID 순으로
+잠근다. 일정 변경은 limglish 변환과 같은 tenant row를 가장 먼저 잠근 뒤 학생·기존
+예약·새 세션을 처리하므로 변환의 session→participant 잠금과 교착하지 않는다. 단일
+생성, 학생 bulk, 교직원 bulk, 일정 변경이 모두 같은 학생 row lock을 사용하므로 서로
+다른 세션을 향한 동시 요청도 같은 날짜 정책을 우회하지 못한다.
 이후 기존 단일 참가자 생성 규칙을 학생 × 세션 조합마다 적용한다.
 정원 마감, 비연속 시간대, 잘못된 대상, 권한 오류가 하나라도 발생하면 요청 전체를 롤백한다.
 따라서 2명 × 2시간대 요청이 일부만 저장되는 상태는 없다.

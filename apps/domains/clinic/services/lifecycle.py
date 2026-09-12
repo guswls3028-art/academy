@@ -1646,6 +1646,11 @@ def change_participant_booking(
         new_session_id = int(new_session_id)
     except (TypeError, ValueError) as exc:
         raise ValidationError({"detail": "new_session_id는 숫자여야 합니다."}) from exc
+
+    # The limglish conversion locks tenant -> sessions -> participants. Enter
+    # the same tenant fence before this writer locks a student or participant,
+    # so neither path can hold a lower-level row while waiting on the other.
+    tenant = tenant.__class__.objects.select_for_update().get(pk=tenant.pk)
     try:
         booking_identity = (
             SessionParticipant.objects
