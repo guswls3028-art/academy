@@ -13,10 +13,6 @@ from django.utils import timezone
 from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
 
 from apps.core.models import Tenant, TenantMembership
-from apps.domains.progress.models import AssessmentCorrection
-from apps.domains.progress.services.session_calculator import (
-    SessionProgressCalculator,
-)
 from apps.domains.results.models import (
     ExamAttempt,
     ExamResult,
@@ -71,6 +67,7 @@ from apps.domains.results.views.session_scores_view import (
 )
 from apps.support.results.tests.omr_subjective_completion_fixtures import (
     AnswerKey,
+    AssessmentCorrection,
     ClinicLink,
     Enrollment,
     Exam,
@@ -81,6 +78,7 @@ from apps.support.results.tests.omr_subjective_completion_fixtures import (
     Session,
     SessionEnrollment,
     SessionProgress,
+    SessionProgressCalculator,
     Sheet,
     Student,
     Submission,

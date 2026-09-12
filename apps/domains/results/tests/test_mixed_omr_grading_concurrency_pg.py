@@ -14,7 +14,6 @@ from django.test import TransactionTestCase
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps.core.models import Tenant, TenantMembership
-from apps.domains.exams.views.exam_recalculate_view import ExamRecalculateView
 from apps.domains.results.guards.score_edit_lease_state import (
     score_edit_payload_is_invalidated,
 )
@@ -27,13 +26,13 @@ from apps.domains.results.views.admin_exam_subjective_score_view import (
 from apps.domains.results.views.admin_exam_attempts_view import AdminExamAttemptsView
 from apps.domains.results.views.score_draft_view import ScoreDraftView
 from apps.domains.results.views.session_scores_view import SessionScoresView
-from apps.domains.submissions.views.submission_view import SubmissionViewSet
 from apps.support.results.tests.omr_subjective_completion_fixtures import (
     AnswerKey,
     Enrollment,
     Exam,
     ExamEnrollment,
     ExamQuestion,
+    ExamRecalculateView,
     Lecture,
     ProgressPolicy,
     Session,
@@ -43,6 +42,7 @@ from apps.support.results.tests.omr_subjective_completion_fixtures import (
     Student,
     Submission,
     SubmissionAnswer,
+    SubmissionViewSet,
 )
 
 
