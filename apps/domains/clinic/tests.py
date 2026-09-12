@@ -195,6 +195,10 @@ class MultiTenantIsolationTest(TestCase, ClinicTestMixin):
         first_enrollment = self.a["enrollments"][0]
         second_lecture = self.make_lecture(tenant, title="영어")
         second_session = self.make_lecture_session(second_lecture, order=2)
+        # This lifecycle checks work after the original assessments, not a new exam.
+        for assessment_session in (self.a["lec_session"], second_session):
+            assessment_session.date = timezone.localdate() - datetime.timedelta(days=2)
+            assessment_session.save(update_fields=["date", "updated_at"])
         second_enrollment = self.make_enrollment(tenant, student, second_lecture)
         second_exam = Exam.objects.create(
             tenant=tenant,
@@ -2030,10 +2034,130 @@ class StudentClinicPermissionAPITest(APITestCase, ClinicAPITestMixin):
         self.assertEqual(resp.data["booking_status_label"], "승인 대기")
         self.assertEqual(resp.data["current_booking"]["participant_id"], pending.id)
 
+    def test_new_assessment_does_not_reuse_older_attendance_or_earlier_booking(self):
+        from apps.domains.results.utils.clinic_highlight import compute_clinic_highlight_map
+
+        enrollment = self.data["enrollments"][0]
+        today = timezone.localdate()
+        assessment_session = self.data["lec_session"]
+        assessment_session.date = today + datetime.timedelta(days=2)
+        assessment_session.save(update_fields=["date", "updated_at"])
+        link = self._make_live_exam_clinic_link(enrollment, assessment_session)
+        previous = self.make_clinic_session(self.tenant, date=today - datetime.timedelta(days=11))
+        attended = self.make_participant(
+            self.tenant, previous, self.student, enrollment=enrollment,
+            status=SessionParticipant.Status.ATTENDED,
+        )
+        attended.checked_out_at = timezone.now() - datetime.timedelta(days=11)
+        attended.save(update_fields=["checked_out_at", "updated_at"])
+        before_exam = self.make_clinic_session(self.tenant, date=today + datetime.timedelta(days=1))
+        booked = self.make_participant(
+            self.tenant, before_exam, self.student, enrollment=enrollment,
+            status=SessionParticipant.Status.BOOKED,
+        )
+
+        def read_state():
+            response = self.client.get("/api/v1/clinic/idcard/", **self._headers(self.tenant))
+            self.assertEqual(response.status_code, 200, response.data)
+            highlights = compute_clinic_highlight_map(
+                tenant=self.tenant, enrollment_ids={enrollment.id},
+            )
+            return response.data, highlights[enrollment.id]
+
+        for _ in range(2):
+            state, highlighted = read_state()
+            self.assertEqual(state["passcard_state"], "CLINIC_REQUIRED")
+            self.assertFalse(state["can_leave"])
+            self.assertIsNone(state["current_booking"])
+            self.assertEqual(state["valid_bookings"], [])
+            self.assertTrue(highlighted)
+
+        # The ordinary same-day booking remains valid; no blanket attendance guard.
+        before_exam.date = assessment_session.date
+        before_exam.save(update_fields=["date", "updated_at"])
+        for _ in range(2):
+            state, highlighted = read_state()
+            self.assertEqual(state["passcard_state"], "BOOKING_CONFIRMED")
+            self.assertEqual(state["current_booking"]["participant_id"], booked.id)
+            self.assertEqual([item["participant_id"] for item in state["valid_bookings"]], [booked.id])
+            self.assertFalse(highlighted)
+        attended.refresh_from_db()
+        link.refresh_from_db()
+        self.assertEqual(attended.status, SessionParticipant.Status.ATTENDED)
+        self.assertIsNotNone(attended.checked_out_at)
+        self.assertIsNone(attended.completed_at)
+        self.assertIsNone(link.resolved_at)
+
+    @timezone.override("Asia/Seoul")
+    def test_undated_assessment_uses_local_requirement_date_not_utc_date(self):
+        from apps.domains.results.utils.clinic_highlight import compute_clinic_highlight_map
+
+        enrollment = self.data["enrollments"][0]
+        today = timezone.localdate()
+        yesterday = today - datetime.timedelta(days=1)
+        link = self._make_live_exam_clinic_link(enrollment, self.data["lec_session"])
+        self.assertIsNone(self.data["lec_session"].date)
+        # Yesterday 18:00 UTC is today 03:00 KST.
+        ClinicLink.objects.filter(id=link.id).update(created_at=datetime.datetime.combine(
+            yesterday, datetime.time(18), tzinfo=datetime.timezone.utc,
+        ))
+        clinic = self.make_clinic_session(self.tenant, date=yesterday)
+        self.make_participant(
+            self.tenant, clinic, self.student, enrollment=enrollment,
+            status=SessionParticipant.Status.ATTENDED,
+        )
+        for expected, expected_highlight in (("CLINIC_REQUIRED", True), ("BOOKING_CONFIRMED", False)):
+            response = self.client.get("/api/v1/clinic/idcard/", **self._headers(self.tenant))
+            self.assertEqual(response.data["passcard_state"], expected)
+            self.assertEqual(compute_clinic_highlight_map(
+                tenant=self.tenant, enrollment_ids={enrollment.id},
+            )[enrollment.id], expected_highlight)
+            clinic.date = today
+            clinic.save(update_fields=["date", "updated_at"])
+
+    def test_passcard_booking_cutoff_includes_new_requirement_in_other_active_lecture(self):
+        from apps.domains.results.utils.clinic_highlight import compute_clinic_highlight_map
+
+        enrollment = self.data["enrollments"][0]
+        today = timezone.localdate()
+        session = self.data["lec_session"]
+        session.date = today - datetime.timedelta(days=2)
+        session.save(update_fields=["date", "updated_at"])
+        self._make_live_exam_clinic_link(enrollment, session)
+        other_lecture = self.make_lecture(self.tenant, title="새 시험 강의")
+        other_enrollment = self.make_enrollment(self.tenant, self.student, other_lecture)
+        other_session = self.make_lecture_session(other_lecture)
+        other_session.date = today
+        other_session.save(update_fields=["date", "updated_at"])
+        newer_link = self._make_live_exam_clinic_link(other_enrollment, other_session)
+        clinic = self.make_clinic_session(self.tenant, date=today - datetime.timedelta(days=1))
+        self.make_participant(
+            self.tenant, clinic, self.student, enrollment=enrollment,
+            status=SessionParticipant.Status.ATTENDED,
+        )
+
+        def highlight():
+            # Even a session-scoped request must include the student's other active requirement.
+            return compute_clinic_highlight_map(
+                tenant=self.tenant, enrollment_ids={enrollment.id}, session=session,
+            )[enrollment.id]
+
+        self.assertTrue(highlight())
+        response = self.client.get("/api/v1/clinic/idcard/", **self._headers(self.tenant))
+        self.assertEqual(response.data["passcard_state"], "CLINIC_REQUIRED")
+        newer_link.resolved_at = timezone.now()
+        newer_link.save(update_fields=["resolved_at", "updated_at"])
+        self.assertFalse(highlight(), "The original still-in-progress clinic remains valid for the older requirement.")
+        response = self.client.get("/api/v1/clinic/idcard/", **self._headers(self.tenant))
+        self.assertEqual(response.data["passcard_state"], "BOOKING_CONFIRMED")
+
     def test_idcard_reservation_holds_until_completion_then_requires_next_booking(self):
         from apps.domains.results.utils.clinic_highlight import compute_clinic_highlight_map
 
         enrollment = self.data["enrollments"][0]
+        assessment_session = self.data["lec_session"]
+        assessment_session.date = timezone.localdate() - datetime.timedelta(days=2)
+        assessment_session.save(update_fields=["date", "updated_at"])
         link = self._make_live_exam_clinic_link(
             enrollment,
             self.data["lec_session"],
