@@ -187,6 +187,12 @@ python manage.py convert_limglish_clinic_time_ranges --from-date 2026-09-10 --ex
   바꾸고 tenant의 새 일정 기본값도 동일하게 맞춘다. godmin·tchul과 과거 일정은
   건드리지 않으며, 같은 명령을 다시 실행하면 변경 없는 상태로 끝난다.
 
+자정 종료를 허용하는 참가자 DB 제약 교체 migration은 PostgreSQL에서 같은 원자
+transaction 안에 `lock_timeout=5s`, `statement_timeout=30s`를 먼저 설정한다. 테이블
+잠금을 제시간에 얻지 못하거나 제약 검사 scan이 예산을 넘으면 migration 기록과 제약
+변경을 함께 롤백하므로 기존 순서 제약과 참가자 행은 그대로 남는다. 운영자는 트래픽을
+우회해 수동 DDL을 실행하지 않고, 잠금 경쟁이 사라진 뒤 동일 migration을 재시도한다.
+
 ## 원자성·동시성·알림
 
 단일 생성과 bulk는 학생을 먼저 잠그며, bulk와 limglish 변환은 여러 세션을 모두
@@ -324,6 +330,8 @@ bulk 모두 `409`로 거부하고 요청 전체를 롤백한다. 일정 변경�
 - 시간 범위·권한·연락처·알림 이력 회귀: `tests/test_clinic_time_range_policy_api.py`
 - 자정 종료·구간 정원·리마인더·DB 제약 회귀:
   `tests/test_clinic_time_range_midnight_api.py`
+- 자정 제약 migration 잠금 예산·원자 롤백·기존 행 호환 회귀:
+  `tests/test_clinic_midnight_migration_lock_timeout.py`
 - limglish dry-run/token/잠금/전환/tenant 격리 회귀:
   `tests/test_convert_limglish_clinic_time_ranges_command.py`
 - 하원·등원 독립 회귀: `tests/test_clinic_operations_workflow_api.py`

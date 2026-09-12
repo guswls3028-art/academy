@@ -9,12 +9,26 @@ ACADEMY_MIGRATION_REASON = (
 )
 
 
+def set_constraint_ddl_timeouts(apps, schema_editor):
+    if schema_editor.connection.vendor != "postgresql":
+        return
+    with schema_editor.connection.cursor() as cursor:
+        cursor.execute("SET LOCAL lock_timeout = '5s'")
+        cursor.execute("SET LOCAL statement_timeout = '30s'")
+
+
 class Migration(migrations.Migration):
+    atomic = True
+
     dependencies = [
         ("clinic", "0020_session_booking_interval_minutes_and_more"),
     ]
 
     operations = [
+        migrations.RunPython(
+            set_constraint_ddl_timeouts,
+            migrations.RunPython.noop,
+        ),
         migrations.RemoveConstraint(
             model_name="sessionparticipant",
             name="clinic_participant_booking_range_order",
@@ -32,5 +46,9 @@ class Migration(migrations.Migration):
                 ),
                 name="clinic_participant_booking_range_order",
             ),
+        ),
+        migrations.RunPython(
+            migrations.RunPython.noop,
+            set_constraint_ddl_timeouts,
         ),
     ]
