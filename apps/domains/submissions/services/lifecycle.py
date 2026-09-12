@@ -367,24 +367,31 @@ def _process_submission_storage_cleanup_safely(intent_ids: tuple[int, ...]) -> N
         logger.exception("Submission storage cleanup callback failed before intent processing")
 
 
-def schedule_inventory_storage_cleanup(*, tenant_id: int, object_keys: Iterable[str]) -> tuple[int, ...]:
-    """Record exact detached Inventory cascade keys in the caller's transaction.
+def lock_storage_object_keys(*, tenant_id: int, object_keys: Iterable[str]) -> tuple[str, ...]:
+    """Serialize exact storage keys with cleanup before a caller changes ownership."""
+    if not transaction.get_connection().in_atomic_block:
+        raise RuntimeError("storage object ownership requires an atomic transaction")
+    keys = tuple(object_keys)
+    prefix = f"tenants/{int(tenant_id)}/"
+    if any(not isinstance(key, str) or not key or (key.startswith("tenants/") and not key.startswith(prefix)) for key in keys):
+        raise ValueError("storage cleanup key is outside its tenant namespace")
+    keys = tuple(sorted(set(keys)))
+    for key in keys:
+        _lock_object_key(bucket=SubmissionStorageCleanupIntent.Bucket.STORAGE, key=key)
+    return keys
+
+
+def schedule_detached_storage_cleanup(*, tenant_id: int, object_keys: Iterable[str]) -> tuple[int, ...]:
+    """Record exact detached object keys in the caller's transaction.
 
     The caller validates and deletes its metadata graph in this same transaction.
     Surviving owners are never deleted; the processor checks ownership again
     after the outer commit and retains failed/deferred work for the existing retry.
     """
-    if not transaction.get_connection().in_atomic_block:
-        raise RuntimeError("inventory cleanup intent requires an atomic transaction")
-    keys = tuple(object_keys)
-    prefix = f"tenants/{int(tenant_id)}/"
-    if any(not isinstance(key, str) or not key or (key.startswith("tenants/") and not key.startswith(prefix)) for key in keys):
-        raise ValueError("inventory cleanup key is outside its tenant namespace")
-    keys = sorted(set(keys))
+    keys = lock_storage_object_keys(tenant_id=tenant_id, object_keys=object_keys)
     bucket = SubmissionStorageCleanupIntent.Bucket.STORAGE
     intent_ids = []
     for key in keys:
-        _lock_object_key(bucket=bucket, key=key)
         if _other_storage_owner_references(bucket=bucket, key=key):
             continue
         intent, created = SubmissionStorageCleanupIntent.objects.select_for_update().get_or_create(
@@ -403,7 +410,7 @@ def schedule_inventory_storage_cleanup(*, tenant_id: int, object_keys: Iterable[
     return tuple(intent_ids)
 
 
-def inventory_storage_cleanup_status(*, tenant_id: int, intent_ids: Iterable[int]) -> dict[str, int]:
+def storage_cleanup_status(*, tenant_id: int, intent_ids: Iterable[int]) -> dict[str, int]:
     states = list(SubmissionStorageCleanupIntent.objects.filter(
         tenant_id=tenant_id, id__in=tuple(intent_ids),
     ).values_list("status", flat=True))
@@ -412,6 +419,15 @@ def inventory_storage_cleanup_status(*, tenant_id: int, intent_ids: Iterable[int
         "failed": states.count("failed"),
         "cleaned": states.count("cleaned"),
     }
+
+
+def schedule_inventory_storage_cleanup(*, tenant_id: int, object_keys: Iterable[str]) -> tuple[int, ...]:
+    """Compatibility entry for the inventory deletion owner."""
+    return schedule_detached_storage_cleanup(tenant_id=tenant_id, object_keys=object_keys)
+
+
+def inventory_storage_cleanup_status(*, tenant_id: int, intent_ids: Iterable[int]) -> dict[str, int]:
+    return storage_cleanup_status(tenant_id=tenant_id, intent_ids=intent_ids)
 
 
 def delete_submission_storage_for_permanent_delete(

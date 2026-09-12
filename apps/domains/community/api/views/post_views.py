@@ -3,7 +3,13 @@ import logging
 import uuid
 
 from django.db import transaction
+from django.shortcuts import get_object_or_404
 from apps.domains.community.services.html_sanitizer import sanitize_html
+from apps.domains.community.services.deletion import (
+    CommunityDeleteScopeError,
+    delete_post_content,
+    deletion_result,
+)
 from django.db.models import Exists, OuterRef, Q
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -37,6 +43,7 @@ from apps.support.community.post_dependencies import (
     student_activity_rank,
     visible_scope_node_ids_for_students,
 )
+from apps.support.community.storage_cleanup_dependencies import lock_storage_object_keys
 
 from ._common import (
     _get_tenant_from_request,
@@ -74,18 +81,46 @@ class PostViewSet(viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         """학생/학부모는 현재 학생 컨텍스트의 본인 글만 삭제 가능."""
-        instance = self.get_object()
-        is_parent = getattr(request.user, "parent_profile", None) is not None
-        if is_parent and instance.post_type not in {"qna", "counsel"}:
-            return self._parent_read_only_response("글 삭제")
-        request_student = (
-            get_request_student_for_write(request)
-            if is_parent
-            else get_request_student(request)
+        try:
+            with transaction.atomic():
+                instance = self.get_object()
+                instance = get_object_or_404(
+                    PostEntity.objects.select_for_update(), pk=instance.pk, tenant=request.tenant,
+                )
+                is_parent = getattr(request.user, "parent_profile", None) is not None
+                if is_parent and instance.post_type not in {"qna", "counsel"}:
+                    return self._parent_read_only_response("글 삭제")
+                request_student = (
+                    get_request_student_for_write(request)
+                    if is_parent
+                    else get_request_student(request)
+                )
+                if request_student is not None and instance.created_by_id != request_student.id:
+                    return Response({"detail": "권한이 없습니다."}, status=status.HTTP_403_FORBIDDEN)
+                from apps.domains.community.models import support_kind_for_post
+                if support_kind_for_post(instance):
+                    return Response(
+                        {"detail": "지원 문의 기록은 제출 후 삭제할 수 없습니다."},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+                deleted, intent_ids = delete_post_content(post=instance)
+        except CommunityDeleteScopeError:
+            return self._delete_scope_mismatch_response()
+        return self._content_deleted_response(request.tenant.id, deleted, intent_ids)
+
+    @staticmethod
+    def _delete_scope_mismatch_response():
+        return Response(
+            {"code": "storage_cleanup_scope_mismatch", "detail": "첨부파일의 저장 범위를 확인할 수 없어 삭제하지 않았습니다."},
+            status=status.HTTP_409_CONFLICT,
         )
-        if request_student is not None and getattr(instance, "created_by_id", None) != request_student.id:
-            return Response({"detail": "권한이 없습니다."}, status=status.HTTP_403_FORBIDDEN)
-        return super().destroy(request, *args, **kwargs)
+
+    @staticmethod
+    def _content_deleted_response(tenant_id, deleted, intent_ids):
+        result = deletion_result(tenant_id=tenant_id, deleted=deleted, intent_ids=intent_ids)
+        if result.get("code") == "community_storage_cleanup_pending":
+            return Response(result, status=status.HTTP_502_BAD_GATEWAY)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     def _is_user_blocked(self, request) -> bool:
         """사용자 커뮤니티 차단 check (#49 G2). 차단된 사용자는 write/reaction 차단."""
@@ -964,6 +999,11 @@ class PostViewSet(viewsets.ModelViewSet):
                         )
 
                     created = []
+                    # Post → exact object keys, matching deletion. The cleanup
+                    # processor takes only key locks and never waits on a post.
+                    lock_storage_object_keys(
+                        tenant_id=tenant.id, object_keys=[item[0] for item in planned_uploads],
+                    )
                     for (
                         r2_key,
                         safe_name,
@@ -1047,40 +1087,35 @@ class PostViewSet(viewsets.ModelViewSet):
         tenant = _get_tenant_from_request(request)
         if not tenant:
             return Response({"detail": "tenant required"}, status=status.HTTP_403_FORBIDDEN)
-        post = get_post_by_id(tenant, int(pk))
-        if not post or not self._post_visible_to_request(request, post):
-            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
-
-        is_parent = getattr(request.user, "parent_profile", None) is not None
-        if is_parent and post.post_type not in {"qna", "counsel"}:
-            return self._parent_read_only_response("첨부파일 삭제")
-        # 학생과 학부모는 현재 학생 컨텍스트의 본인 글 첨부만 삭제 가능
-        request_student = (
-            get_request_student_for_write(request)
-            if is_parent
-            else get_request_student(request)
-        )
-        if request_student is not None and post.created_by_id != request_student.id:
-            return Response({"detail": "권한이 없습니다."}, status=status.HTTP_403_FORBIDDEN)
-
         try:
-            att = PostAttachment.objects.get(id=int(att_id), post=post, tenant=tenant)
-        except (PostAttachment.DoesNotExist, ValueError, TypeError):
-            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
-        from apps.domains.community.models import support_kind_for_post
-        if support_kind_for_post(post):
-            return Response(
-                {"detail": "지원 문의 첨부파일은 제출 후 삭제할 수 없습니다."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
-        from apps.infrastructure.storage.r2 import delete_object_r2_storage
-        try:
-            delete_object_r2_storage(key=att.r2_key)
-        except Exception:
-            logger.warning("R2 delete failed for key=%s, removing DB record anyway", att.r2_key)
-        att.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
+            with transaction.atomic():
+                post = PostEntity.objects.select_for_update().filter(tenant=tenant, pk=int(pk)).first()
+                if not post or not self._post_visible_to_request(request, post):
+                    return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+                is_parent = getattr(request.user, "parent_profile", None) is not None
+                if is_parent and post.post_type not in {"qna", "counsel"}:
+                    return self._parent_read_only_response("첨부파일 삭제")
+                request_student = (
+                    get_request_student_for_write(request)
+                    if is_parent
+                    else get_request_student(request)
+                )
+                if request_student is not None and post.created_by_id != request_student.id:
+                    return Response({"detail": "권한이 없습니다."}, status=status.HTTP_403_FORBIDDEN)
+                try:
+                    att = PostAttachment.objects.select_for_update().get(id=int(att_id), post=post, tenant=tenant)
+                except (PostAttachment.DoesNotExist, ValueError, TypeError):
+                    return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+                from apps.domains.community.models import support_kind_for_post
+                if support_kind_for_post(post):
+                    return Response(
+                        {"detail": "지원 문의 첨부파일은 제출 후 삭제할 수 없습니다."},
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
+                deleted, intent_ids = delete_post_content(post=post, attachment=att)
+        except CommunityDeleteScopeError:
+            return self._delete_scope_mismatch_response()
+        return self._content_deleted_response(tenant.id, deleted, intent_ids)
 
     @action(detail=True, methods=["patch", "delete"], url_path=r"replies/(?P<reply_id>[^/.]+)")
     def reply_detail(self, request, pk=None, reply_id=None):

@@ -617,3 +617,78 @@ requested → in_progress → completed → cancelled
 - [ ] 학생앱에서 기존 공지/QnA/게시물 정상 노출
 - [ ] 기존 운영 데이터 읽기 정상
 - [ ] 새로 작성한 글이 학생앱에 정상 반영
+
+## 22. 게시글·첨부 삭제의 저장소 내구성
+
+일반 커뮤니티의 `DELETE /api/v1/community/posts/:id/`와
+`DELETE /api/v1/community/posts/:id/attachments/:att_id/`는 권한 확인 후
+메타데이터 삭제와 정확한 원본 정리 의도를 같은 DB transaction에 기록한다.
+게시글 삭제는 해당 글의 첨부 전체를 열거하며, 첨부 단건 삭제는 글 내용과
+다른 첨부를 보존한다. DB 삭제 또는 intent 저장 실패/outer rollback에서는
+메타데이터도 원본도 삭제하지 않는다. 실제 R2 DELETE는 outer commit 후에만 실행한다.
+
+- tenant와 글·첨부의 tenant 관계가 정확해야 한다. 학생은 본인 글,
+  학부모는 명시적으로 선택한 자녀의 QnA/상담이라는 기존 쓰기 권한을 유지한다.
+- 지원 문의는 [개발자 문의 운영함](../operations/dev-console-inbox.md)의 제출 후
+  기록 보존 계약을 유지한다. 일반 게시글 queryset에서 제외되어 게시글 DELETE는
+  404이며, 지원 첨부 DELETE는 403이다. 일반 조회 범위를 넓혀 지원 기록을 노출하지 않는다.
+- 원본은 실제 `PostAttachment.r2_key`만 대상으로 삼는다. 현재
+  `tenants/<tenant>/community/posts/<post>/...` 및 기존 global exact key를 지원한다.
+  다른 tenant namespace나 잘못 연결된 첨부 graph는 `409 storage_cleanup_scope_mismatch`로
+  DB/provider 변경 전에 중단한다. prefix 열거/추정 삭제를 하지 않는다.
+- 다른 tenant를 포함한 surviving storage owner가 같은 키를 참조하면 원본을 보존한다.
+  이 키는 물리 삭제 완료 수에 넣지 않는다. 기존 storage owner registry와 처리 직전
+  재검사를 그대로 사용한다([저장소 소유 계약](inventory-storage.md)).
+- 업로드와 삭제는 같은 post row → 정렬된 exact storage key 순서로 잠근다.
+  기존 cleanup processor는 exact key lock → owner **조회**만 하며 post row lock을
+  취하지 않는다. 동일 idempotency key 재업로드의 PUT/metadata commit과 정리를
+  직렬화해, 정리가 새 원본을 지우거나 업로드가 삭제된 원본 metadata를 남기지 않게 한다.
+  SQLite는 이 잠금의 동시성 증거가 아니며 PostgreSQL 회귀가 별도 필요하다.
+
+### 응답과 재조회
+
+정상 삭제는 기존 `204`를 유지한다. DB 삭제가 commit됐지만 원본 정리 일부가
+실패하거나 대기 중이면 `502`를 반환한다. 이 응답은 DB rollback을 뜻하지 않는다.
+
+```json
+{
+  "code": "community_storage_cleanup_pending",
+  "detail": "목록에서 삭제되었습니다. 원본 파일 정리는 재시도 대기 중입니다.",
+  "deleted": {"posts": 1, "attachments": 2, "r2_objects": 1},
+  "storage_cleanup": {"pending": 0, "failed": 1, "cleaned": 1}
+}
+```
+
+`deleted`는 boolean이 아니라 정확한 DB 삭제 수와 물리 정리 완료 수이다.
+`pending`(PENDING/PROCESSING), `failed`, `cleaned`는 서로 배타적이고,
+미완료 수는 `pending + failed`이다. raw object key/provider 예외는 응답하지 않는다.
+502 뒤에도 GET은 삭제된 첨부를 제외하며 삭제된 글은 404이다. 프런트엔드는
+authoritative 목록/detail/count 재조회와 이 partial detail을 표시하고, 삭제된
+상세에서 정상적으로 이탈해야 한다. 전체 성공이나 원본 그대로라는 실패 안내를
+하지 않고, 같은 DELETE를 자동 재시도하지 않는다. 이 BE 변경만으로 FE companion의
+실제 화면·reload 검증이 완료됐다고 간주하지 않는다.
+
+외부 transaction 안에서 호출돼 callback이 아직 실행되지 않은 경우도 pending을
+숨기지 않는다. 응답 결정 시 미완료면 502이며, 바깥 transaction rollback은 모든
+DB 전환과 callback을 함께 취소한다. 204 양성 증거는 실제 autocommit 요청 경계에서
+processor 완료를 확인하는 TransactionTestCase로 검증한다.
+
+### 기존 outbox 처리와 검증
+
+기존 `SubmissionStorageCleanupIntent` 및 processor를 재사용하며 새 테이블/queue는 없다.
+failed/pending과 15분 이상 stale PROCESSING은 기존 command
+`process_submission_storage_cleanup --limit 1000`으로 재시도하고 cleaned 키는 다시
+삭제하지 않는다. `purge_deleted_students`도 학생 삭제 대상 유무와 무관하게 이
+processor를 먼저 호출한다. `infra/terraform/purge_schedule.tf`의 EventBridge rule
+`${var.naming_prefix}-purge-soft-deleted`(현재 SSOT `academy-v1-purge-soft-deleted`),
+`cron(15 18 * * ? *)` → target `SsmRunCommandPurgeSoftDeleted` → `tag:Name=academy-v1-api`
+→ `docker exec academy-api python manage.py purge_deleted_students`가 기존 예약 실행이다.
+즉시 성공/실제 운영 스케줄 정상 실행을 응답으로 보장하지 않는다. 한 번의 처리 한도는
+1000이며 실패·잔여는 intent 상태와 command의 cleaned/failed/deferred 수로 관측한다.
+
+검증 소유는 `tests/test_community_delete_durability.py`이다. provider 실패와 재시도
+수렴, cascade/rollback, legacy/공유/타 tenant 보호, 기존 purge consumer, 정확 키
+재업로드 양방향 PostgreSQL 경합을 포함한다. 기존 inventory, community upload,
+parent-selected-child 및 support inbox 회귀도 함께 통과해야 한다. 실제 원본 부재와
+paired UI 성공/partial/reload는 승인된 isolated QA에서 별도 확인해야 하며 로컬 mock이나
+미실행 PostgreSQL 검사를 운영 성공으로 기록하지 않는다.
