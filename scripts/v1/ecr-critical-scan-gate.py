@@ -397,8 +397,8 @@ def main() -> int:
         image = images[repository]
         if not isinstance(image, dict):
             raise GateError(f"candidate image entry is malformed: {repository}")
-        if image.get("source") != "built":
-            continue
+        if image.get("source") not in {"built", "prior-success"}:
+            raise GateError(f"candidate image source is invalid: {repository}")
         digest = image.get("digest")
         if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
             raise GateError(f"candidate digest is invalid: {repository}")

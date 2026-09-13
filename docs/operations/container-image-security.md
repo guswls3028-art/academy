@@ -104,7 +104,9 @@
 
 ## Critical 및 High 판정
 
-1. 후보 manifest에 `source=built`인 각 digest의 scan 결과가 없으면 CI가
+1. 후보 manifest의 여섯 digest 모두(`source=built`와 `source=prior-success`)에
+   같은 완료 scan/현재 정책 판정을 적용한다. 알 수 없는 source는 실패한다.
+   각 digest의 scan 결과가 없으면 CI가
    repository-scoped `ecr:StartImageScan` 권한으로 scan을 호출한다. 재사용
    digest라는 이유로 scan을 건너뛰지 않는다. ECR이 동일 digest scan quota가
    이미 소비됐다고 응답해도 기존 scan의 `COMPLETE` readback은 끝까지 요구한다.

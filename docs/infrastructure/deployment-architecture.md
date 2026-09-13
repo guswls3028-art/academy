@@ -95,10 +95,11 @@ git push main
 
 | Trigger Files | Builds |
 |--------------|--------|
-| `.dockerignore`, `docker/Dockerfile.base`, `requirements/{constraints,common}.txt`, `libs/`, `academy/`, `manage.py` | ALL images (force_full) |
-| Worker 공통 import: `apps/{shared,support,core,infrastructure}/`, `apps/api/common/`, `apps/api/config/settings/worker.py` | ALL images (force_full) |
-| Python package import roots: `apps/__init__.py`, `apps/{api,domains,worker}/__init__.py`, `apps/api/config[/settings]/__init__.py` | ALL images (force_full) |
-| Django startup import: `apps/domains/*/{models.py,models/,apps.py,signals.py,signals/,__init__.py}` | ALL images (force_full) |
+| Base inputs: `.dockerignore`, `docker/Dockerfile.base`, `docker/native-security/`, `requirements/{constraints,common}.txt` | Base + all five runtime images (force_full) |
+| Shared runtime source/config: `libs/`, `academy/`, `manage.py`, `docs/ssot/params.yaml` | All five runtimes; reuse unchanged verified base |
+| Worker 공통 import: `apps/{shared,support,core,infrastructure}/`, `apps/api/common/`, `apps/api/config/settings/worker.py` | All five runtimes; reuse unchanged verified base |
+| Python package import roots: `apps/__init__.py`, `apps/{api,domains,worker}/__init__.py`, `apps/api/config[/settings]/__init__.py` | All five runtimes; reuse unchanged verified base |
+| Django startup import: `apps/domains/*/{models.py,models/,apps.py,signals.py,signals/,__init__.py}` | All five runtimes; reuse unchanged verified base |
 | `apps/`, runtime `scripts/` except `scripts/codex/`, `docker/api/`, `requirements/api.txt` | API |
 | `apps/worker/video_worker/`, `apps/support/video/`, `apps/domains/video/`, `apps/api/config/settings/worker.py`, `docker/video-worker/`, `requirements/worker-video.txt` | Video Worker |
 | Legacy aggregate `requirements/requirements.txt` | API + Video Worker only; it is not a base/AI/Messaging/Tools input |
@@ -106,9 +107,13 @@ git push main
 | `apps/worker/ai_worker/`, `apps/worker/omr/`, `apps/domains/`, `apps/support/ai/`, `apps/api/config/settings/(worker|base).py`, `models/`, runtime `scripts/` except `scripts/codex/`, `academy/`, `libs/queue/`, `docker/ai-worker*`, `requirements/worker-ai*` | AI Worker |
 | `apps/worker/tools_worker/`, `apps/domains/tools/`, `apps/domains/ai/queueing/`, PDF 오답노트 서비스/정답 포맷터/한글 폰트, `apps/support/ai/services/sqs_queue.py`, `academy/(application/use_cases/tools|domain/tools|adapters/tools|framework/workers|adapters/queue/sqs)/`, `docker/tools-worker/`, `requirements/worker-tools.txt` | Tools Worker |
 
-`force_full` is a correctness boundary for code imported by more than one runtime. It builds all six images, including `academy-base`; service-specific paths retain selective builds. `workflow_dispatch` always performs a full build/deploy. Every worker Dockerfile imports its actual runtime entrypoint during the immutable build, so a candidate with a missing module or incompatible import cannot reach production deployment. Every release, including worker-only selective releases, still runs the persistent API/Tools development gate before preprod.
+The base Dockerfile contains OS/native/common Python dependencies, not application source. Shared code therefore rebuilds every runtime consumer without recompiling an unchanged base. `force_full` remains the six-image rebuild for changed base inputs, unavailable source evidence, or confirmed ECR base absence. `workflow_dispatch` always performs a full build/deploy, with the existing per-run APT security refresh. Every worker Dockerfile imports its actual runtime entrypoint during the immutable build, so a candidate with a missing module or incompatible import cannot reach production deployment. Every release, including worker-only selective releases, still runs the persistent API/Tools development gate before preprod.
 Change predicates use the `changed_matches` here-string helper instead of `echo | grep -q`; this avoids a `pipefail`/SIGPIPE false negative on large multi-commit push ranges.
 Push change detection derives each service's diff base from that image's source commit in the last complete verified release manifest, not from `github.event.before`. Therefore a failed workflow followed by a small hotfix still includes earlier unshipped API/worker changes. Missing, non-ancestor, or malformed image source evidence fails safe to a full build.
+
+The base input diff is separate from the runtime diff union: an older base source commit must not repeatedly reintroduce already-shipped application changes. Conversely, a lagged runtime whose own diff still contains a base input change must rebuild against the current base even if that base was already promoted. Before reuse, `scripts/v1/resolve_release_base.py` reads the exact base digest and immutable source tag from the same freshly captured baseline artifact in ECR. Only an explicit `ImageNotFoundException` or `RepositoryNotFoundException` selects the normal six-image rebuild. Access denial, timeout, malformed/ambiguous data, or a tag/digest mismatch blocks the run; no `latest` fallback, dependency-age heuristic, or scan success inference is allowed. This preflight is read-only and uses the existing main-ref OIDC role. The later candidate security gate checks all six entries (`built` and `prior-success`) against completed scans and current exact risk acceptances; an unknown source is invalid.
+
+Focused verification: `python -m pytest tests/test_release_base_reuse.py tests/test_release_performance_contract.py tests/test_ecr_critical_scan_gate.py tests/test_infrastructure_safety_contract.py -q`. The base-reuse matrix executes the actual workflow Bash classification, including accumulated image diffs, instead of duplicating its policy in Python. Local tests prove selection/error boundaries, not a production speedup; compare the real `prepare-build` and whole-release timings after promotion.
 
 Evidence-only pushes under `docs/reports/**` and updates to
 `docs/ssot/runtime-current.md` do not start the production release workflow.

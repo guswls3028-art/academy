@@ -56,14 +56,17 @@ jobs:
   # ============================================================
   detect-changes:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     outputs:
-      build_api: ${{ steps.changes.outputs.build_api }}
-      build_video: ${{ steps.changes.outputs.build_video }}
-      build_messaging: ${{ steps.changes.outputs.build_messaging }}
-      build_ai: ${{ steps.changes.outputs.build_ai }}
-      build_tools: ${{ steps.changes.outputs.build_tools }}
-      build_base: ${{ steps.changes.outputs.build_base }}
-      force_full: ${{ steps.changes.outputs.build_all }}
+      build_api: ${{ steps.base-reuse.outputs.rebuild == 'true' || steps.changes.outputs.build_api == 'true' }}
+      build_video: ${{ steps.base-reuse.outputs.rebuild == 'true' || steps.changes.outputs.build_video == 'true' }}
+      build_messaging: ${{ steps.base-reuse.outputs.rebuild == 'true' || steps.changes.outputs.build_messaging == 'true' }}
+      build_ai: ${{ steps.base-reuse.outputs.rebuild == 'true' || steps.changes.outputs.build_ai == 'true' }}
+      build_tools: ${{ steps.base-reuse.outputs.rebuild == 'true' || steps.changes.outputs.build_tools == 'true' }}
+      build_base: ${{ steps.base-reuse.outputs.rebuild == 'true' || steps.changes.outputs.build_base == 'true' }}
+      force_full: ${{ steps.base-reuse.outputs.rebuild == 'true' || steps.changes.outputs.build_all == 'true' }}
       short_sha: ${{ steps.meta.outputs.short_sha }}
     steps:
       - name: Checkout
@@ -182,7 +185,7 @@ jobs:
           CHANGED_AI=$(git diff --name-only "$AI_PREV" HEAD)
           CHANGED_TOOLS=$(git diff --name-only "$TOOLS_PREV" HEAD)
           CHANGED=$(printf '%s\n' \
-            "$CHANGED_RELEASE" "$CHANGED_BASE" "$CHANGED_API" \
+            "$CHANGED_RELEASE" "$CHANGED_API" \
             "$CHANGED_VIDEO" "$CHANGED_MSG" "$CHANGED_AI" "$CHANGED_TOOLS" |
             sed '/^$/d' | sort -u)
           # Avoid echo|grep -q under GitHub's `bash -o pipefail`: on a large
@@ -193,15 +196,35 @@ jobs:
           # otherwise a later workflow-file change would reclassify it as API/AI.
           runtime_changes() { grep -vE '^scripts/codex/' <<< "$1" || true; }
 
-          # 전체 빌드 트리거: base/공통 requirements와 모든 worker가 import하는 코드.
+          # Base contains dependencies only, not academy/apps/libs source. Compare
+          # its actual inputs separately; old base source must not reintroduce
+          # app changes that every runtime has already shipped.
+          RUNTIME_CHANGED="$CHANGED"
+          CHANGED="$CHANGED_BASE"
+          BASE=false
+          changed_matches "^\.dockerignore$" && BASE=true
+          changed_matches "^docker/Dockerfile\.base$" && BASE=true
+          changed_matches "^docker/native-security/" && BASE=true
+          changed_matches "^requirements/constraints\.txt$" && BASE=true
+          changed_matches "^requirements/common\.txt$" && BASE=true
+          if [ "$BASE" = "true" ]; then
+            force_full_build "Base dependency input changed"
+          fi
+          CHANGED="$RUNTIME_CHANGED"
+
+          # 공통 코드 변경은 다섯 runtime 모두 빌드하되 dependency base는 재사용한다.
           # Worker settings가 apps.core/api.common/shared와 각 domain model을 초기화하고,
           # academy/libs/support/infrastructure는 여러 service entrypoint가 직접 import한다.
           FORCE_ALL=false
+          # A prior selective/legacy release may have promoted a new base while
+          # one runtime still contains the older dependency layer. Catch up all
+          # consumers even when the current base inputs are already shipped.
           changed_matches "^\.dockerignore$" && FORCE_ALL=true
-          changed_matches "^docs/ssot/params\.yaml$" && FORCE_ALL=true
           changed_matches "^docker/Dockerfile\.base$" && FORCE_ALL=true
+          changed_matches "^docker/native-security/" && FORCE_ALL=true
           changed_matches "^requirements/constraints\.txt$" && FORCE_ALL=true
           changed_matches "^requirements/common\.txt$" && FORCE_ALL=true
+          changed_matches "^docs/ssot/params\.yaml$" && FORCE_ALL=true
           changed_matches "^libs/" && FORCE_ALL=true
           changed_matches "^academy/" && FORCE_ALL=true
           changed_matches "^apps/shared/" && FORCE_ALL=true
@@ -215,9 +238,9 @@ jobs:
           changed_matches "^manage\.py$" && FORCE_ALL=true
 
           if [ "$FORCE_ALL" = "true" ]; then
-            echo "Core/shared change detected — full build"
-            echo "build_all=true" >> $GITHUB_OUTPUT
-            echo "build_base=true" >> $GITHUB_OUTPUT
+            echo "Core/shared change detected — rebuild all runtimes, reuse immutable base"
+            echo "build_all=false" >> $GITHUB_OUTPUT
+            echo "build_base=false" >> $GITHUB_OUTPUT
             echo "build_api=true" >> $GITHUB_OUTPUT
             echo "build_video=true" >> $GITHUB_OUTPUT
             echo "build_messaging=true" >> $GITHUB_OUTPUT
@@ -228,13 +251,6 @@ jobs:
 
           echo "build_all=false" >> $GITHUB_OUTPUT
 
-          # Base image: only when Dockerfile.base, common requirements, or libs change
-          CHANGED="$CHANGED_BASE"
-          BASE=false
-          changed_matches "^docker/Dockerfile\.base$" && BASE=true
-          changed_matches "^docker/native-security/" && BASE=true
-          changed_matches "^requirements/common\.txt$" && BASE=true
-          changed_matches "^libs/" && BASE=true
           echo "build_base=$BASE" >> $GITHUB_OUTPUT
 
           # API: apps/ (대부분), docker/api/, requirements/api.txt
@@ -327,8 +343,24 @@ jobs:
           changed_matches "^docker/tools-worker/" && TOOLS=true
           changed_matches "^requirements/worker-tools\.txt$" && TOOLS=true
           echo "build_tools=$TOOLS" >> $GITHUB_OUTPUT
+          echo "Detection complete: api=$API video=$VIDEO messaging=$MSG ai=$AI tools=$TOOLS base=$BASE"
 
-          echo "Detection complete: api=$API video=$VIDEO messaging=$MSG ai=$AI tools=$TOOLS"
+      - name: Configure AWS for read-only base identity check
+        if: steps.changes.outputs.build_base != 'true' && contains(steps.changes.outputs.*, 'true')
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_FOR_ECR_BUILD }}
+          aws-region: ${{ env.AWS_REGION }}
+          action-timeout-s: 180
+
+      - name: Verify prior base identity or select a complete rebuild
+        id: base-reuse
+        if: steps.changes.outputs.build_base != 'true' && contains(steps.changes.outputs.*, 'true')
+        run: |
+          python scripts/v1/resolve_release_base.py \
+            --baseline "$RUNNER_TEMP/release-baseline/release-manifest.latest.json" \
+            --region "${{ env.AWS_REGION }}" \
+            --github-output "$GITHUB_OUTPUT"
 
   # ============================================================
   # Phase 1.4: Static lint (deploy gate)
@@ -988,7 +1020,7 @@ jobs:
 
           echo "buildTime=$BUILD_TIME" >> $GITHUB_OUTPUT
 
-      - name: Gate newly built images on completed ECR critical scan
+      - name: Gate all candidate images on completed ECR critical scan
         run: |
           python scripts/v1/ecr-critical-scan-gate.py \
             --candidate docs/reports/release-manifest.candidate.json \

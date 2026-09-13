@@ -72,6 +72,16 @@ development-canary와 tenant/user cleanup zero, 플랫폼 승인·공유 잠금�
 
 ## 2. CI 자동 배포 (push=서버 반영)
 
+공통 앱 코드(`academy/`, `libs/` 등) 변경은 다섯 runtime을 모두 빌드하지만,
+앱 소스를 포함하지 않는 `academy-base`까지 다시 컴파일하지 않는다. base Dockerfile,
+native 보안 빌드, 공통 requirements/constraints, `.dockerignore`가 변경되면 기존대로
+base와 모든 consumer를 재빌드하고 APT 보안 패키지를 갱신한다. 재사용은 대기열 이후
+캡처한 성공 manifest의 exact digest/source tag와 ECR identity가 일치할 때만 가능하다.
+확인된 이미지/저장소 부재만 정식 전체 빌드로 복구하며 권한·통신·정합성 오류는 중단한다.
+재사용 이미지를 포함한 여섯 후보는 모두 완료 scan과 현재 exact Critical/High 정책을
+통과해야 한다. 개발·격리 preprod·승인·rolling·후검증 순서는 줄이지 않는다.
+상세 변경 경계와 검증은 [배포 아키텍처](../infrastructure/deployment-architecture.md#3-selective-build-logic)를 따른다.
+
 main에 push하면 자동으로 서버 반영까지 완료된다:
 
 1. GitHub Actions `v1-build-and-push-latest.yml` 트리거

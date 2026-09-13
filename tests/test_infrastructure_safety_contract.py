@@ -504,6 +504,9 @@ def test_selective_build_graph_covers_shared_runtime_and_copied_inputs() -> None
     force_patterns = re.findall(
         r'changed_matches "([^"]+)" && FORCE_ALL=true', detect
     )
+    base_patterns = re.findall(
+        r'changed_matches "([^"]+)" && BASE=true', detect
+    )
     assert 'changed_matches() { grep -qE "$1" <<< "$CHANGED"; }' in detect
     assert 'echo "$CHANGED" | grep -qE' not in detect
 
@@ -527,7 +530,7 @@ def test_selective_build_graph_covers_shared_runtime_and_copied_inputs() -> None
         "requirements/constraints.txt",
     )
     for path in shared_runtime_changes:
-        assert any(re.search(pattern, path) for pattern in force_patterns), path
+        assert any(re.search(pattern, path) for pattern in force_patterns + base_patterns), path
 
     api_section = detect.split("# API:", maxsplit=1)[1].split(
         "# Video worker", maxsplit=1
