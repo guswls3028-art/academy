@@ -347,7 +347,7 @@ jobs:
 
       - name: Configure AWS for read-only base identity check
         if: steps.changes.outputs.build_base != 'true' && contains(steps.changes.outputs.*, 'true')
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_FOR_ECR_BUILD }}
           aws-region: ${{ env.AWS_REGION }}
@@ -518,7 +518,7 @@ jobs:
             scripts/v1/release_freshness.py
           sparse-checkout-cone-mode: false
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_FOR_ECR_BUILD }}
           aws-region: ${{ env.AWS_REGION }}
@@ -574,7 +574,7 @@ jobs:
             scripts/v1/templates/iam/policy_workers_sqs.json
           sparse-checkout-cone-mode: false
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_FOR_ECR_BUILD }}
           aws-region: ${{ env.AWS_REGION }}
@@ -678,14 +678,14 @@ jobs:
 
       - name: Set up QEMU
         if: needs.detect-changes.outputs.build_base == 'true' || needs.detect-changes.outputs.force_full == 'true'
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4
 
       - name: Set up Docker Buildx
         if: needs.detect-changes.outputs.build_base == 'true' || needs.detect-changes.outputs.force_full == 'true'
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
 
       - name: Configure AWS credentials (OIDC only)
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_FOR_ECR_BUILD }}
           aws-region: ${{ env.AWS_REGION }}
@@ -696,7 +696,7 @@ jobs:
 
       - name: Login to Amazon ECR
         id: login-ecr
-        uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
 
       - name: Ensure ECR repos
         run: |
@@ -854,15 +854,15 @@ jobs:
 
       - name: Set up QEMU
         if: steps.selection.outputs.should_build == 'true' && matrix.service != 'video'
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4
 
       - name: Set up Docker Buildx
         if: steps.selection.outputs.should_build == 'true'
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
 
       - name: Configure AWS credentials (OIDC only)
         if: steps.selection.outputs.should_build == 'true'
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_FOR_ECR_BUILD }}
           aws-region: ${{ env.AWS_REGION }}
@@ -874,7 +874,7 @@ jobs:
 
       - name: Login to Amazon ECR
         if: steps.selection.outputs.should_build == 'true'
-        uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
 
       - name: Build and push ${{ matrix.repository }} (arm64)
         if: steps.selection.outputs.should_build == 'true'
@@ -922,7 +922,7 @@ jobs:
           path: ${{ runner.temp }}/release-baseline
 
       - name: Configure AWS credentials (OIDC only)
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_FOR_ECR_BUILD }}
           aws-region: ${{ env.AWS_REGION }}
@@ -1103,7 +1103,7 @@ jobs:
           path: /tmp/api-development-candidate
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_FOR_ECR_BUILD }}
           aws-region: ${{ env.AWS_REGION }}
@@ -1182,7 +1182,7 @@ jobs:
           path: /tmp/api-preprod-candidate
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_FOR_ECR_BUILD }}
           aws-region: ${{ env.AWS_REGION }}
@@ -1235,7 +1235,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_FOR_ECR_BUILD }}
           aws-region: ${{ env.AWS_REGION }}
@@ -1392,7 +1392,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_FOR_ECR_BUILD }}
           aws-region: ${{ env.AWS_REGION }}
@@ -1550,7 +1550,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_FOR_ECR_BUILD }}
           aws-region: ${{ env.AWS_REGION }}
@@ -1653,7 +1653,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_FOR_ECR_BUILD }}
           aws-region: ${{ env.AWS_REGION }}
@@ -1772,7 +1772,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_FOR_ECR_BUILD }}
           aws-region: ${{ env.AWS_REGION }}
@@ -1900,7 +1900,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_FOR_ECR_BUILD }}
           aws-region: ${{ env.AWS_REGION }}
@@ -2124,7 +2124,7 @@ jobs:
           path: docs/reports
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_FOR_ECR_BUILD }}
           aws-region: ${{ env.AWS_REGION }}
@@ -2639,7 +2639,7 @@ jobs:
           sparse-checkout: scripts/v1/deployment_lock.py
           sparse-checkout-cone-mode: false
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_FOR_ECR_BUILD }}
           aws-region: ${{ env.AWS_REGION }}
@@ -2664,7 +2664,7 @@ jobs:
     if: always() && contains(needs.*.result, 'failure')
     steps:
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN_FOR_ECR_BUILD }}
           aws-region: ${{ env.AWS_REGION }}
