@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 from datetime import date
 from pathlib import Path
 
@@ -728,3 +729,49 @@ def test_scan_start_quota_still_requires_completed_readback(
     )
 
     assert completed["imageScanStatus"]["status"] == "COMPLETE"
+
+
+def _invoke_candidate_gate(tmp_path, monkeypatch, images):
+    candidate = tmp_path / "candidate.json"
+    candidate.write_text(json.dumps({"images": images}), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", [
+        "ecr-critical-scan-gate.py", "--candidate", str(candidate),
+        "--acceptances", "test-acceptances.json", "--high-baseline", "test-high.json",
+        "--region", "ap-northeast-2",
+    ])
+    monkeypatch.setattr(gate, "load_acceptances", lambda *_: {})
+    monkeypatch.setattr(gate, "load_high_baselines", lambda *_: (
+        {repo: 0 for repo in gate.REPOSITORIES}, set()
+    ))
+    return gate.main()
+
+
+def test_prior_success_images_run_the_same_completed_scan_and_risk_gate(tmp_path, monkeypatch):
+    checked = []
+
+    def scan(repo, digest, *_):
+        checked.append((repo, digest))
+        return _scan()
+
+    monkeypatch.setattr(gate, "wait_for_completed_scan", scan)
+    images = {repo: {"source": "prior-success", "digest": "sha256:" + "c" * 64}
+              for repo in gate.REPOSITORIES}
+    assert _invoke_candidate_gate(tmp_path, monkeypatch, images) == 0
+    assert checked == [(repo, "sha256:" + "c" * 64) for repo in sorted(gate.REPOSITORIES)]
+
+
+def test_reused_base_with_new_unaccepted_critical_blocks_the_candidate(tmp_path, monkeypatch):
+    monkeypatch.setattr(gate, "wait_for_completed_scan", lambda repo, *_: (
+        _scan(_finding("CVE-2099-1234", "example", "1")) if repo == "academy-base" else _scan()
+    ))
+    images = {repo: {"source": "prior-success" if repo == "academy-base" else "built",
+                     "digest": "sha256:" + "c" * 64} for repo in gate.REPOSITORIES}
+    with pytest.raises(gate.GateError, match="unaccepted critical ECR findings repo=academy-base"):
+        _invoke_candidate_gate(tmp_path, monkeypatch, images)
+
+
+def test_unknown_source_cannot_silently_skip_scan(tmp_path, monkeypatch):
+    images = {repo: {"source": "unknown", "digest": "sha256:" + "c" * 64}
+              for repo in gate.REPOSITORIES}
+    with pytest.raises(gate.GateError, match="candidate image source is invalid"):
+        _invoke_candidate_gate(tmp_path, monkeypatch, images)
