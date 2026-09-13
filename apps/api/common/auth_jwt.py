@@ -100,6 +100,11 @@ def _tenant_for_auth(request, *payload_sources):
 class TenantAwareTokenObtainPairSerializer(TokenObtainPairSerializer):
     """테넌트별 User만 로그인 허용. tenant=null 계정은 로그인 불가."""
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Password changes preserve whitespace; login must verify the same value.
+        self.fields["password"].trim_whitespace = False
+
     @staticmethod
     def _password_matches(user, password: str, *, consume_pending: bool = True) -> bool:
         if not user:
