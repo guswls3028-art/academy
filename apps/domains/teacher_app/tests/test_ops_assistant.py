@@ -252,6 +252,49 @@ class TeacherOpsAssistantApiTests(TestCase):
         self.assertEqual(Student.objects.filter(tenant=self.tenant, name="가온별").count(), 1)
         self.assertEqual(confirmed.data["rows"][0]["account_creation"], "not_created")
 
+    def test_automatic_video_open_cannot_restore_secession_and_rolls_back_profile_changes(self):
+        created = create_student_account(
+            tenant=self.tenant,
+            password="safe-pass",
+            student_data={
+                "name": "가온별", "phone": None, "parent_phone": "01011112222",
+                "ps_number": "01055556666", "omr_code": "11112222", "uses_identifier": True,
+                "school_type": "HIGH", "high_school": "해솔고", "grade": 1,
+            },
+        )
+        enrollment = Enrollment.objects.create(
+            tenant=self.tenant, student=created.student, lecture=self.lecture, status="ACTIVE",
+        )
+        attendance = Attendance.objects.create(
+            tenant=self.tenant, enrollment=enrollment, session=self.session, status="SECESSION",
+        )
+        original_identity = (created.student.phone, created.student.ps_number, created.user.phone)
+        # Analyze the existing withdrawal state so this tests execution, not preview drift.
+        analyzed = self._analyze()
+        self.assertEqual(analyzed.status_code, 200, analyzed.data)
+        self.assertEqual(analyzed.data["rows"][0]["student_match"]["status"], "existing")
+        self.assertIn("student.phone", analyzed.data["rows"][0]["profile_changes"])
+        self.assertTrue(analyzed.data["rows"][0]["can_confirm"])
+        confirmed = self._confirm(analyzed)
+        self.assertEqual(confirmed.status_code, 400, confirmed.data)
+        self.assertIn("명시적으로 재등록", str(confirmed.data))
+        attendance.refresh_from_db()
+        enrollment.refresh_from_db()
+        created.student.refresh_from_db()
+        created.user.refresh_from_db()
+        self.assertEqual(attendance.status, "SECESSION")
+        self.assertEqual(attendance.memo, "")
+        self.assertEqual(enrollment.status, "ACTIVE")
+        self.assertEqual(
+            (created.student.phone, created.student.ps_number, created.user.phone), original_identity,
+        )
+        self.assertFalse(SessionEnrollment.objects.filter(enrollment=enrollment, session=self.session).exists())
+        self.assertFalse(VideoAccess.objects.filter(video=self.video, enrollment=enrollment).exists())
+        self.assertEqual(Student.objects.filter(tenant=self.tenant, name="가온별").count(), 1)
+        self.assertEqual(Enrollment.objects.filter(student=created.student, lecture=self.lecture).count(), 1)
+        self.assertEqual(Attendance.objects.filter(enrollment=enrollment, session=self.session).count(), 1)
+        self.assertEqual(TeacherOpsExecution.objects.get().status, TeacherOpsExecution.Status.FAILED)
+
     @patch(
         "apps.domains.students.services.account_notifications._send_owner_account_notice",
         return_value=True,

@@ -214,6 +214,47 @@ class AttendanceDestroyRosterCleanupTests(TestCase):
         self.assertEqual(self.enrollment.status, "ACTIVE")
         self.assertEqual(self.attendance.status, "PRESENT")
 
+    def test_session_secession_preserves_other_session_and_enrollment(self):
+        self.attendance.memo = "Keep teacher record"
+        self.attendance.save(update_fields=["memo"])
+        for _ in range(2):
+            request = self.factory.patch(
+                f"/api/v1/lectures/attendance/{self.attendance.id}/",
+                {"status": "SECESSION", "confirm_secession": True, "secession_scope": "session"},
+                format="json",
+            )
+            request.tenant = self.tenant
+            force_authenticate(request, user=self.admin)
+            response = AttendanceViewSet.as_view({"patch": "partial_update"})(request, pk=self.attendance.id)
+            self.assertEqual(response.status_code, 200, response.data)
+        self.enrollment.refresh_from_db()
+        self.attendance.refresh_from_db()
+        self.assertEqual(self.enrollment.status, "ACTIVE")
+        self.assertEqual(self.attendance.status, "SECESSION")
+        self.assertEqual(self.attendance.memo, "Keep teacher record")
+        self.assertFalse(SessionEnrollment.objects.filter(session=self.session, enrollment=self.enrollment).exists())
+        self.assertTrue(SessionEnrollment.objects.filter(session=self.other_session, enrollment=self.enrollment).exists())
+        self.assertEqual(Attendance.objects.get(session=self.other_session, enrollment=self.enrollment).status, "PRESENT")
+        self.assertFalse(ExamEnrollment.objects.filter(exam=self.exam, enrollment=self.enrollment).exists())
+        self.assertTrue(ExamEnrollment.objects.filter(exam=self.other_exam, enrollment=self.enrollment).exists())
+        self.assertFalse(HomeworkAssignment.objects.filter(session=self.session, enrollment=self.enrollment).exists())
+        self.assertTrue(HomeworkAssignment.objects.filter(session=self.other_session, enrollment=self.enrollment).exists())
+
+    def test_secession_rejects_unknown_scope_without_mutation(self):
+        request = self.factory.patch(
+            f"/api/v1/lectures/attendance/{self.attendance.id}/",
+            {"status": "SECESSION", "confirm_secession": True, "secession_scope": "all"},
+            format="json",
+        )
+        request.tenant = self.tenant
+        force_authenticate(request, user=self.admin)
+        response = AttendanceViewSet.as_view({"patch": "partial_update"})(request, pk=self.attendance.id)
+        self.assertEqual(response.status_code, 400)
+        self.enrollment.refresh_from_db()
+        self.attendance.refresh_from_db()
+        self.assertEqual(self.enrollment.status, "ACTIVE")
+        self.assertEqual(self.attendance.status, "PRESENT")
+
     def test_secession_deactivates_enrollment_and_removes_all_targets(self):
         request = self.factory.patch(
             f"/api/v1/lectures/attendance/{self.attendance.id}/",

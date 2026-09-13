@@ -5,12 +5,18 @@ from __future__ import annotations
 from typing import Any
 
 
-def ensure_session_roster_membership(*, tenant: Any, session: Any, enrollment: Any):
+def ensure_session_roster_membership(
+    *, tenant: Any, session: Any, enrollment: Any,
+    allow_session_reregistration: bool = False,
+):
     from apps.domains.attendance.services import (
         ensure_session_roster_membership as ensure,
     )
 
-    return ensure(tenant=tenant, session=session, enrollment=enrollment)
+    return ensure(
+        tenant=tenant, session=session, enrollment=enrollment,
+        allow_session_reregistration=allow_session_reregistration,
+    )
 
 
 def auto_assign_fees_on_enrollment(tenant: Any, student: Any, lecture: Any, enrollment: Any):

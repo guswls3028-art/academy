@@ -7259,6 +7259,37 @@
         ],
         "type": "object"
       },
+      "PaginatedSessionAttendanceList": {
+        "properties": {
+          "count": {
+            "example": 123,
+            "type": "integer"
+          },
+          "next": {
+            "example": "http://api.example.org/accounts/?page=4",
+            "format": "uri",
+            "nullable": true,
+            "type": "string"
+          },
+          "previous": {
+            "example": "http://api.example.org/accounts/?page=2",
+            "format": "uri",
+            "nullable": true,
+            "type": "string"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/SessionAttendance"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "count",
+          "results"
+        ],
+        "type": "object"
+      },
       "PaginatedSessionProgressList": {
         "properties": {
           "count": {
@@ -8937,6 +8968,48 @@
           },
           "source": {
             "$ref": "#/components/schemas/SectionAssignmentSourceEnum"
+          }
+        },
+        "type": "object"
+      },
+      "PatchedSessionAttendanceRequest": {
+        "properties": {
+          "confirm_secession": {
+            "type": "boolean",
+            "writeOnly": true
+          },
+          "enrollment_id": {
+            "type": "integer"
+          },
+          "memo": {
+            "type": "string"
+          },
+          "planned_arrival_date": {
+            "description": "보강 학생의 예정 등원 날짜. 값이 있을 때 등원 예정으로 집계한다.",
+            "format": "date",
+            "nullable": true,
+            "type": "string"
+          },
+          "planned_arrival_time": {
+            "description": "보강 학생의 예정 등원 시간. 날짜만 정해진 경우 비워둘 수 있다.",
+            "format": "time",
+            "nullable": true,
+            "type": "string"
+          },
+          "secession_scope": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SecessionScopeEnum"
+              }
+            ],
+            "description": "session: 이 차시만 퇴원. lecture 또는 생략: 기존 강의 전체 퇴원.\n\n* `session` - session\n* `lecture` - lecture",
+            "writeOnly": true
+          },
+          "session": {
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SessionAttendanceStatus"
           }
         },
         "type": "object"
@@ -12845,6 +12918,14 @@
         ],
         "type": "string"
       },
+      "SecessionScopeEnum": {
+        "description": "* `session` - session\n* `lecture` - lecture",
+        "enum": [
+          "session",
+          "lecture"
+        ],
+        "type": "string"
+      },
       "SectionAssignment": {
         "properties": {
           "class_section": {
@@ -12995,6 +13076,149 @@
           "student",
           "parent",
           "both"
+        ],
+        "type": "string"
+      },
+      "SessionAttendance": {
+        "properties": {
+          "enrollment_id": {
+            "type": "integer"
+          },
+          "id": {
+            "readOnly": true,
+            "type": "integer"
+          },
+          "lecture_color": {
+            "default": "#3b82f6",
+            "readOnly": true,
+            "type": "string"
+          },
+          "lecture_title": {
+            "readOnly": true,
+            "type": "string"
+          },
+          "memo": {
+            "type": "string"
+          },
+          "name": {
+            "readOnly": true,
+            "type": "string"
+          },
+          "name_highlight_clinic_target": {
+            "readOnly": true,
+            "type": "string"
+          },
+          "parent_phone": {
+            "readOnly": true,
+            "type": "string"
+          },
+          "phone": {
+            "nullable": true,
+            "readOnly": true,
+            "type": "string"
+          },
+          "planned_arrival_date": {
+            "description": "보강 학생의 예정 등원 날짜. 값이 있을 때 등원 예정으로 집계한다.",
+            "format": "date",
+            "nullable": true,
+            "type": "string"
+          },
+          "planned_arrival_time": {
+            "description": "보강 학생의 예정 등원 시간. 날짜만 정해진 경우 비워둘 수 있다.",
+            "format": "time",
+            "nullable": true,
+            "type": "string"
+          },
+          "profile_photo_url": {
+            "readOnly": true,
+            "type": "string"
+          },
+          "session": {
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SessionAttendanceStatus"
+          },
+          "student_id": {
+            "readOnly": true,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "enrollment_id",
+          "id",
+          "lecture_color",
+          "lecture_title",
+          "name",
+          "name_highlight_clinic_target",
+          "parent_phone",
+          "phone",
+          "profile_photo_url",
+          "session",
+          "student_id"
+        ],
+        "type": "object"
+      },
+      "SessionAttendanceRequest": {
+        "properties": {
+          "confirm_secession": {
+            "type": "boolean",
+            "writeOnly": true
+          },
+          "enrollment_id": {
+            "type": "integer"
+          },
+          "memo": {
+            "type": "string"
+          },
+          "planned_arrival_date": {
+            "description": "보강 학생의 예정 등원 날짜. 값이 있을 때 등원 예정으로 집계한다.",
+            "format": "date",
+            "nullable": true,
+            "type": "string"
+          },
+          "planned_arrival_time": {
+            "description": "보강 학생의 예정 등원 시간. 날짜만 정해진 경우 비워둘 수 있다.",
+            "format": "time",
+            "nullable": true,
+            "type": "string"
+          },
+          "secession_scope": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SecessionScopeEnum"
+              }
+            ],
+            "description": "session: 이 차시만 퇴원. lecture 또는 생략: 기존 강의 전체 퇴원.\n\n* `session` - session\n* `lecture` - lecture",
+            "writeOnly": true
+          },
+          "session": {
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SessionAttendanceStatus"
+          }
+        },
+        "required": [
+          "enrollment_id",
+          "session"
+        ],
+        "type": "object"
+      },
+      "SessionAttendanceStatus": {
+        "description": "* `UNSET` - 미입력\n* `PRESENT` - 출석\n* `LATE` - 지각\n* `ONLINE` - 온라인\n* `SUPPLEMENT` - 보강\n* `EARLY_LEAVE` - 조퇴\n* `ABSENT` - 결석\n* `RUNAWAY` - 출튀\n* `MATERIAL` - 자료\n* `INACTIVE` - 부재\n* `SECESSION` - 탈퇴",
+        "enum": [
+          "UNSET",
+          "PRESENT",
+          "LATE",
+          "ONLINE",
+          "SUPPLEMENT",
+          "EARLY_LEAVE",
+          "ABSENT",
+          "RUNAWAY",
+          "MATERIAL",
+          "INACTIVE",
+          "SECESSION"
         ],
         "type": "string"
       },
@@ -32644,7 +32868,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PaginatedAttendanceList"
+                  "$ref": "#/components/schemas/PaginatedSessionAttendanceList"
                 }
               }
             },
@@ -32670,17 +32894,17 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AttendanceRequest"
+                "$ref": "#/components/schemas/SessionAttendanceRequest"
               }
             },
             "application/x-www-form-urlencoded": {
               "schema": {
-                "$ref": "#/components/schemas/AttendanceRequest"
+                "$ref": "#/components/schemas/SessionAttendanceRequest"
               }
             },
             "multipart/form-data": {
               "schema": {
-                "$ref": "#/components/schemas/AttendanceRequest"
+                "$ref": "#/components/schemas/SessionAttendanceRequest"
               }
             }
           },
@@ -32691,7 +32915,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Attendance"
+                  "$ref": "#/components/schemas/SessionAttendance"
                 }
               }
             },
@@ -32720,7 +32944,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Attendance"
+                  "$ref": "#/components/schemas/SessionAttendance"
                 }
               }
             },
@@ -32748,17 +32972,17 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AttendanceRequest"
+                "$ref": "#/components/schemas/SessionAttendanceRequest"
               }
             },
             "application/x-www-form-urlencoded": {
               "schema": {
-                "$ref": "#/components/schemas/AttendanceRequest"
+                "$ref": "#/components/schemas/SessionAttendanceRequest"
               }
             },
             "multipart/form-data": {
               "schema": {
-                "$ref": "#/components/schemas/AttendanceRequest"
+                "$ref": "#/components/schemas/SessionAttendanceRequest"
               }
             }
           },
@@ -32769,7 +32993,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Attendance"
+                  "$ref": "#/components/schemas/SessionAttendance"
                 }
               }
             },
@@ -32797,17 +33021,17 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AttendanceRequest"
+                "$ref": "#/components/schemas/SessionAttendanceRequest"
               }
             },
             "application/x-www-form-urlencoded": {
               "schema": {
-                "$ref": "#/components/schemas/AttendanceRequest"
+                "$ref": "#/components/schemas/SessionAttendanceRequest"
               }
             },
             "multipart/form-data": {
               "schema": {
-                "$ref": "#/components/schemas/AttendanceRequest"
+                "$ref": "#/components/schemas/SessionAttendanceRequest"
               }
             }
           },
@@ -32818,7 +33042,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Attendance"
+                  "$ref": "#/components/schemas/SessionAttendance"
                 }
               }
             },
@@ -32846,17 +33070,17 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AttendanceRequest"
+                "$ref": "#/components/schemas/SessionAttendanceRequest"
               }
             },
             "application/x-www-form-urlencoded": {
               "schema": {
-                "$ref": "#/components/schemas/AttendanceRequest"
+                "$ref": "#/components/schemas/SessionAttendanceRequest"
               }
             },
             "multipart/form-data": {
               "schema": {
-                "$ref": "#/components/schemas/AttendanceRequest"
+                "$ref": "#/components/schemas/SessionAttendanceRequest"
               }
             }
           },
@@ -32867,7 +33091,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Attendance"
+                  "$ref": "#/components/schemas/SessionAttendance"
                 }
               }
             },
@@ -32895,17 +33119,17 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AttendanceRequest"
+                "$ref": "#/components/schemas/SessionAttendanceRequest"
               }
             },
             "application/x-www-form-urlencoded": {
               "schema": {
-                "$ref": "#/components/schemas/AttendanceRequest"
+                "$ref": "#/components/schemas/SessionAttendanceRequest"
               }
             },
             "multipart/form-data": {
               "schema": {
-                "$ref": "#/components/schemas/AttendanceRequest"
+                "$ref": "#/components/schemas/SessionAttendanceRequest"
               }
             }
           },
@@ -32916,7 +33140,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Attendance"
+                  "$ref": "#/components/schemas/SessionAttendance"
                 }
               }
             },
@@ -32945,7 +33169,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Attendance"
+                  "$ref": "#/components/schemas/SessionAttendance"
                 }
               }
             },
@@ -33016,7 +33240,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Attendance"
+                  "$ref": "#/components/schemas/SessionAttendance"
                 }
               }
             },
@@ -33053,17 +33277,17 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/PatchedAttendanceRequest"
+                "$ref": "#/components/schemas/PatchedSessionAttendanceRequest"
               }
             },
             "application/x-www-form-urlencoded": {
               "schema": {
-                "$ref": "#/components/schemas/PatchedAttendanceRequest"
+                "$ref": "#/components/schemas/PatchedSessionAttendanceRequest"
               }
             },
             "multipart/form-data": {
               "schema": {
-                "$ref": "#/components/schemas/PatchedAttendanceRequest"
+                "$ref": "#/components/schemas/PatchedSessionAttendanceRequest"
               }
             }
           }
@@ -33073,7 +33297,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Attendance"
+                  "$ref": "#/components/schemas/SessionAttendance"
                 }
               }
             },
@@ -33110,17 +33334,17 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AttendanceRequest"
+                "$ref": "#/components/schemas/SessionAttendanceRequest"
               }
             },
             "application/x-www-form-urlencoded": {
               "schema": {
-                "$ref": "#/components/schemas/AttendanceRequest"
+                "$ref": "#/components/schemas/SessionAttendanceRequest"
               }
             },
             "multipart/form-data": {
               "schema": {
-                "$ref": "#/components/schemas/AttendanceRequest"
+                "$ref": "#/components/schemas/SessionAttendanceRequest"
               }
             }
           },
@@ -33131,7 +33355,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Attendance"
+                  "$ref": "#/components/schemas/SessionAttendance"
                 }
               }
             },
