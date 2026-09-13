@@ -156,6 +156,18 @@ generate_temp_password() -> 숫자 6자리
   대체 계정 비밀번호·membership 갱신과 같은 트랜잭션이며, 학원 조회나 후속
   갱신이 실패하면 명령도 실패하고 삭제를 포함한 변경 전체를 롤백한다.
 
+### 로그인 비밀번호 입력 보존
+
+로그인 비밀번호는 본인 변경·관리자 초기화·pending 임시 비밀번호에 저장된 입력과
+정확히 같은 값으로 검증한다. `TenantAwareTokenObtainPairSerializer`는 SimpleJWT가
+동적으로 생성한 password 필드의 `trim_whitespace=False`를 설정해 앞뒤 공백·탭·
+유니코드 공백을 제거하지 않는다. 로그인 ID의 정규화와 비밀번호 처리는 별개다.
+기존 비밀번호 hash나 계정 상태는 수정하지 않으며, 입력값을 trim한 뒤 재시도하는
+fallback도 두지 않는다. 공백이 없는 비밀번호 앞뒤에 공백을 추가한 입력은 거절한다.
+실제 JWT 발급 → 본인 변경 → 기존 access/refresh 거절 → 새 비밀번호 재로그인 →
+사용자/학생 정보 조회 및 발송 실패 롤백은
+`apps/api/common/tests/test_password_login_roundtrip.py`에서 검증한다.
+
 ## 5.1 Refresh token 계정 상태 검증
 
 `POST /api/v1/token/refresh/`는 `TenantAwareTokenRefreshView`가 소유한다. 서명과
