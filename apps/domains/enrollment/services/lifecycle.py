@@ -328,6 +328,7 @@ def bulk_create_session_enrollments(*, tenant, session_id, enrollment_ids) -> li
             tenant=tenant,
             session=session,
             enrollment=enrollment,
+            allow_session_reregistration=True,
         )
         created.append(membership.session_enrollment)
 

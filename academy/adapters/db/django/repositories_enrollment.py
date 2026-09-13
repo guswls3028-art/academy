@@ -160,6 +160,20 @@ def lock_enrollment_by_id_with_lecture(enrollment_id, tenant):
     return rows[0] if rows else None
 
 
+def lock_attendance_parent_rows(*, tenant, student_ids, enrollment_ids):
+    """Lock attendance parents without imposing registration eligibility rules."""
+    from apps.domains.students.models import Student
+
+    locked_students = tuple(
+        Student.objects.select_for_update(of=("self",))
+        .filter(tenant=tenant, id__in=sorted(set(student_ids)))
+        .order_by("id")
+        .values_list("id", flat=True)
+    )
+    locked_enrollments = lock_enrollments_by_ids_with_lecture(enrollment_ids, tenant)
+    return locked_students, tuple(row.id for row in locked_enrollments)
+
+
 def session_enrollment_get_or_create(session, enrollment, defaults):
     from apps.domains.enrollment.models import SessionEnrollment
     return SessionEnrollment.objects.get_or_create(
@@ -277,9 +291,10 @@ def session_enrollment_get_or_create_tenant(tenant, session, enrollment):
     )
 
 
-def attendance_get_or_create_tenant(tenant, enrollment, session, defaults):
+def attendance_get_or_create_tenant(tenant, enrollment, session, defaults, *, for_update=False):
     from apps.domains.attendance.models import Attendance
-    return Attendance.objects.get_or_create(
+    queryset = Attendance.objects.select_for_update(of=("self",)) if for_update else Attendance.objects
+    return queryset.get_or_create(
         tenant=tenant,
         enrollment=enrollment,
         session=session,

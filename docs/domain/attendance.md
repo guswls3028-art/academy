@@ -29,9 +29,47 @@
 되돌리지는 않는다. 영상 접근·재생 토큰 회수는
 [차시 영상 권한](session-video-access.md)의 동일 membership 검사를 따른다.
 
+### 차시 명시 재등록
+
+한 차시만 퇴원한 학생은 강의 수강이 ACTIVE인 동안 `수강생 등록`에서 다시
+선택할 수 있다. 교직원이 검토·등록을 확정하면
+`POST /lectures/attendance/bulk_create/` 또는
+`POST /enrollments/session-enrollments/bulk_create/`가 해당 차시 membership을
+복구하고, 보관된 출결 행의 상태만 `SECESSION → UNSET`으로 변경한다.
+현장·영상 출결은 재등록 후 교직원이 직접 선택한다. 기존 출결 ID·메모·등원
+예정·기록 시각·시청 진도와 다른 차시 기록은 보존한다. 이미 membership만 복구되고
+SECESSION이 남은 상태도 같은 명시 재등록으로 회복한다. 반복 등록은 행을
+중복 생성하거나 이미 편집한 일반 출결을 UNSET으로 되돌리지 않는다.
+
+두 공개 등록 경로만 내부 `allow_session_reregistration`을 사용한다. 학생과
+Enrollment를 순서대로 잠그고 현재 테넌트·강의·학생·ACTIVE 상태를 검증한 뒤
+출결 행을 잠가 복구한다. 일반 조회·상태 PATCH/PUT·자동 영상 개방 호출은
+차시 재등록을 수행하지 않는다. 자동 roster 호출은 SECESSION이면 수납·차시
+등록을 변경하기 전에 거절하며, 교사 업무 도우미 실행에서 앞서 변경한 값도
+함께 rollback한다. 일반 상태 PATCH/PUT은 계속 409를 반환한다.
+
+개별 출결 수정·삭제와 전체 현장 출석·되돌리기도 같은 Student → Enrollment →
+Attendance 순서로 잠근다. 처음 조회한 현재 테넌트의 대상 ID와 관계만 잠그며,
+잠금 뒤 대상 관계와 기존 상태 조건을 다시 확인한다. 단건 대상이 삭제되거나
+기존 조회 필터에서 제외되면 404를 유지한다. 남아 있는 대상의 학생·수강 강의·차시
+관계가 바뀌거나 일괄 대상 일부가 사라지면 409로 전체 작업을 중단한다. 조회 후 새로 추가된 행을
+일괄 변경에 포함하지 않으며, 되돌리기 토큰은 잠금 뒤 확인한 실제 직전 상태를
+담는다. 기존 조회·객체 권한 검사와 일괄 작업의 상태별 대상 조건은 유지한다.
+
+전체 강의 퇴원으로 Enrollment가 INACTIVE이거나 PENDING이면 두 차시 등록 API는
+400을 반환하고 수납과 기록을 유지한다. 먼저 기존 강의 수강 등록 절차로
+명시적으로 재등록해야 한다. 새 요청 필드나 데이터 마이그레이션은 없으며,
+자동 수납 배정은 기존 차시 등록 계약을 유지한다. 이 재등록은 계정 안내나
+입실 알림을 즉시 발송하지 않는다.
+
 검증은 `test_attendance_destroy_roster_cleanup.py`의 범위·기존 전체 퇴원·수납·
 공유 시험 보존과 `tests/test_session_withdrawal_video_access.py`의 8차시 영상·
-ONLINE 토큰·진도 보존으로 수행한다.
+ONLINE 토큰·진도 보존, 두 공개 재등록 API·반복·일반 출결 저장·조회 무변경으로
+수행한다. `teacher_app/tests/test_ops_assistant.py`는 자동 실행의 퇴원 복구 거절과
+프로필 변경 rollback을, `tests/test_enrollment_lifecycle_concurrency_pg.py`는
+동시 재등록 중복 방지와 등록 대 출결 수정·삭제·전체 현장·되돌리기의 실제
+PostgreSQL 잠금 경합을 검증한다. `test_bulk_present_undo.py`는 잠금 뒤 최신 상태,
+대상 관계 변경 시 전체 중단, 조회 후 추가 행 제외와 기존 대상 조건을 검증한다.
 
 ## 목록 정렬과 페이지네이션
 

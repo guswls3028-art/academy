@@ -1,7 +1,10 @@
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
+from unittest.mock import patch
 
+from academy.adapters.db.django import repositories_enrollment as enroll_repo
 from apps.core.models import Tenant, TenantMembership
 from apps.domains.attendance.models import Attendance
 from apps.domains.attendance.views import AttendanceViewSet
@@ -189,3 +192,63 @@ class AttendanceBulkPresentUndoTests(TestCase):
         self.assertEqual(response.data["updated"], 0)
         self.assertIsNone(response.data["undo_token"])
         self.assertIsNone(response.data["undo_expires_in"])
+
+    def test_bulk_present_uses_latest_locked_status_and_excludes_post_snapshot_additions(self):
+        original_lock = enroll_repo.lock_attendance_parent_rows
+        added = []
+
+        def change_before_parent_lock(**kwargs):
+            self.absent.status = "LATE"
+            self.absent.save(update_fields=["status"])
+            added.append(self._attendance("나중에 등록된 학생", "UNSET", 5))
+            return original_lock(**kwargs)
+
+        with patch.object(enroll_repo, "lock_attendance_parent_rows", side_effect=change_before_parent_lock):
+            response = self._set_present()
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["updated"], 2)
+        undo = self._post("bulk_undo_present", {"undo_token": response.data["undo_token"]})
+        self.assertEqual(undo.status_code, 200, undo.data)
+        self.unset.refresh_from_db()
+        self.absent.refresh_from_db()
+        added[0].refresh_from_db()
+        self.assertEqual(self.unset.status, "UNSET")
+        self.assertEqual(self.absent.status, "LATE")
+        self.assertEqual(added[0].status, "UNSET")
+
+    def test_bulk_present_rejects_changed_session_snapshot_without_partial_updates(self):
+        other_session = create_session_fixture(lecture=self.lecture, order=2, title="다른 차시")
+        original_lock = enroll_repo.lock_attendance_parent_rows
+
+        def change_before_parent_lock(**kwargs):
+            Attendance.objects.filter(pk=self.absent.pk).update(session=other_session)
+            return original_lock(**kwargs)
+
+        with patch.object(enroll_repo, "lock_attendance_parent_rows", side_effect=change_before_parent_lock):
+            response = self._set_present()
+        self.assertEqual(response.status_code, 409, response.data)
+        self.unset.refresh_from_db()
+        self.absent.refresh_from_db()
+        self.assertEqual(self.unset.status, "UNSET")
+        self.assertEqual(self.absent.status, "ABSENT")
+        self.assertEqual(self.absent.session_id, self.session.id)
+
+    def test_bulk_present_preserves_pending_and_deleted_student_eligibility(self):
+        pending = self._attendance("대기 수강생", "INACTIVE", 5, enrollment_status="PENDING")
+        deleted = self._attendance("삭제 학생 기록", "UNSET", 6)
+        student = deleted.enrollment.student
+        student.deleted_at = timezone.now()
+        student.save(update_fields=["deleted_at"])
+        response = self._set_present()
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["updated"], 4)
+        pending.refresh_from_db()
+        deleted.refresh_from_db()
+        self.assertEqual(pending.status, "PRESENT")
+        self.assertEqual(deleted.status, "PRESENT")
+        undo = self._post("bulk_undo_present", {"undo_token": response.data["undo_token"]})
+        self.assertEqual(undo.status_code, 200, undo.data)
+        pending.refresh_from_db()
+        deleted.refresh_from_db()
+        self.assertEqual(pending.status, "INACTIVE")
+        self.assertEqual(deleted.status, "UNSET")

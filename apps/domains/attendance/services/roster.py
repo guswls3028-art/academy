@@ -41,13 +41,16 @@ def _normalize_session_id(value) -> int:
 
 
 @transaction.atomic
-def ensure_session_roster_membership(*, tenant, session, enrollment) -> SessionRosterMembership:
+def ensure_session_roster_membership(
+    *, tenant, session, enrollment, allow_session_reregistration: bool = False,
+) -> SessionRosterMembership:
     """
     Ensure one enrollment is active on one session roster and has attendance.
 
     This is the shared unit used by both attendance roster creation and the
     session-enrollment bulk endpoint, so fee reactivation and attendance
-    idempotency cannot drift between the two public APIs.
+    idempotency cannot drift between the two public APIs. Only explicit roster
+    registration may restore a retained SECESSION attendance row.
     """
     tenant = require_attendance_tenant(tenant)
 
@@ -84,6 +87,18 @@ def ensure_session_roster_membership(*, tenant, session, enrollment) -> SessionR
             }
         )
 
+    attendance, _ = enroll_repo.attendance_get_or_create_tenant(
+        tenant=tenant,
+        enrollment=enrollment,
+        session=session,
+        defaults={"status": "UNSET"},
+        for_update=True,
+    )
+    if attendance.status == "SECESSION" and not allow_session_reregistration:
+        raise ValidationError(
+            {"detail": "퇴원한 차시는 수강생 등록 화면에서 명시적으로 재등록해 주세요."}
+        )
+
     auto_assign_roster_fees(
         tenant=tenant,
         student=enrollment.student,
@@ -96,12 +111,9 @@ def ensure_session_roster_membership(*, tenant, session, enrollment) -> SessionR
         session=session,
         enrollment=enrollment,
     )
-    attendance, _ = enroll_repo.attendance_get_or_create_tenant(
-        tenant=tenant,
-        enrollment=enrollment,
-        session=session,
-        defaults={"status": "UNSET"},
-    )
+    if attendance.status == "SECESSION":
+        attendance.status = "UNSET"
+        attendance.save(update_fields=["status"])
     return SessionRosterMembership(
         session_enrollment=session_enrollment,
         attendance=attendance,
@@ -144,6 +156,7 @@ def create_attendance_roster(*, tenant, session_id, student_ids) -> list[Attenda
             tenant=tenant,
             session=session,
             enrollment=enrollment,
+            allow_session_reregistration=True,
         )
         attendances.append(membership.attendance)
 

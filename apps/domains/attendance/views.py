@@ -11,7 +11,7 @@ from rest_framework.pagination import PageNumberPagination
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.response import Response
 from rest_framework import status
-from rest_framework.exceptions import NotFound
+from rest_framework.exceptions import APIException, NotFound
 
 from academy.adapters.db.django import repositories_enrollment as enroll_repo
 from apps.core.parsing import parse_bool
@@ -116,6 +116,11 @@ class AttendanceListPagination(PageNumberPagination):
     max_page_size = 500
 
 
+class AttendanceMutationConflict(APIException):
+    status_code = status.HTTP_409_CONFLICT
+    default_detail = "출결 대상 정보가 변경되었습니다. 새로고침 후 다시 시도해 주세요."
+
+
 class AttendanceViewSet(ModelViewSet):
     """
     lectures/attendance
@@ -152,9 +157,56 @@ class AttendanceViewSet(ModelViewSet):
                 qs,
                 self.request.query_params.get("ordering"),
             )
-        elif action in {"destroy", "partial_update", "update"}:
-            qs = qs.select_for_update()
         return qs
+
+    def _lock_attendance_rows(self, queryset):
+        """Keep these five attendance mutations in the roster's parent lock order."""
+        tenant = self.request.tenant
+        queryset = queryset.filter(tenant=tenant).select_related(
+            "enrollment__student", "session__lecture",
+        )
+        snapshot_rows = list(queryset.order_by("id"))
+
+        def identity(row):
+            return (
+                row.enrollment_id, row.enrollment.student_id, row.enrollment.lecture_id,
+                row.session_id, row.session.lecture_id,
+                row.tenant_id, row.enrollment.tenant_id, row.enrollment.student.tenant_id,
+                row.session.lecture.tenant_id,
+            )
+
+        snapshot = {row.id: identity(row) for row in snapshot_rows}
+        if any(any(scope != tenant.id for scope in relation[5:]) for relation in snapshot.values()):
+            raise NotFound("출결 기록을 찾을 수 없습니다.")
+        student_ids = sorted({row.enrollment.student_id for row in snapshot_rows})
+        enrollment_ids = sorted({row.enrollment_id for row in snapshot_rows})
+        locked_students, locked_enrollments = enroll_repo.lock_attendance_parent_rows(
+            tenant=tenant, student_ids=student_ids, enrollment_ids=enrollment_ids,
+        )
+        if locked_students != tuple(student_ids) or locked_enrollments != tuple(enrollment_ids):
+            if self.action in {"destroy", "partial_update", "update"} and not queryset.filter(id__in=snapshot).exists():
+                raise NotFound("출결 기록을 찾을 수 없습니다.")
+            raise AttendanceMutationConflict()
+        rows = list(
+            queryset.filter(id__in=snapshot).select_for_update(of=("self",)).order_by("id")
+        )
+        if snapshot and not rows and self.action in {"destroy", "partial_update", "update"}:
+            raise NotFound("출결 기록을 찾을 수 없습니다.")
+        if {row.id: identity(row) for row in rows} != snapshot:
+            raise AttendanceMutationConflict()
+        return rows
+
+    def get_object(self):
+        instance = super().get_object()
+        if self.action in {"destroy", "partial_update", "update"}:
+            rows = self._lock_attendance_rows(
+                self.filter_queryset(self.get_queryset()).filter(pk=instance.pk),
+            )
+            if not rows:
+                raise NotFound("출결 기록을 찾을 수 없습니다.")
+            instance = rows[0]
+            self.check_object_permissions(self.request, instance)
+        return instance
 
     def perform_create(self, serializer):
         tenant = getattr(self.request, "tenant", None)
@@ -347,11 +399,7 @@ class AttendanceViewSet(ModelViewSet):
         ).exclude(
             enrollment__status="INACTIVE",
         )
-        target_rows = list(
-            target_qs.select_for_update()
-            .order_by("id")
-            .values_list("id", "status")
-        )
+        target_rows = [(row.id, row.status) for row in self._lock_attendance_rows(target_qs)]
         target_ids = [attendance_id for attendance_id, _ in target_rows]
 
         updated = Attendance.objects.filter(id__in=target_ids).update(status="PRESENT")
@@ -460,15 +508,12 @@ class AttendanceViewSet(ModelViewSet):
         if not session:
             raise NotFound("세션을 찾을 수 없습니다.")
 
-        rows = list(
-            Attendance.objects.select_for_update()
-            .filter(
+        rows = self._lock_attendance_rows(
+            Attendance.objects.filter(
                 tenant=tenant,
                 session=session,
                 id__in=previous_status_by_id,
             )
-            .select_related("enrollment")
-            .order_by("id")
         )
         if (
             len(rows) != len(previous_status_by_id)
