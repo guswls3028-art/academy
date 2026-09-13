@@ -14,6 +14,7 @@
 | [parent-account.md](parent-account.md) | 학부모 | 학부모 계정 생성/로그인 |
 | [student-core.md](student-core.md) | 학생 | 학생 중심 계정·식별자·연결 도메인 통합 SSOT |
 | [direct-video-access.md](direct-video-access.md) | 영상 | 수강 등록 없이 정확한 학생·영상 한 건만 여는 감사·회수 계약 |
+| [session-video-access.md](session-video-access.md) | 영상 | 차시 등록 범위와 회수·재생 토큰 재검사 |
 | [public-video-session.md](public-video-session.md) | 영상 | 공개 영상 공간의 무쓰기 조회·명시적 준비·구형 클라이언트 호환 |
 | [student-support-audit.md](student-support-audit.md) | 학생 지원 | 교직원 학생 화면 대리보기와 학생 활동 감사 계약 |
 | [student-creation.md](student-creation.md) | 학생 | 생성 계정 그래프 |

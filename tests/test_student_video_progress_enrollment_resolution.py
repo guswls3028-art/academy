@@ -120,6 +120,9 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
             title="Target Session",
             order=1,
         )
+        SessionEnrollment.objects.get_or_create(
+            tenant=self.tenant, session=self.target_session, enrollment=self.target_enrollment,
+        )
         self.video = Video.objects.create(
             tenant=self.tenant,
             session=self.target_session,
@@ -500,7 +503,7 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
         self.assertEqual(self.video.view_count, 0)
 
     def test_inactive_enrollment_without_exact_entitlement_denies_playback(self):
-        SessionEnrollment.objects.create(
+        SessionEnrollment.objects.get_or_create(
             tenant=self.tenant,
             session=self.target_session,
             enrollment=self.target_enrollment,
@@ -646,7 +649,7 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
         self.assertEqual(public_video.view_count, 0)
 
     def test_inactive_entitlement_exposes_and_plays_only_the_exact_video(self):
-        SessionEnrollment.objects.create(
+        SessionEnrollment.objects.get_or_create(
             tenant=self.tenant,
             session=self.target_session,
             enrollment=self.target_enrollment,
@@ -746,7 +749,7 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
         self.assertEqual(progress.forward_skip_seconds_used, 10)
 
     def test_inactive_entitlement_does_not_open_likes_or_comments(self):
-        SessionEnrollment.objects.create(
+        SessionEnrollment.objects.get_or_create(
             tenant=self.tenant,
             session=self.target_session,
             enrollment=self.target_enrollment,
@@ -786,7 +789,7 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
             user=staff,
             role="admin",
         )
-        SessionEnrollment.objects.create(
+        SessionEnrollment.objects.get_or_create(
             tenant=self.tenant,
             session=self.target_session,
             enrollment=self.target_enrollment,
@@ -856,7 +859,7 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
             user=staff,
             role="admin",
         )
-        SessionEnrollment.objects.create(
+        SessionEnrollment.objects.get_or_create(
             tenant=self.tenant,
             session=self.target_session,
             enrollment=self.target_enrollment,
@@ -950,7 +953,7 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
             user=staff,
             role="admin",
         )
-        SessionEnrollment.objects.create(
+        SessionEnrollment.objects.get_or_create(
             tenant=self.tenant,
             session=self.target_session,
             enrollment=self.target_enrollment,
@@ -1063,7 +1066,7 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
             tenant=self.tenant,
             is_staff=True,
         )
-        SessionEnrollment.objects.create(
+        SessionEnrollment.objects.get_or_create(
             tenant=self.tenant,
             session=self.target_session,
             enrollment=self.target_enrollment,
@@ -1152,7 +1155,7 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
             tenant=self.tenant,
             is_staff=True,
         )
-        SessionEnrollment.objects.create(
+        SessionEnrollment.objects.get_or_create(
             tenant=self.tenant,
             session=self.target_session,
             enrollment=self.target_enrollment,
@@ -1204,7 +1207,7 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
         VIDEO_PLAYBACK_TTL_SECONDS=600,
     )
     def test_signed_media_query_and_token_are_never_logged(self):
-        SessionEnrollment.objects.create(
+        SessionEnrollment.objects.get_or_create(
             tenant=self.tenant,
             session=self.target_session,
             enrollment=self.target_enrollment,
@@ -1253,7 +1256,7 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
         self.assertNotIn(response.data["playback_token"], captured)
 
     def test_revoked_expired_and_inactive_account_entitlements_fail_closed(self):
-        SessionEnrollment.objects.create(
+        SessionEnrollment.objects.get_or_create(
             tenant=self.tenant,
             session=self.target_session,
             enrollment=self.target_enrollment,
@@ -1320,7 +1323,7 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
         self.assertEqual(inactive_membership.status_code, 403)
 
     def test_legacy_video_access_override_never_grants_inactive_enrollment(self):
-        SessionEnrollment.objects.create(
+        SessionEnrollment.objects.get_or_create(
             tenant=self.tenant,
             session=self.target_session,
             enrollment=self.target_enrollment,
@@ -1340,7 +1343,7 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
         self.assertEqual(response.status_code, 403)
 
     def test_blocked_video_access_wins_over_inactive_entitlement(self):
-        SessionEnrollment.objects.create(
+        SessionEnrollment.objects.get_or_create(
             tenant=self.tenant,
             session=self.target_session,
             enrollment=self.target_enrollment,
@@ -1389,7 +1392,7 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
             user=staff,
             role="admin",
         )
-        SessionEnrollment.objects.create(
+        SessionEnrollment.objects.get_or_create(
             tenant=self.tenant,
             session=self.target_session,
             enrollment=self.target_enrollment,
@@ -1453,7 +1456,7 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
             user=staff,
             role="admin",
         )
-        SessionEnrollment.objects.create(
+        SessionEnrollment.objects.get_or_create(
             tenant=self.tenant,
             session=self.target_session,
             enrollment=self.target_enrollment,
@@ -1519,7 +1522,7 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
             user=staff,
             role="admin",
         )
-        SessionEnrollment.objects.create(
+        SessionEnrollment.objects.get_or_create(
             tenant=self.tenant,
             session=self.target_session,
             enrollment=self.target_enrollment,
@@ -1680,6 +1683,9 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
             force_authenticate(request, user=staff)
             return InactiveVideoEntitlementViewSet.as_view({"post": "create"})(request)
 
+        SessionEnrollment.objects.filter(
+            tenant=self.tenant, session=self.target_session, enrollment=self.target_enrollment,
+        ).delete()
         no_session_scope = post(self.tenant, self.video.id)
         wrong_lecture = post(self.tenant, wrong_video.id)
         other_tenant = Tenant.objects.create(
@@ -1781,7 +1787,7 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
             user=staff,
             role="admin",
         )
-        SessionEnrollment.objects.create(
+        SessionEnrollment.objects.get_or_create(
             tenant=self.tenant,
             session=self.target_session,
             enrollment=self.target_enrollment,
@@ -1937,7 +1943,7 @@ class StudentVideoProgressEnrollmentResolutionTests(TestCase):
         self.target_lecture.save(update_fields=["is_system", "is_active"])
         self.video.visibility = Video.Visibility.PUBLIC
         self.video.save(update_fields=["visibility"])
-        SessionEnrollment.objects.create(
+        SessionEnrollment.objects.get_or_create(
             tenant=self.tenant,
             session=self.target_session,
             enrollment=self.target_enrollment,
