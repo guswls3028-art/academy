@@ -194,7 +194,17 @@ class AttendanceViewSet(ModelViewSet):
         exam_ids = list(get_exams_for_session(session).values_list("id", flat=True))
 
         instance.delete()
+        counts = self._remove_session_targets(tenant=tenant, enrollment=enrollment, session=session, exam_ids=exam_ids)
 
+        logger.info(
+            "ATTENDANCE_DELETE enrollment_id=%s session_id=%s tenant_id=%s — "
+            "attendance removed, session_enrollments=%s, exam_enrollments=%s, homework_assignments=%s",
+            enrollment.id, session.id, tenant.id if tenant else None, *counts,
+        )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @staticmethod
+    def _remove_session_targets(*, tenant, enrollment, session, exam_ids):
         session_enrollment_deleted, _ = SessionEnrollment.objects.filter(
             tenant=tenant,
             session=session,
@@ -225,18 +235,7 @@ class AttendanceViewSet(ModelViewSet):
             enrollment=enrollment,
         ).delete()
 
-        logger.info(
-            "ATTENDANCE_DELETE enrollment_id=%s session_id=%s tenant_id=%s — "
-            "attendance removed, session_enrollments=%s, exam_enrollments=%s, homework_assignments=%s",
-            enrollment.id,
-            session.id,
-            tenant.id if tenant else None,
-            session_enrollment_deleted,
-            exam_enrollment_deleted,
-            homework_assignment_deleted,
-        )
-
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        return session_enrollment_deleted, exam_enrollment_deleted, homework_assignment_deleted
 
     # =========================================================
     # 0️⃣ 퇴원 처리 (SECESSION → 수강등록 비활성화 + 시험/과제 대상 제외)
@@ -250,7 +249,14 @@ class AttendanceViewSet(ModelViewSet):
         if conflict is not None:
             return conflict
 
-        if new_status == "SECESSION" and instance.status != "SECESSION":
+        if new_status == "SECESSION":
+            # Omitted scope preserves the existing client contract during rollout.
+            scope = request.data.get("secession_scope", "lecture")
+            if scope not in ("session", "lecture"):
+                return Response(
+                    {"detail": "퇴원 범위는 session 또는 lecture여야 합니다."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             if not parse_bool(request.data.get("confirm_secession", False), field_name="confirm_secession"):
                 return Response(
                     {"detail": "퇴원 처리는 confirm_secession: true를 포함해야 합니다."},
@@ -258,6 +264,22 @@ class AttendanceViewSet(ModelViewSet):
                 )
             tenant = getattr(request, "tenant", None)
             enrollment = instance.enrollment
+
+            if scope == "session":
+                self._remove_session_targets(
+                    tenant=tenant, enrollment=enrollment, session=instance.session,
+                    exam_ids=list(get_exams_for_session(instance.session).values_list("id", flat=True)),
+                )
+                instance.status = "SECESSION"
+                instance.save(update_fields=["status"])
+                logger.info(
+                    "SESSION_SECESSION enrollment_id=%s session_id=%s tenant_id=%s",
+                    enrollment.id, instance.session_id, tenant.id,
+                )
+                return Response(AttendanceSerializer(instance).data)
+
+            if instance.status == "SECESSION" and enrollment.status == "INACTIVE":
+                return Response(AttendanceSerializer(instance).data)
 
             # 수강등록 비활성화
             Enrollment.objects.filter(

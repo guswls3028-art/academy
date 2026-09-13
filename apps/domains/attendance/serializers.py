@@ -1,6 +1,7 @@
 # apps/domains/attendance/serializers.py
 
 from rest_framework import serializers
+from drf_spectacular.utils import extend_schema_serializer
 from .models import Attendance
 from apps.support.attendance.serializer_dependencies import (
     clinic_highlight_map_for_attendance,
@@ -9,7 +10,17 @@ from apps.support.attendance.serializer_dependencies import (
 )
 
 
+def attendance_status_choices():
+    return Attendance._meta.get_field("status").choices
+
+
+@extend_schema_serializer(component_name="SessionAttendance")
 class AttendanceSerializer(serializers.ModelSerializer):
+    confirm_secession = serializers.BooleanField(required=False, write_only=True)
+    secession_scope = serializers.ChoiceField(
+        choices=("session", "lecture"), required=False, write_only=True,
+        help_text="session: 이 차시만 퇴원. lecture 또는 생략: 기존 강의 전체 퇴원.",
+    )
     session = serializers.PrimaryKeyRelatedField(
         queryset=session_queryset_for_attendance_serializer(),
     )
@@ -72,7 +83,15 @@ class AttendanceSerializer(serializers.ModelSerializer):
             "lecture_color",
             "profile_photo_url",
             "name_highlight_clinic_target",
+            "confirm_secession",
+            "secession_scope",
         ]
+
+    def update(self, instance, validated_data):
+        # Withdrawal controls are consumed by the view's atomic workflow.
+        validated_data.pop("confirm_secession", None)
+        validated_data.pop("secession_scope", None)
+        return super().update(instance, validated_data)
 
     def validate(self, attrs):
         request = self.context.get("request")

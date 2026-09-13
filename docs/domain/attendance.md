@@ -7,6 +7,32 @@
 `apps/domains/attendance/views.py`의 `AttendanceViewSet`이 소유한다. 화면 동작은
 프런트엔드 [`docs/ATTENDANCE-ROSTER-SAFETY.md`](https://github.com/guswls3028-art/academy-frontend/blob/main/docs/ATTENDANCE-ROSTER-SAFETY.md)에 둔다.
 
+## 차시 퇴원과 강의 전체 퇴원
+
+출결·성적 화면의 퇴원 선택은 `PATCH /lectures/attendance/{id}/`에
+`status: SECESSION`, `confirm_secession: true`, `secession_scope`를 보낸다.
+새 화면은 매번 `session`(이 차시만)을 기본 선택하며 `lecture`(강의 전체)를
+명시적으로 선택할 수 있다. 구 클라이언트의 범위 생략은 기존 `lecture` 동작을
+유지하므로 서버를 먼저 배포하고 새 화면을 배포한다. 알 수 없는 범위는 400으로
+거절하며 일부 변경을 남기지 않는다.
+
+- `session`: 이 차시의 SessionEnrollment를 제거하고 출결 행은 SECESSION으로
+  보관한다. 현재 차시에만 속한 시험·과제 대상은 해제하되 다른 등록 차시와 공유한
+  시험 대상은 유지한다. 강의 Enrollment 상태, 다른 차시 출결·등록·시험·과제와
+  자동 수납은 유지한다.
+- `lecture`: 기존처럼 강의 Enrollment와 자동 수납을 비활성화하고 모든 출결을
+  SECESSION으로 바꾸며 시험·과제 대상을 해제한다. 학생 계정 자체의 전체 퇴원과는
+  구분된다. 이미 한 차시만 퇴원한 뒤에도 전체 퇴원을 선택할 수 있다.
+
+두 동작은 기존 성적·시청 진도·출결 메모를 보관하며 알림을 발송하지 않는다.
+동일 범위 반복 요청은 결과를 유지한다. 일반 출결 상태 변경으로 SECESSION을
+되돌리지는 않는다. 영상 접근·재생 토큰 회수는
+[차시 영상 권한](session-video-access.md)의 동일 membership 검사를 따른다.
+
+검증은 `test_attendance_destroy_roster_cleanup.py`의 범위·기존 전체 퇴원·수납·
+공유 시험 보존과 `tests/test_session_withdrawal_video_access.py`의 8차시 영상·
+ONLINE 토큰·진도 보존으로 수행한다.
+
 ## 목록 정렬과 페이지네이션
 
 목록은 항상 현재 요청의 테넌트와 삭제되지 않은 학생으로 먼저 범위를 제한한다.

@@ -912,8 +912,11 @@ EXPIRED → {} (종단)
 대부분은 상태기계가 아닌 분류 값이다. 단,
 `SECESSION`은 단순 출결
 분류가 아니라 퇴원 처리 workflow로 동작한다. 전환 시 `confirm_secession:
-true`가 필요하며 수강등록 비활성화, 자동 수납 비활성화, 시험/과제 대상
-제거가 함께 수행된다. `SECESSION` 진입 후 일반 PATCH/PUT으로 출석 분류를
+true`가 필요하다. `secession_scope=session`은 해당 차시 등록·시험/과제 대상만
+해제하고 강의 수강·다른 차시·수납을 유지한다. `lecture` 또는 구 클라이언트의
+범위 생략은 수강등록 비활성화, 자동 수납 비활성화, 전체 시험/과제 대상 제거를
+수행한다. 상세는 [attendance.md](attendance.md)의 차시 퇴원 계약을 따른다.
+`SECESSION` 진입 후 일반 PATCH/PUT으로 출석 분류를
 되돌릴 수 없으며, 재등록은 수강등록 lifecycle을 통해 새로 처리한다.
 
 **검증:** `apps/domains/attendance/tests/test_bulk_present_undo.py`는 직전 상태
