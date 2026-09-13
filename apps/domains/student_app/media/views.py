@@ -51,6 +51,7 @@ from academy.application.use_cases.student_video_access_context import (
     resolve_student_video_access_context,
     student_can_access_video,
 )
+from academy.adapters.db.django import repositories_video as video_repo
 from apps.domains.enrollment.selectors import learning_history_enrollments_for_student
 from apps.api.common.query_params import parse_query_bool
 from .serializers import (
@@ -258,6 +259,11 @@ class StudentVideoMeView(APIView):
             .order_by("lecture__title")
         )
         enrollment_by_lecture = {e.lecture_id: e.id for e in enrollments}
+        active_session_ids_by_lecture = {e.lecture_id: set() for e in enrollments}
+        for lecture_id, session_id in video_repo.video_session_memberships(
+            tenant_id=tenant.id, enrollment_ids=list(enrollment_by_lecture.values()),
+        ).values_list("enrollment__lecture_id", "session_id"):
+            active_session_ids_by_lecture[lecture_id].add(session_id)
         active_lecture_ids = set(enrollment_by_lecture)
         inactive_entitlements = []
         for candidate in active_inactive_video_entitlements_for_student(
@@ -353,6 +359,14 @@ class StudentVideoMeView(APIView):
             Session.objects.filter(lecture_id__in=all_lecture_ids)
             .values_list("id", flat=True)
         )
+        active_session_ids = set().union(*active_session_ids_by_lecture.values())
+        session_ids_all = [
+            session_id for session_id in session_ids_all
+            if session_id in active_session_ids
+            or (public_session is not None and session_id == public_session.id)
+            or any(session_id in ids for ids in inactive_session_ids_by_lecture.values())
+            or any(session_id in ids for ids in direct_session_ids_by_lecture.values())
+        ]
         video_summary_by_session = {}
         first_video_by_lecture = {}
         if session_ids_all:
@@ -393,6 +407,8 @@ class StudentVideoMeView(APIView):
             inactive_session_ids = inactive_session_ids_by_lecture.get(lec.id)
             direct_session_ids = direct_session_ids_by_lecture.get(lec.id)
             exact_session_ids = inactive_session_ids or direct_session_ids
+            if lec.id in active_session_ids_by_lecture:
+                exact_session_ids = active_session_ids_by_lecture[lec.id]
             if exact_session_ids is not None:
                 sessions = [s for s in sessions if s.id in exact_session_ids]
             sessions_data = [
@@ -578,7 +594,7 @@ class StudentVideoStatsView(APIView):
     """
     GET /student/video/me/stats/
     학생 영상 시청 통계 — 전체 진도율, 완료 영상 수, 강좌별 진도.
-    활성 수강 강좌의 READY 영상 전체를 분모로 삼고, VideoProgress는 진도만 보강한다.
+    활성 수강의 등록된 차시와 시스템 공개 공간의 READY 영상을 분모로 삼는다.
     """
 
     permission_classes = [IsAuthenticated, IsStudentOrParent]
@@ -631,6 +647,11 @@ class StudentVideoStatsView(APIView):
                 session__lecture_id__in=list(enrollments_by_lecture.keys()),
                 session__lecture__tenant=tenant,
                 status=Video.Status.READY,
+            ).filter(
+                Q(session_id__in=video_repo.video_session_memberships(
+                    tenant_id=tenant.id, enrollment_ids=enrollment_ids,
+                ).values("session_id"))
+                | Q(session__lecture__is_system=True)
             ).values("id", "duration", "session__lecture_id")
         )
 
