@@ -44775,7 +44775,7 @@
     },
     "/api/v1/student/video/me/stats/": {
       "get": {
-        "description": "GET /student/video/me/stats/\n학생 영상 시청 통계 — 전체 진도율, 완료 영상 수, 강좌별 진도.\n활성 수강 강좌의 READY 영상 전체를 분모로 삼고, VideoProgress는 진도만 보강한다.",
+        "description": "GET /student/video/me/stats/\n학생 영상 시청 통계 — 전체 진도율, 완료 영상 수, 강좌별 진도.\n활성 수강의 등록된 차시와 시스템 공개 공간의 READY 영상을 분모로 삼는다.",
         "operationId": "student_video_me_stats_retrieve",
         "responses": {
           "200": {

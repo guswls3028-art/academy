@@ -72,6 +72,11 @@ class YouTubeVideoSourceTests(TestCase):
             lecture=self.lecture,
             status="ACTIVE",
         )
+        apps.get_model("enrollment", "SessionEnrollment").objects.create(
+            tenant=self.tenant,
+            enrollment=enrollment,
+            session=self.session,
+        )
         TenantMembership.ensure_active(
             tenant=self.tenant,
             user=student_user,

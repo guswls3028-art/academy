@@ -145,6 +145,12 @@ def get_effective_access_mode(
     """
     Effective access mode considering admin overrides.
     """
+    if (
+        video.visibility != Video.Visibility.PUBLIC
+        and not video_repo.session_enrollment_exists(video.session, enrollment)
+    ):
+        return AccessMode.BLOCKED
+
     perm = video_repo.video_access_get(video, enrollment)
 
     if perm and (

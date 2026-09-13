@@ -344,9 +344,28 @@ def session_get_by_id_with_lecture(session_id):
     return Session.objects.select_related("lecture").get(id=session_id)
 
 
-def session_enrollment_exists(session, enrollment) -> bool:
+def video_session_memberships(*, tenant_id, enrollment_ids):
+    """Exact tenant/lecture/session membership; attendance never grants access."""
+    from django.db.models import F
     from apps.domains.enrollment.models import SessionEnrollment
-    return SessionEnrollment.objects.filter(session=session, enrollment=enrollment).exists()
+
+    return SessionEnrollment.objects.filter(
+        tenant_id=tenant_id,
+        enrollment_id__in=enrollment_ids,
+        enrollment__tenant_id=tenant_id,
+        enrollment__student__tenant_id=tenant_id,
+        enrollment__student__deleted_at__isnull=True,
+        session__lecture__tenant_id=tenant_id,
+        session__lecture_id=F("enrollment__lecture_id"),
+    )
+
+
+def session_enrollment_exists(session, enrollment) -> bool:
+    if session is None or enrollment is None:
+        return False
+    return video_session_memberships(
+        tenant_id=enrollment.tenant_id, enrollment_ids=[enrollment.id],
+    ).filter(session=session).exists()
 
 
 def video_access_get(video, enrollment):
